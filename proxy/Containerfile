@@ -1,0 +1,17 @@
+FROM python:3.12-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN pip install --no-cache-dir mitmproxy google-auth pyyaml requests
+
+COPY addons/ /addons/
+COPY metadata_server.py /app/metadata_server.py
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+RUN mkdir -p /var/log/proxy
+
+EXPOSE 8080 8081 9090
+CMD ["/start.sh"]

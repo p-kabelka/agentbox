@@ -1,0 +1,4 @@
+secrets/credentials.json
+secrets/*.json
+secrets/*.pem
+.env

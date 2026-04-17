@@ -1,0 +1,30 @@
+FROM node:22-slim
+
+# proxychains-ng intercepts connect() at the libc level via LD_PRELOAD.
+# This makes ALL outbound connections from any language/runtime go through
+# the proxy — including Node.js's built-in http/https which ignores HTTPS_PROXY.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        proxychains4 \
+        curl \
+        git \
+        ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Default harness: Claude Code.
+# To add more harnesses, build FROM this image or extend via compose override.
+RUN npm install -g @anthropic-ai/claude-code
+
+# Uncomment to pre-install additional harnesses:
+# RUN npm install -g opencode-ai
+# RUN npm install -g @openai/codex
+
+COPY proxychains.conf /etc/proxychains4.conf
+COPY start.sh /start.sh
+RUN chmod +x /start.sh
+
+RUN git config --global user.email "agent@sandbox" && \
+    git config --global user.name "Agent"
+
+WORKDIR /workspace
+CMD ["/start.sh"]
