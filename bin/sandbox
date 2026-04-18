@@ -175,6 +175,7 @@ def write_override(session_dir: Path) -> None:
         p.get("name") == "vertex" and p.get("enabled")
         for p in proxy_cfg.get("providers", [])
     )
+    proxy_volumes = [f"{session_dir}/config/proxy.yaml:/config/proxy.yaml:ro,Z"]
     if vertex_enabled:
         gcloud = Path.home() / ".config" / "gcloud"
         if gcloud.is_dir():
@@ -190,7 +191,7 @@ def write_override(session_dir: Path) -> None:
         "services": {
             "proxy": {
                 "ports": [f"127.0.0.1:{web_port}:8081"],
-                "volumes": [f"{session_dir}/config/proxy.yaml:/config/proxy.yaml:ro,Z"],
+                "volumes": proxy_volumes,
             },
             "agent": agent,
         }
