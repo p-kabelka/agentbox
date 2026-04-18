@@ -156,7 +156,10 @@ def write_override(session_dir: Path) -> None:
         f"      - {session_dir}/config/proxy.yaml:/config/proxy.yaml:ro,Z",
     ]
 
+    dotfiles_dir = session_dir / "dotfiles"
     volume_lines = ["      - proxy-ca:/proxy-ca:ro,Z"]
+    if dotfiles_dir.is_dir():
+        volume_lines.append(f"      - {dotfiles_dir}:/sandbox-dotfiles:ro,Z")
     if has_bundle:
         volume_lines.append(f"      - {session_dir}/source.bundle:/source/project.bundle:ro,Z")
     if has_output:
@@ -262,12 +265,25 @@ def cmd_run(args) -> None:
     (session_dir / "config").mkdir(exist_ok=True)
 
     config_file = session_dir / "config" / "proxy.yaml"
+    agent_config_file = session_dir / "config" / "agent.yaml"
+    preset_dir = SANDBOX_HOME / "presets" / args.preset
+    if not (preset_dir / "proxy.yaml").is_file():
+        die(f"preset '{args.preset}' not found at {preset_dir}")
     if not config_file.is_file():
-        preset_file = SANDBOX_HOME / "presets" / args.preset / "proxy.yaml"
-        if not preset_file.is_file():
-            die(f"preset '{args.preset}' not found at {preset_file}")
-        shutil.copy(preset_file, config_file)
+        shutil.copy(preset_dir / "proxy.yaml", config_file)
         print(f"    Copied preset '{args.preset}' — edit .sandbox/sessions/{name}/config/proxy.yaml to enable providers.")
+    if not agent_config_file.is_file() and (preset_dir / "agent.yaml").is_file():
+        shutil.copy(preset_dir / "agent.yaml", agent_config_file)
+
+    # Write dotfiles from agent config into session dotfiles directory
+    dotfiles = load_yaml(agent_config_file).get("dotfiles", {}) if agent_config_file.is_file() else {}
+    if dotfiles:
+        dotfiles_dir = session_dir / "dotfiles"
+        for rel_path, content in dotfiles.items():
+            clean = rel_path.lstrip("~").lstrip("/")
+            dest = dotfiles_dir / clean
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text(content or "")
 
     git_available = False
     use_git = not args.no_git
@@ -507,19 +523,22 @@ def cmd_preset(args) -> None:
                 print(p.name)
 
     elif sub == "edit":
-        target = SANDBOX_HOME / "presets" / args.name / "proxy.yaml"
+        filename = f"{args.file}.yaml"
+        target = SANDBOX_HOME / "presets" / args.name / filename
         if not target.is_file():
-            die(f"preset '{args.name}' not found at {target}")
+            die(f"preset '{args.name}' {filename} not found at {target}")
         subprocess.run([os.environ.get("EDITOR", "vi"), str(target)], check=True)
-        print("Preset saved. Existing sessions: edit .sandbox/sessions/<name>/config/proxy.yaml and restart the proxy.")
+        print(f"Preset saved ({filename}).")
 
     elif sub == "copy":
-        src_file = SANDBOX_HOME / "presets" / args.src / "proxy.yaml"
-        if not src_file.is_file():
+        src_dir = SANDBOX_HOME / "presets" / args.src
+        if not (src_dir / "proxy.yaml").is_file():
             die(f"source preset '{args.src}' not found")
         dst_dir = SANDBOX_HOME / "presets" / args.dst
         dst_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src_file, dst_dir / "proxy.yaml")
+        shutil.copy(src_dir / "proxy.yaml", dst_dir / "proxy.yaml")
+        if (src_dir / "agent.yaml").is_file():
+            shutil.copy(src_dir / "agent.yaml", dst_dir / "agent.yaml")
         print(f"Created preset '{args.dst}' from '{args.src}'. Edit: sandbox preset edit {args.dst}")
 
 
@@ -580,10 +599,12 @@ def main() -> None:
     ma = mtsub.add_parser("add");    ma.add_argument("spec", metavar="SRC[:DST]")
     mr = mtsub.add_parser("remove"); mr.add_argument("dst",  metavar="DST")
 
-    ps    = sub.add_parser("preset", help="Manage provider presets")
+    ps    = sub.add_parser("preset", help="Manage presets")
     pssub = ps.add_subparsers(dest="subcmd")
     pssub.add_parser("list")
-    pe = pssub.add_parser("edit"); pe.add_argument("name", nargs="?", default=SANDBOX_PRESET)
+    pe = pssub.add_parser("edit", help="Edit proxy or agent config of a preset")
+    pe.add_argument("file", choices=["proxy", "agent"])
+    pe.add_argument("name", nargs="?", default=SANDBOX_PRESET)
     pc = pssub.add_parser("copy"); pc.add_argument("src"); pc.add_argument("dst")
 
     args = p.parse_args()

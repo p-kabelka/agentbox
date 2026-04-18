@@ -18,6 +18,9 @@ if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     echo "[agent] When done: git push output HEAD"
 fi
 
+# Apply preset dotfiles to home directory
+[ -d /sandbox-dotfiles ] && cp -rT /sandbox-dotfiles ~/
+
 [ "${1:-}" = "--shell" ] && exec /bin/bash
 
 # krun's virtio-console sends \n for Enter instead of \r. Node.js readline in

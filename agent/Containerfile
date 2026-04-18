@@ -5,14 +5,11 @@ RUN dnf install -y \
         git \
         ca-certificates \
         proxychains-ng \
+        vim \
     && dnf clean all
 
 COPY claude /usr/local/bin/claude
 RUN chmod +x /usr/local/bin/claude
-
-# Uncomment to pre-install additional harnesses:
-# RUN npm install -g opencode-ai
-# RUN npm install -g @openai/codex
 
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
