@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""
-sandbox — isolated agent workspace manager
-
-Global install: ~/.agent-sandbox/bin/sandbox
-Setup:          ./install.sh   (from the cloned repo)
-First use:      sandbox preset edit && sandbox build
-Start project:  cd your-project && sandbox run
-"""
+"""sandbox — isolated agent workspace manager"""
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import shutil
@@ -22,64 +16,8 @@ from typing import NoReturn
 
 import yaml
 
-SANDBOX_HOME   = Path(os.environ.get("AGENT_SANDBOX_HOME",  Path.home() / ".agent-sandbox"))
+SANDBOX_HOME   = Path(os.environ.get("AGENT_SANDBOX_HOME", Path.home() / ".agent-sandbox"))
 SANDBOX_PRESET = os.environ.get("AGENT_SANDBOX_PRESET", "default")
-
-USAGE = """\
-sandbox — isolated agent workspace manager
-
-SETUP COMMANDS
-  build                    Build proxy + agent images (run once; reused by all projects)
-  update                   Rebuild images without cache (after updating the repo)
-  preset list              List available presets
-  preset edit [NAME]       Edit a preset in $EDITOR (default: $AGENT_SANDBOX_PRESET)
-  preset copy SRC DST      Copy a preset
-
-PROJECT COMMANDS
-  run [DIR] [OPTIONS]      Create and start a sandbox  ← main entry point
-  start                    Resume an existing sandbox (proxy background, agent foreground)
-  stop                     Stop all containers for this project
-  shell                    Open an interactive shell inside the agent container
-  logs                     Tail the structured proxy access log
-  web                      Print the mitmweb traffic-monitor URL
-  allow <HOST>             Add a host to the egress allowlist; restart proxy
-  deny  <HOST>             Remove a host from the egress allowlist; restart proxy
-  fetch [REF]              Safely fetch agent output to refs/sandbox/REF (hooks disabled)
-  mount list               List extra reference mounts for this sandbox
-  mount add  SRC[:DST]     Add a read-only reference mount at /context/DST
-  mount remove DST         Remove a reference mount by its /context/DST name
-  status                   List running sandboxes on this machine
-
-OPTIONS for 'run'
-  --preset  NAME           Use named preset           (default: $AGENT_SANDBOX_PRESET)
-  --branch  BRANCH         Git branch to snapshot     (default: current branch)
-  --harness HARNESS        Agent harness binary        (default: claude)
-  --no-git                 Skip git isolation; mount working directory directly
-  --mount   SRC[:DST]      Add a read-only reference mount at /context/DST (repeatable)
-                           DST defaults to the source directory's basename
-
-ENVIRONMENT
-  AGENT_SANDBOX_HOME       Override install location      (default: ~/.agent-sandbox)
-  AGENT_SANDBOX_PRESET     Override default preset name   (default: default)
-  AGENT_HARNESS            Override default harness binary (default: claude)
-  ANTHROPIC_API_KEY        API keys — set in shell; never stored in project files
-  OPENAI_API_KEY
-  VERTEX_PROJECT_ID / VERTEX_REGION
-
-EXAMPLES
-  sandbox build
-  sandbox preset edit
-  export ANTHROPIC_API_KEY=sk-ant-...
-
-  cd ~/projects/my-app
-  sandbox run                                    # snapshot current branch, start sandbox
-  sandbox run --preset webdev --harness opencode
-  sandbox allow pypi.org                         # open extra egress for this project
-  sandbox logs                                   # watch proxy access log
-  sandbox fetch agent-work                       # pull agent commits safely
-  git merge refs/sandbox/agent-work
-  sandbox stop
-"""
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -90,20 +28,17 @@ def die(msg: str) -> NoReturn:
 
 
 def project_name(path: Path) -> str:
-    """Produce a compose-safe project name from a directory path."""
     name = re.sub(r"[^a-z0-9]+", "-", path.resolve().name.lower()).strip("-")
     return name or "sandbox"
 
 
 def free_port() -> int:
-    """Find a free TCP port on localhost."""
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         return s.getsockname()[1]
 
 
 def find_sandbox_dir() -> Path | None:
-    """Walk up the directory tree to find the nearest project with .sandbox/."""
     d = Path.cwd()
     while d != d.parent:
         if (d / ".sandbox" / "compose.override.yaml").is_file():
@@ -113,18 +48,14 @@ def find_sandbox_dir() -> Path | None:
 
 
 def require_sandbox() -> Path:
-    """Return the project directory containing .sandbox/, or exit."""
     p = find_sandbox_dir()
     if p is None:
-        die(
-            "no .sandbox/ found in the current directory or any parent.\n"
-            "       Run 'sandbox run' to create one."
-        )
-    return p  # type: ignore[return-value]  # die() is NoReturn; mypy doesn't track it
+        die("no .sandbox/ found in this directory or any parent.\n"
+            "       Run 'sandbox run' to create one.")
+    return p  # type: ignore[return-value]
 
 
 def compose(project_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
-    """Run podman compose with the base + project override files."""
     sandbox_dir = project_dir / ".sandbox"
     env = {
         **os.environ,
@@ -143,13 +74,10 @@ def compose(project_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProc
 
 
 def wait_healthy(project_dir: Path) -> None:
-    """Block until the proxy's mitmweb UI responds (signals CA cert is ready too)."""
+    web_port = read_port(project_dir / ".sandbox")
     print("==> Waiting for proxy", end="", flush=True)
     for _ in range(40):
-        r = compose(
-            project_dir, "exec", "proxy", "curl", "-sf", "http://localhost:8081/",
-            capture_output=True,
-        )
+        r = subprocess.run(["curl", "-so", "/dev/null", f"http://localhost:{web_port}/"], capture_output=True)
         if r.returncode == 0:
             print(" ready.")
             return
@@ -161,7 +89,6 @@ def wait_healthy(project_dir: Path) -> None:
 
 
 def read_port(sandbox_dir: Path) -> int | None:
-    """Read SANDBOX_WEB_PORT from .sandbox/.env, or None if not set."""
     env_file = sandbox_dir / ".env"
     if env_file.is_file():
         for line in env_file.read_text().splitlines():
@@ -181,7 +108,6 @@ def save_yaml(path: Path, cfg: dict) -> None:
 
 
 def read_mounts(sandbox_dir: Path) -> list[tuple[str, str]]:
-    """Read extra reference mounts from .sandbox/mounts.yaml → [(src, dst), ...]."""
     mounts_file = sandbox_dir / "mounts.yaml"
     if not mounts_file.is_file():
         return []
@@ -190,7 +116,6 @@ def read_mounts(sandbox_dir: Path) -> list[tuple[str, str]]:
 
 
 def save_mounts(sandbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
-    """Persist extra reference mounts to .sandbox/mounts.yaml."""
     data = [{"src": src, "dst": dst} for src, dst in mounts]
     (sandbox_dir / "mounts.yaml").write_text(
         yaml.dump(data, default_flow_style=False, allow_unicode=True)
@@ -198,12 +123,6 @@ def save_mounts(sandbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
 
 
 def write_override(sandbox_dir: Path) -> None:
-    """(Re)generate compose.override.yaml from current sandbox state.
-
-    Called by both cmd_run (initial creation) and cmd_mount (live update).
-    Source of truth for structural state: .env (port), presence of source.bundle /
-    output.git (git mode), and mounts.yaml (extra reference mounts).
-    """
     project_dir = sandbox_dir.parent
     web_port    = read_port(sandbox_dir) or 8081
     has_bundle  = (sandbox_dir / "source.bundle").is_file()
@@ -215,102 +134,75 @@ def write_override(sandbox_dir: Path) -> None:
     if has_output:
         volume_lines.append("      - ./output.git:/output/repo.git:Z")
     if not has_bundle and not has_output:
-        # --no-git mode: direct directory mount
         volume_lines.append(f"      - {project_dir}:/workspace:Z")
     for src, dst in read_mounts(sandbox_dir):
         volume_lines.append(f"      - {src}:/context/{dst}:ro,Z")
 
-    override = "\n".join([
-        "# Generated by sandbox — edit freely. Re-run 'sandbox run' to regenerate.",
-        "# config/proxy.yaml and mounts.yaml are never overwritten by regeneration.",
-        "",
+    (sandbox_dir / "compose.override.yaml").write_text("\n".join([
+        "# Generated by sandbox — re-run 'sandbox run' to regenerate.",
         "services:",
-        "",
         "  proxy:",
         "    ports:",
         f'      - "127.0.0.1:{web_port}:8081"',
-        "",
         "  agent:",
-        "    # runtime: krun    # uncomment for VM-level KVM isolation (requires krun)",
+        "    # runtime: krun    # uncomment for VM-level KVM isolation",
         "    volumes:",
         *volume_lines,
         "",
-    ])
-    (sandbox_dir / "compose.override.yaml").write_text(override)
+    ]))
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-def cmd_build(_: list[str]) -> None:
-    print("==> Building proxy image  (localhost/agent-sandbox-proxy:latest)...")
-    subprocess.run(
-        ["podman", "build", "-t", "localhost/agent-sandbox-proxy:latest",
-         str(SANDBOX_HOME / "proxy")],
-        check=True,
-    )
-    print("==> Building agent image  (localhost/agent-sandbox-agent:latest)...")
-    subprocess.run(
-        ["podman", "build", "-t", "localhost/agent-sandbox-agent:latest",
-         str(SANDBOX_HOME / "agent")],
-        check=True,
-    )
-    print("==> Done. Images are shared by all sandboxes.")
-    print("    Run 'sandbox update' after pulling a new version of agent-sandbox.")
-
-
-def cmd_update(_: list[str]) -> None:
-    print("==> Rebuilding images without cache...")
+def _build_images(no_cache: bool = False) -> None:
+    extra = ["--no-cache"] if no_cache else []
     for tag, ctx in [
         ("localhost/agent-sandbox-proxy:latest", SANDBOX_HOME / "proxy"),
         ("localhost/agent-sandbox-agent:latest", SANDBOX_HOME / "agent"),
     ]:
-        subprocess.run(["podman", "build", "--no-cache", "-t", tag, str(ctx)], check=True)
-    print("==> Done. Running sandboxes will use the new images on next restart.")
+        subprocess.run(["podman", "build", *extra, "-t", tag, str(ctx)], check=True)
 
 
-def cmd_run(argv: list[str]) -> None:
-    # ── Argument parsing ──────────────────────────────────────────────────────
-    project_dir_arg: str | None = None
-    preset  = SANDBOX_PRESET
-    branch  = ""
-    harness = os.environ.get("AGENT_HARNESS", "claude")
-    use_git = True
-    mounts: list[str] = []
+def cmd_build(args) -> None:
+    print("==> Building images...")
+    _build_images()
+    print("==> Done. Run 'sandbox update' after pulling a new version.")
 
-    i = 0
-    while i < len(argv):
-        a = argv[i]
-        if   a in ("--preset",  ) and i + 1 < len(argv): preset  = argv[i + 1]; i += 2
-        elif a in ("--branch",  ) and i + 1 < len(argv): branch  = argv[i + 1]; i += 2
-        elif a in ("--harness", ) and i + 1 < len(argv): harness = argv[i + 1]; i += 2
-        elif a in ("--mount",   ) and i + 1 < len(argv): mounts.append(argv[i + 1]); i += 2
-        elif a == "--no-git": use_git = False; i += 1
-        elif a.startswith("-"):  die(f"unknown option: {a}")
-        else: project_dir_arg = a; i += 1
 
-    project_dir = Path(project_dir_arg).resolve() if project_dir_arg else Path.cwd()
+def cmd_update(args) -> None:
+    print("==> Rebuilding images without cache...")
+    _build_images(no_cache=True)
+    print("==> Done.")
+
+
+def _launch(project_dir: Path) -> None:
+    compose(project_dir, "up", "-d", "proxy", check=True)
+    wait_healthy(project_dir)
+    web_port = read_port(project_dir / ".sandbox")
+    if web_port:
+        print(f"  Traffic monitor: http://localhost:{web_port}  |  sandbox logs  |  sandbox fetch [ref]")
+    result = compose(project_dir, "run", "--rm", "agent")
+    sys.exit(result.returncode)
+
+
+def cmd_run(args) -> None:
+    project_dir = Path(args.dir).resolve() if args.dir else Path.cwd()
     sandbox_dir = project_dir / ".sandbox"
-    pname       = project_name(project_dir)
 
-    print(f"==> Initializing sandbox for: {project_dir}  (project: {pname})")
-
+    print(f"==> Initializing sandbox: {project_dir}")
     sandbox_dir.mkdir(parents=True, exist_ok=True)
     (sandbox_dir / "config").mkdir(exist_ok=True)
 
-    # ── Preset ────────────────────────────────────────────────────────────────
     config_file = sandbox_dir / "config" / "proxy.yaml"
     if not config_file.is_file():
-        preset_file = SANDBOX_HOME / "presets" / preset / "proxy.yaml"
+        preset_file = SANDBOX_HOME / "presets" / args.preset / "proxy.yaml"
         if not preset_file.is_file():
-            die(f"preset '{preset}' not found at {preset_file}")
+            die(f"preset '{args.preset}' not found at {preset_file}")
         shutil.copy(preset_file, config_file)
-        print(f"    Preset '{preset}' copied to .sandbox/config/proxy.yaml")
-        print("    Edit it to enable providers and add extra_allowed_hosts.")
-    else:
-        print("    Using existing .sandbox/config/proxy.yaml")
+        print(f"    Copied preset '{args.preset}' → edit .sandbox/config/proxy.yaml to enable providers.")
 
-    # ── Git isolation ─────────────────────────────────────────────────────────
     git_available = False
+    use_git = not args.no_git
     if use_git:
         in_repo = subprocess.run(
             ["git", "-C", str(project_dir), "rev-parse", "--git-dir"],
@@ -319,21 +211,18 @@ def cmd_run(argv: list[str]) -> None:
 
         if in_repo:
             git_available = True
-
+            branch = args.branch
             if not branch:
-                r = subprocess.run(
+                branch = subprocess.run(
                     ["git", "-C", str(project_dir), "branch", "--show-current"],
                     capture_output=True, text=True,
-                )
-                branch = r.stdout.strip()
-
+                ).stdout.strip()
             if not branch:  # detached HEAD
-                r = subprocess.run(
+                branch = subprocess.run(
                     ["git", "-C", str(project_dir), "rev-parse", "--short", "HEAD"],
                     capture_output=True, text=True, check=True,
-                )
-                branch = r.stdout.strip()
-                print(f"    Detached HEAD; snapshotting commit: {branch}")
+                ).stdout.strip()
+                print(f"    Detached HEAD — snapshotting commit {branch}")
 
             print(f"==> Creating source bundle (branch: {branch})...")
             subprocess.run(
@@ -341,34 +230,24 @@ def cmd_run(argv: list[str]) -> None:
                  str(sandbox_dir / "source.bundle"), "HEAD", branch],
                 check=True,
             )
-
             output_git = sandbox_dir / "output.git"
             if not output_git.exists():
-                print("==> Initializing output bare repo...")
-                subprocess.run(
-                    ["git", "init", "--bare", str(output_git), "--quiet"],
-                    check=True,
-                )
-                # Make hooks/ read-only so the agent cannot plant host-side hooks
-                (output_git / "hooks").chmod(0o555)
+                subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
+                (output_git / "hooks").mkdir(exist_ok=True)
+                (output_git / "hooks").chmod(0o555)  # block agent from planting host-side hooks
         else:
             print("    No git repo found; falling back to --no-git mode.")
             use_git = False
 
-    # ── Port ──────────────────────────────────────────────────────────────────
     web_port = read_port(sandbox_dir) or free_port()
-
-    # ── .sandbox/.env ─────────────────────────────────────────────────────────
     (sandbox_dir / ".env").write_text(
-        f"SANDBOX_WEB_PORT={web_port}\n"
-        f"AGENT_HARNESS={harness}\n"
+        f"SANDBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\n"
     )
 
-    # ── Persist --mount args to mounts.yaml, then write override ─────────────
-    if mounts:
-        existing     = read_mounts(sandbox_dir)
+    if args.mounts:
+        existing = read_mounts(sandbox_dir)
         existing_dsts = {d for _, d in existing}
-        for spec in mounts:
+        for spec in args.mounts:
             src_str, _, dst = spec.partition(":")
             src = str(Path(src_str).resolve())
             dst = dst or Path(src_str).name
@@ -381,68 +260,36 @@ def cmd_run(argv: list[str]) -> None:
 
     write_override(sandbox_dir)
 
-    # ── .gitignore ────────────────────────────────────────────────────────────
     if git_available:
         gitignore = project_dir / ".gitignore"
         existing  = gitignore.read_text() if gitignore.is_file() else ""
         if ".sandbox/" not in existing.splitlines():
             with gitignore.open("a") as f:
                 f.write(".sandbox/\n")
-            print("    Added .sandbox/ to .gitignore")
 
-    # ── Launch ────────────────────────────────────────────────────────────────
-    print("==> Starting proxy (background)...")
-    compose(project_dir, "up", "-d", "proxy", check=True)
-
-    wait_healthy(project_dir)
-
-    print()
-    print(f"  Traffic monitor : http://localhost:{web_port}")
-    print("  Logs            : sandbox logs")
-    print("  Open egress     : sandbox allow <host>")
-    print("  Get output      : sandbox fetch [ref]   (after agent pushes)")
-    print()
-
-    print(f"==> Starting {harness} (interactive)...")
-    result = compose(project_dir, "run", "--rm", "agent")
-    sys.exit(result.returncode)
+    _launch(project_dir)
 
 
-def cmd_start(_: list[str]) -> None:
+def cmd_start(args) -> None:
+    _launch(require_sandbox())
+
+
+def cmd_stop(args) -> None:
     project_dir = require_sandbox()
-    compose(project_dir, "up", "-d", "proxy", check=True)
-    wait_healthy(project_dir)
-    web_port = read_port(project_dir / ".sandbox")
-    if web_port:
-        print(f"  Traffic monitor : http://localhost:{web_port}")
-    print()
-    result = compose(project_dir, "run", "--rm", "agent")
-    sys.exit(result.returncode)
-
-
-def cmd_stop(_: list[str]) -> None:
-    project_dir = require_sandbox()
-    print(f"==> Stopping sandbox for: {project_dir}")
     compose(project_dir, "down", check=True)
 
 
-def cmd_shell(_: list[str]) -> None:
-    project_dir = require_sandbox()
-    print("==> Opening shell in agent container (proxy active; all traffic monitored)...")
-    result = compose(project_dir, "run", "--rm", "agent", "/start.sh", "--shell")
+def cmd_shell(args) -> None:
+    result = compose(require_sandbox(), "run", "--rm", "agent", "/start.sh", "--shell")
     sys.exit(result.returncode)
 
 
-def cmd_logs(_: list[str]) -> None:
-    project_dir = require_sandbox()
-    print("==> Tailing proxy access log (Ctrl+C to stop)...")
-    print("    Hint: pipe through 'jq .' for pretty JSON")
-    print()
-    result = compose(project_dir, "exec", "proxy", "tail", "-f", "/var/log/proxy/access.log")
+def cmd_logs(args) -> None:
+    result = compose(require_sandbox(), "exec", "proxy", "tail", "-f", "/var/log/proxy/access.log")
     sys.exit(result.returncode)
 
 
-def cmd_web(_: list[str]) -> None:
+def cmd_web(args) -> None:
     project_dir = require_sandbox()
     web_port = read_port(project_dir / ".sandbox")
     if not web_port:
@@ -450,159 +297,90 @@ def cmd_web(_: list[str]) -> None:
     print(f"http://localhost:{web_port}")
 
 
-def cmd_allow(argv: list[str]) -> None:
-    if not argv:
-        die("Usage: sandbox allow <host>")
+def _update_allowlist(host: str, add: bool) -> None:
     project_dir = require_sandbox()
-    host        = argv[0]
     config_path = project_dir / ".sandbox" / "config" / "proxy.yaml"
-
     cfg   = load_yaml(config_path)
     hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
-
-    if host not in hosts:
-        hosts.append(host)
-        save_yaml(config_path, cfg)
-        print(f"Added '{host}' to extra_allowed_hosts")
+    if add:
+        if host not in hosts:
+            hosts.append(host)
+            save_yaml(config_path, cfg)
+            print(f"Added '{host}' to allowlist.")
+        else:
+            print(f"'{host}' already in allowlist.")
     else:
-        print(f"'{host}' is already in extra_allowed_hosts")
-
-    print("==> Restarting proxy to apply allowlist change...")
+        if host in hosts:
+            hosts.remove(host)
+            cfg["extra_allowed_hosts"] = hosts
+            save_yaml(config_path, cfg)
+            print(f"Removed '{host}' from allowlist.")
+        else:
+            print(f"'{host}' not in allowlist.")
     compose(project_dir, "restart", "proxy", check=True)
     wait_healthy(project_dir)
 
 
-def cmd_deny(argv: list[str]) -> None:
-    if not argv:
-        die("Usage: sandbox deny <host>")
+def cmd_allow(args) -> None:
+    _update_allowlist(args.host, add=True)
+
+
+def cmd_deny(args) -> None:
+    _update_allowlist(args.host, add=False)
+
+
+def cmd_fetch(args) -> None:
     project_dir = require_sandbox()
-    host        = argv[0]
-    config_path = project_dir / ".sandbox" / "config" / "proxy.yaml"
-
-    cfg   = load_yaml(config_path)
-    hosts: list[str] = cfg.get("extra_allowed_hosts", [])
-
-    if host in hosts:
-        hosts.remove(host)
-        cfg["extra_allowed_hosts"] = hosts
-        save_yaml(config_path, cfg)
-        print(f"Removed '{host}' from extra_allowed_hosts")
-    else:
-        print(f"'{host}' was not in extra_allowed_hosts")
-
-    print("==> Restarting proxy to apply allowlist change...")
-    compose(project_dir, "restart", "proxy", check=True)
-    wait_healthy(project_dir)
-
-
-def cmd_fetch(argv: list[str]) -> None:
-    project_dir = require_sandbox()
-    ref         = argv[0] if argv else "agent-work"
     output_git  = project_dir / ".sandbox" / "output.git"
-
     if not output_git.is_dir():
-        die(
-            f"{output_git} not found.\n"
-            "       Was this sandbox started with git isolation (no --no-git)?"
-        )
-
-    print(f"==> Fetching '{ref}' from sandbox output repo...")
-    print("    (core.hooksPath=/dev/null — any hooks the agent wrote are ignored)")
-    print()
-
+        die(f"{output_git} not found. Was this sandbox started without --no-git?")
     subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null",
-         "fetch", str(output_git), f"{ref}:refs/sandbox/{ref}"],
+         "fetch", str(output_git), f"{args.ref}:refs/sandbox/{args.ref}"],
         check=True,
     )
-
-    print()
-    print(f"  Fetched to : refs/sandbox/{ref}")
-    print()
-    print(f"  Review  : git log refs/sandbox/{ref}")
-    print(f"  Diff    : git diff HEAD refs/sandbox/{ref}")
-    print(f"  Apply   : git merge refs/sandbox/{ref}")
-    print( "            git cherry-pick"
-          f" $(git merge-base HEAD refs/sandbox/{ref})..refs/sandbox/{ref}")
-    print()
-    print("  NOTE: Review commits before merging. If the agent modified a tracked")
-    print("        hooks/ directory (e.g. .husky/), inspect those files first.")
+    print(f"Fetched to refs/sandbox/{args.ref} — review with 'git log refs/sandbox/{args.ref}' before merging.")
 
 
-def cmd_mount(argv: list[str]) -> None:
-    sub  = argv[0] if argv else "list"
-    rest = argv[1:]
-
+def cmd_mount(args) -> None:
+    sub = args.subcmd or "list"
     project_dir = require_sandbox()
     sandbox_dir = project_dir / ".sandbox"
 
     if sub == "list":
         mounts = read_mounts(sandbox_dir)
         if not mounts:
-            print("No extra reference mounts.")
-            print("Add one: sandbox mount add /path/to/project[:name]")
+            print("No extra reference mounts. Add one: sandbox mount add /path/to/project[:name]")
         else:
-            print("Extra reference mounts (read-only inside agent):")
             for src, dst in mounts:
-                tag = "" if Path(src).exists() else "  [PATH MISSING]"
+                tag = "  [MISSING]" if not Path(src).exists() else ""
                 print(f"  {src}  →  /context/{dst}{tag}")
-            print()
-            print("Mounted paths are visible to the agent at /context/<name>.")
 
     elif sub == "add":
-        if not rest:
-            die("Usage: sandbox mount add SRC[:DST]\n"
-                "       DST defaults to the source directory's basename")
-        spec    = rest[0]
-        src_str, _, dst = spec.partition(":")
+        src_str, _, dst = args.spec.partition(":")
         src = str(Path(src_str).resolve())
         dst = dst or Path(src_str).name
-
         if not Path(src).exists():
             die(f"source path does not exist: {src}")
-
         mounts = read_mounts(sandbox_dir)
         if any(d == dst for _, d in mounts):
-            die(
-                f"/context/{dst} is already mounted.\n"
-                f"       Remove it first: sandbox mount remove {dst}"
-            )
-
+            die(f"/context/{dst} already mounted. Remove first: sandbox mount remove {dst}")
         mounts.append((src, dst))
         save_mounts(sandbox_dir, mounts)
         write_override(sandbox_dir)
-
-        print(f"Added:  {src}  →  /context/{dst}")
-        print()
-        print("The override file is updated. Restart the agent to mount it:")
-        print("  sandbox start")
+        print(f"Added {src} → /context/{dst}. Restart agent: sandbox start")
 
     elif sub == "remove":
-        if not rest:
-            die("Usage: sandbox mount remove DST")
-        dst    = rest[0]
         mounts = read_mounts(sandbox_dir)
-        before = len(mounts)
-        mounts = [(s, d) for s, d in mounts if d != dst]
-        if len(mounts) == before:
-            die(
-                f"no mount with destination '{dst}' found.\n"
-                f"       List mounts: sandbox mount list"
-            )
-        save_mounts(sandbox_dir, mounts)
+        filtered = [(s, d) for s, d in mounts if d != args.dst]
+        if len(filtered) == len(mounts):
+            die(f"no mount '{args.dst}' found. List mounts: sandbox mount list")
+        save_mounts(sandbox_dir, filtered)
         write_override(sandbox_dir)
-
-        print(f"Removed mount for /context/{dst}")
-        print()
-        print("Restart the agent to apply the change:")
-        print("  sandbox start")
-
-    else:
-        die(f"unknown mount subcommand: '{sub}'  (list | add | remove)")
+        print(f"Removed /context/{args.dst}. Restart agent: sandbox start")
 
 
-def cmd_status(_: list[str]) -> None:
-    print("Running sandbox containers:")
+def cmd_status(args) -> None:
     result = subprocess.run(
         ["podman", "ps",
          "--filter", "label=com.docker.compose.project",
@@ -610,88 +388,96 @@ def cmd_status(_: list[str]) -> None:
         capture_output=True, text=True,
     )
     lines = [ln for ln in result.stdout.splitlines() if "sandbox" in ln.lower()]
-    print("\n".join(lines) if lines else "  (none)")
+    print("\n".join(lines) if lines else "(no running sandboxes)")
 
 
-def cmd_preset(argv: list[str]) -> None:
-    sub  = argv[0] if argv else "list"
-    rest = argv[1:]
+def cmd_preset(args) -> None:
+    sub = args.subcmd or "list"
 
     if sub == "list":
-        presets_dir = SANDBOX_HOME / "presets"
-        print(f"Available presets (in {presets_dir}):")
-        for p in sorted(presets_dir.iterdir()):
+        for p in sorted((SANDBOX_HOME / "presets").iterdir()):
             if p.is_dir():
-                print(f"  {p.name}")
+                print(p.name)
 
     elif sub == "edit":
-        name   = rest[0] if rest else SANDBOX_PRESET
-        target = SANDBOX_HOME / "presets" / name / "proxy.yaml"
+        target = SANDBOX_HOME / "presets" / args.name / "proxy.yaml"
         if not target.is_file():
-            die(f"preset '{name}' not found at {target}")
+            die(f"preset '{args.name}' not found at {target}")
         subprocess.run([os.environ.get("EDITOR", "vi"), str(target)], check=True)
-        print("Preset saved. New projects will use this preset.")
-        print("Existing sandboxes: edit .sandbox/config/proxy.yaml, then restart proxy.")
+        print("Preset saved. Existing sandboxes: edit .sandbox/config/proxy.yaml and restart proxy.")
 
     elif sub == "copy":
-        if len(rest) < 2:
-            die("Usage: sandbox preset copy SRC DST")
-        src, dst = rest[0], rest[1]
-        src_file = SANDBOX_HOME / "presets" / src / "proxy.yaml"
+        src_file = SANDBOX_HOME / "presets" / args.src / "proxy.yaml"
         if not src_file.is_file():
-            die(f"source preset '{src}' not found")
-        dst_dir = SANDBOX_HOME / "presets" / dst
+            die(f"source preset '{args.src}' not found")
+        dst_dir = SANDBOX_HOME / "presets" / args.dst
         dst_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(src_file, dst_dir / "proxy.yaml")
-        print(f"Created preset '{dst}' from '{src}'.")
-        print(f"Edit it: sandbox preset edit {dst}")
-
-    else:
-        die(f"unknown preset subcommand: {sub}")
+        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: sandbox preset edit {args.dst}")
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
-COMMANDS: dict[str, object] = {
-    "build":   cmd_build,
-    "update":  cmd_update,
-    "run":     cmd_run,
-    "start":   cmd_start,
-    "stop":    cmd_stop,
-    "shell":   cmd_shell,
-    "logs":    cmd_logs,
-    "web":     cmd_web,
-    "allow":   cmd_allow,
-    "deny":    cmd_deny,
-    "fetch":   cmd_fetch,
-    "mount":   cmd_mount,
-    "status":  cmd_status,
-    "preset":  cmd_preset,
+COMMANDS = {
+    "build": cmd_build, "update": cmd_update, "run": cmd_run,
+    "start": cmd_start, "stop": cmd_stop,   "shell": cmd_shell,
+    "logs":  cmd_logs,  "web":   cmd_web,    "allow": cmd_allow,
+    "deny":  cmd_deny,  "fetch": cmd_fetch,  "mount": cmd_mount,
+    "status": cmd_status, "preset": cmd_preset,
 }
 
 
 def main() -> None:
-    argv = sys.argv[1:]
-    cmd  = argv[0] if argv else "help"
-    rest = argv[1:]
+    p = argparse.ArgumentParser(prog="sandbox", description="Isolated agent workspace manager.")
+    sub = p.add_subparsers(dest="cmd")
 
-    if cmd in ("-h", "--help", "help"):
-        print(USAGE)
+    sub.add_parser("build",  help="Build proxy + agent images")
+    sub.add_parser("update", help="Rebuild images without cache")
+    sub.add_parser("start",  help="Resume an existing sandbox")
+    sub.add_parser("stop",   help="Stop all containers")
+    sub.add_parser("shell",  help="Open a shell in the agent container")
+    sub.add_parser("logs",   help="Tail the proxy access log")
+    sub.add_parser("web",    help="Print the mitmweb traffic-monitor URL")
+    sub.add_parser("status", help="List running sandboxes")
+
+    r = sub.add_parser("run", help="Create and start a sandbox")
+    r.add_argument("dir", nargs="?")
+    r.add_argument("--preset",  default=SANDBOX_PRESET)
+    r.add_argument("--branch",  default="")
+    r.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
+    r.add_argument("--no-git",  action="store_true")
+    r.add_argument("--mount",   action="append", default=[], dest="mounts", metavar="SRC[:DST]")
+
+    for name, hlp in [("allow", "Add a host to the egress allowlist"),
+                      ("deny",  "Remove a host from the egress allowlist")]:
+        c = sub.add_parser(name, help=hlp)
+        c.add_argument("host")
+
+    fe = sub.add_parser("fetch", help="Safely fetch agent output (hooks disabled)")
+    fe.add_argument("ref", nargs="?", default="agent-work")
+
+    mt    = sub.add_parser("mount", help="Manage read-only reference mounts")
+    mtsub = mt.add_subparsers(dest="subcmd")
+    mtsub.add_parser("list")
+    ma = mtsub.add_parser("add");    ma.add_argument("spec", metavar="SRC[:DST]")
+    mr = mtsub.add_parser("remove"); mr.add_argument("dst",  metavar="DST")
+
+    ps    = sub.add_parser("preset", help="Manage provider presets")
+    pssub = ps.add_subparsers(dest="subcmd")
+    pssub.add_parser("list")
+    pe = pssub.add_parser("edit"); pe.add_argument("name", nargs="?", default=SANDBOX_PRESET)
+    pc = pssub.add_parser("copy"); pc.add_argument("src"); pc.add_argument("dst")
+
+    args = p.parse_args()
+    if not args.cmd:
+        p.print_help()
         return
 
-    fn = COMMANDS.get(cmd)
-    if fn is None:
-        print(f"error: unknown command: {cmd}\n", file=sys.stderr)
-        print(USAGE, file=sys.stderr)
-        sys.exit(1)
-
     try:
-        fn(rest)  # type: ignore[operator]
+        COMMANDS[args.cmd](args)
     except subprocess.CalledProcessError as exc:
-        print(f"error: command failed (exit {exc.returncode})", file=sys.stderr)
         sys.exit(exc.returncode)
     except KeyboardInterrupt:
-        print()
         sys.exit(130)
 
 

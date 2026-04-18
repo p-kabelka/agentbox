@@ -1,24 +1,15 @@
-# =============================================================================
-# Agent Sandbox — Default Proxy Preset
-# =============================================================================
-# This is your global preset. It is COPIED into each project's .sandbox/ on
-# `sandbox run`. Edits here do not affect existing sandboxes.
-#
-# After editing: sandbox build  (if you changed providers or structure)
-# =============================================================================
+# Default provider preset. Copied to .sandbox/config/proxy.yaml on 'sandbox run'.
 
 providers:
 
-  # Anthropic direct API -------------------------------------------------------
   - name: anthropic
     enabled: false
-    api_key_env: ANTHROPIC_API_KEY   # real key from shell env; agent sees "dummy"
+    api_key_env: ANTHROPIC_API_KEY
     inject_header: x-api-key
     inject_prefix: ""
     allowed_hosts:
       - api.anthropic.com
 
-  # OpenAI ---------------------------------------------------------------------
   - name: openai
     enabled: false
     api_key_env: OPENAI_API_KEY
@@ -27,16 +18,14 @@ providers:
     allowed_hosts:
       - api.openai.com
 
-  # Google Vertex AI -----------------------------------------------------------
   # Requires credentials at ~/.agent-sandbox/secrets/credentials.json
-  # (service account key) OR host gcloud ADC (see compose-base.yaml Option B).
   - name: vertex
     enabled: false
-    metadata_server: true            # starts GCE metadata sidecar on proxy:9090
+    metadata_server: true  # starts fake GCE metadata sidecar on proxy:9090
     allowed_hosts:
       - "*.googleapis.com"
 
-  # Azure OpenAI (template — uncomment and fill in) ----------------------------
+  # Azure: uncomment and set api_key_env + allowed_hosts to add Azure OpenAI
   # - name: azure-openai
   #   enabled: false
   #   api_key_env: AZURE_OPENAI_API_KEY
@@ -45,19 +34,12 @@ providers:
   #   allowed_hosts:
   #     - "*.openai.azure.com"
 
-# Extra egress allowed through (e.g. for WebFetch, package installs, docs).
-# Supports exact hostnames and *.wildcard patterns.
-# Restart proxy after changes: sandbox allow <host>  OR  podman compose restart proxy
+# Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts: []
-  # - "en.wikipedia.org"
-  # - "*.github.com"
-  # - "raw.githubusercontent.com"
-  # - "pypi.org"
-  # - "registry.npmjs.org"
 
 logging:
   level: info
   log_request_headers: true
   log_response_headers: false
-  log_bodies: false          # WARNING: may log sensitive prompt content if enabled
+  log_bodies: false  # WARNING: may log sensitive prompt content if enabled
   file: /var/log/proxy/access.log

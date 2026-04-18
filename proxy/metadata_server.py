@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Fake GCE Metadata Server — runs inside the proxy container on port 9090.
-
-The agent container points GCE_METADATA_HOST=proxy:9090 here.
-Real credentials stay on the proxy side; only short-lived access tokens
-(1-hour TTL, scoped to cloud-platform) are returned to the agent.
-
-Only started when vertex.metadata_server: true in proxy.yaml.
-"""
+# Fake GCE metadata server; started when vertex.metadata_server: true in proxy.yaml.
 import json
 import logging
 import os
@@ -67,7 +59,7 @@ class MetadataHandler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("metadata-flavor", "Google")   # required by auth library detection
+        self.send_header("metadata-flavor", "Google")  # required by auth library
         self.end_headers()
         self.wfile.write(body)
 
@@ -78,7 +70,6 @@ class MetadataHandler(BaseHTTPRequestHandler):
         # Root ping — auth library sends this to detect the metadata server
         if path in ("", "/"):
             self._reply(200, b"ok", "text/plain")
-
         elif "service-accounts/default/token" in path:
             self._reply(200, json.dumps(_fresh_token()).encode())
 
@@ -102,7 +93,7 @@ class MetadataHandler(BaseHTTPRequestHandler):
             self._reply(404, b"not found", "text/plain")
 
     def log_message(self, format: str, *args: object) -> None:  # noqa: A002
-        del format, args  # suppress default access log; using our structured logger
+        del format, args  # suppress default access log
 
 
 if __name__ == "__main__":

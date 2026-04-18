@@ -1,10 +1,4 @@
-"""
-mitmproxy addon: structured JSON access log.
-
-Output: /var/log/proxy/access.log
-Tail:   sandbox logs
-        podman compose exec proxy tail -f /var/log/proxy/access.log | jq .
-"""
+# mitmproxy addon: JSON access log → /var/log/proxy/access.log
 import json
 import os
 import time
@@ -51,8 +45,7 @@ class AccessLogger:
         _log_file.write(json.dumps(entry) + "\n")
 
     def request(self, flow: http.HTTPFlow) -> None:
-        # Blocked requests (403 set by injector) never reach response()
-        # Log them here so they still appear in the access log
+        # Blocked requests never reach response(); log them here
         if flow.response and flow.response.status_code == 403:
             entry = {
                 "ts":     time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),

@@ -1,9 +1,4 @@
-"""
-mitmproxy addon: credential injection + allowlist enforcement.
-
-Reads /config/proxy.yaml (mounted from <project>/.sandbox/config/proxy.yaml).
-Reload: podman compose restart proxy
-"""
+# mitmproxy addon: credential injection + allowlist enforcement.
 import fnmatch
 import logging
 import os
@@ -84,7 +79,6 @@ class CredentialInjector:
 
         header, value = self._find_rule(host)
         if header and value:
-            # Overwrite whatever dummy credential the agent sent
             flow.request.headers[header] = value
             log.debug("Injected %s for %s", header, host)
 
