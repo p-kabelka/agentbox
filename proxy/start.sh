@@ -14,7 +14,7 @@ fi
 
 mitmweb --listen-host 0.0.0.0 --listen-port 8080 \
         --web-host 0.0.0.0 --web-port 8081 \
-        --scripts /addons/injector.py --scripts /addons/logger.py \
+        --scripts /addons/addon.py \
         --set block_global=false \
         --set web_password= \
         --no-web-open-browser &

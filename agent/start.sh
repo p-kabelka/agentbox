@@ -21,6 +21,7 @@ if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     git clone -q /source/project.bundle /workspace
     git -C /workspace remote rename origin source
     git -C /workspace remote add output /output/repo.git
+    echo "[agent] When done: git push output HEAD"
 fi
 
 [ "${1:-}" = "--shell" ] && exec /bin/bash

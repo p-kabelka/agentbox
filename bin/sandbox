@@ -88,13 +88,16 @@ def wait_healthy(project_dir: Path) -> None:
     sys.exit(1)
 
 
-def read_port(sandbox_dir: Path) -> int | None:
+def read_env(sandbox_dir: Path) -> dict[str, str]:
     env_file = sandbox_dir / ".env"
-    if env_file.is_file():
-        for line in env_file.read_text().splitlines():
-            if line.startswith("SANDBOX_WEB_PORT="):
-                return int(line.split("=", 1)[1])
-    return None
+    if not env_file.is_file():
+        return {}
+    return dict(line.split("=", 1) for line in env_file.read_text().splitlines() if "=" in line)
+
+
+def read_port(sandbox_dir: Path) -> int | None:
+    val = read_env(sandbox_dir).get("SANDBOX_WEB_PORT")
+    return int(val) if val else None
 
 
 def load_yaml(path: Path) -> dict:
@@ -124,15 +127,18 @@ def save_mounts(sandbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
 
 def write_override(sandbox_dir: Path) -> None:
     project_dir = sandbox_dir.parent
-    web_port    = read_port(sandbox_dir) or 8081
+    env         = read_env(sandbox_dir)
+    web_port    = int(env.get("SANDBOX_WEB_PORT", 8081))
+    session_ref = env.get("SANDBOX_REF", "")
+    output_name = f"output-{session_ref}" if session_ref else "output"
     has_bundle  = (sandbox_dir / "source.bundle").is_file()
-    has_output  = (sandbox_dir / "output.git").is_dir()
+    has_output  = (sandbox_dir / f"{output_name}.git").is_dir()
 
     volume_lines = ["      - proxy-ca:/proxy-ca:ro,Z"]
     if has_bundle:
-        volume_lines.append("      - ./source.bundle:/source/project.bundle:ro,Z")
+        volume_lines.append("      - ${SANDBOX_DIR}/source.bundle:/source/project.bundle:ro,Z")
     if has_output:
-        volume_lines.append("      - ./output.git:/output/repo.git:Z")
+        volume_lines.append(f"      - ${{SANDBOX_DIR}}/{output_name}.git:/output/repo.git:Z")
     if not has_bundle and not has_output:
         volume_lines.append(f"      - {project_dir}:/workspace:Z")
     for src, dst in read_mounts(sandbox_dir):
@@ -230,19 +236,21 @@ def cmd_run(args) -> None:
                  str(sandbox_dir / "source.bundle"), "HEAD", branch],
                 check=True,
             )
-            output_git = sandbox_dir / "output.git"
-            if not output_git.exists():
-                subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
-                (output_git / "hooks").mkdir(exist_ok=True)
-                (output_git / "hooks").chmod(0o555)  # block agent from planting host-side hooks
         else:
             print("    No git repo found; falling back to --no-git mode.")
             use_git = False
 
     web_port = read_port(sandbox_dir) or free_port()
+    session_ref = time.strftime("%Y%m%d-%H%M%S")
     (sandbox_dir / ".env").write_text(
-        f"SANDBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\n"
+        f"SANDBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\nSANDBOX_REF={session_ref}\n"
     )
+
+    if git_available:
+        output_git = sandbox_dir / f"output-{session_ref}.git"
+        subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
+        (output_git / "hooks").mkdir(exist_ok=True)
+        (output_git / "hooks").chmod(0o555)  # block agent from planting host-side hooks
 
     if args.mounts:
         existing = read_mounts(sandbox_dir)
@@ -331,15 +339,21 @@ def cmd_deny(args) -> None:
 
 def cmd_fetch(args) -> None:
     project_dir = require_sandbox()
-    output_git  = project_dir / ".sandbox" / "output.git"
+    sandbox_dir = project_dir / ".sandbox"
+    env = read_env(sandbox_dir)
+    session_ref = env.get("SANDBOX_REF", "")
+    output_name = f"output-{session_ref}" if session_ref else "output"
+    output_git = sandbox_dir / f"{output_name}.git"
     if not output_git.is_dir():
-        die(f"{output_git} not found. Was this sandbox started without --no-git?")
-    subprocess.run(
+        die("Output repo not found — was this sandbox started without --no-git?")
+    r = subprocess.run(
         ["git", "-c", "core.hooksPath=/dev/null",
-         "fetch", str(output_git), f"{args.ref}:refs/sandbox/{args.ref}"],
-        check=True,
+         "fetch", str(output_git), "+refs/heads/*:refs/sandbox/*"],
     )
-    print(f"Fetched to refs/sandbox/{args.ref} — review with 'git log refs/sandbox/{args.ref}' before merging.")
+    if r.returncode != 0:
+        die("Fetch failed — has the agent pushed anything yet?\n"
+            "       In the agent: git push output HEAD")
+    print("Fetched all agent branches to refs/sandbox/ — review with 'git for-each-ref refs/sandbox/' or 'git log refs/sandbox/<branch>'")
 
 
 def cmd_mount(args) -> None:
@@ -453,8 +467,7 @@ def main() -> None:
         c = sub.add_parser(name, help=hlp)
         c.add_argument("host")
 
-    fe = sub.add_parser("fetch", help="Safely fetch agent output (hooks disabled)")
-    fe.add_argument("ref", nargs="?", default="agent-work")
+    sub.add_parser("fetch", help="Safely fetch all agent branches (hooks disabled)")
 
     mt    = sub.add_parser("mount", help="Manage read-only reference mounts")
     mtsub = mt.add_subparsers(dest="subcmd")

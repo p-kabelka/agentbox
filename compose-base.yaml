@@ -46,7 +46,8 @@ services:
       proxy:
         condition: service_healthy
     environment:
-      AGENT_HARNESS: ${AGENT_HARNESS:-claude}
+      AGENT_HARNESS:  ${AGENT_HARNESS:-claude}
+      SANDBOX_REF:    ${SANDBOX_REF:-}
 
       # Dummy credentials — proxy injects real values via mitmproxy
       ANTHROPIC_API_KEY:    dummy
