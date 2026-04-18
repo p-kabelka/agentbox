@@ -20,5 +20,10 @@ fi
 
 [ "${1:-}" = "--shell" ] && exec /bin/bash
 
+# krun's virtio-console sends \n for Enter instead of \r. Node.js readline in
+# raw mode expects \r. setRawMode() clears icrnl but not inlcr, so inlcr set
+# here survives the raw-mode transition and translates \n back to \r.
+stty inlcr 2>/dev/null || true
+
 echo "[agent] Starting ${AGENT_HARNESS:-claude}..."
 exec "${AGENT_HARNESS:-claude}" "$@"
