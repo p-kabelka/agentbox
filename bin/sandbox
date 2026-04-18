@@ -55,19 +55,24 @@ def require_sandbox() -> Path:
     return p  # type: ignore[return-value]
 
 
+def get_sessions(project_dir: Path) -> list[str]:
+    sessions_dir = project_dir / ".sandbox" / "sessions"
+    return sorted(d.name for d in sessions_dir.iterdir() if d.is_dir()) if sessions_dir.is_dir() else []
+
+
 def require_session(project_dir: Path, name: str | None) -> Path:
     """Return session_dir, auto-detecting if exactly one session exists."""
     sessions_dir = project_dir / ".sandbox" / "sessions"
     if name:
         d = sessions_dir / name
         if not d.is_dir():
-            die(f"session '{name}' not found — run: sandbox status")
+            die(f"session '{name}' not found — run: sandbox list")
         return d
-    sessions = sorted(d.name for d in sessions_dir.iterdir() if d.is_dir()) if sessions_dir.is_dir() else []
+    sessions = get_sessions(project_dir)
     if len(sessions) == 1:
         return sessions_dir / sessions[0]
     elif not sessions:
-        die("No sessions found. Run: sandbox run --name <name>")
+        die("No sessions. Run: sandbox init --name <name>")
     else:
         die(f"Multiple sessions ({', '.join(sessions)}) — specify: --name <name>")
     raise AssertionError  # unreachable
@@ -166,7 +171,7 @@ def write_override(session_dir: Path) -> None:
         volume_lines.append(f"      - {sandbox_dir}/output-{name}.git:/output/repo.git:Z")
     if not has_bundle and not has_output:
         volume_lines.append(f"      - {project_dir}:/workspace:Z")
-    for src, dst in read_mounts(sandbox_dir):
+    for src, dst in read_mounts(session_dir):
         volume_lines.append(f"      - {src}:/context/{dst}:ro,Z")
 
     (session_dir / "compose.override.yaml").write_text("\n".join([
@@ -251,7 +256,7 @@ def _launch(session_dir: Path) -> None:
     sys.exit(result.returncode)
 
 
-def cmd_run(args) -> None:
+def cmd_init(args) -> None:
     project_dir = Path(args.dir).resolve() if args.dir else Path.cwd()
     sandbox_dir = project_dir / ".sandbox"
     name = args.name or time.strftime("%Y%m%d-%H%M%S")
@@ -340,7 +345,7 @@ def cmd_run(args) -> None:
     )
 
     if args.mounts:
-        existing = read_mounts(sandbox_dir)
+        existing = read_mounts(session_dir)
         existing_dsts = {d for _, d in existing}
         for spec in args.mounts:
             src_str, _, dst = spec.partition(":")
@@ -351,7 +356,7 @@ def cmd_run(args) -> None:
             if dst not in existing_dsts:
                 existing.append((src, dst))
                 existing_dsts.add(dst)
-        save_mounts(sandbox_dir, existing)
+        save_mounts(session_dir, existing)
 
     write_override(session_dir)
 
@@ -362,7 +367,10 @@ def cmd_run(args) -> None:
             with gitignore.open("a") as f:
                 f.write(".sandbox/\n")
 
-    _launch(session_dir)
+    if args.start:
+        _launch(session_dir)
+    else:
+        print(f"  Initialized. Run 'sandbox start --name {name}' to start.")
 
 
 def cmd_start(args) -> None:
@@ -460,10 +468,10 @@ def cmd_remove(args) -> None:
 def cmd_mount(args) -> None:
     sub = args.subcmd or "list"
     project_dir = require_sandbox()
-    sandbox_dir = project_dir / ".sandbox"
+    session_dir = require_session(project_dir, args.name)
 
     if sub == "list":
-        mounts = read_mounts(sandbox_dir)
+        mounts = read_mounts(session_dir)
         if not mounts:
             print("No extra reference mounts. Add one: sandbox mount add /path/to/project[:name]")
         else:
@@ -477,20 +485,42 @@ def cmd_mount(args) -> None:
         dst = dst or Path(src_str).name
         if not Path(src).exists():
             die(f"source path does not exist: {src}")
-        mounts = read_mounts(sandbox_dir)
+        mounts = read_mounts(session_dir)
         if any(d == dst for _, d in mounts):
             die(f"/context/{dst} already mounted. Remove first: sandbox mount remove {dst}")
         mounts.append((src, dst))
-        save_mounts(sandbox_dir, mounts)
-        print(f"Added {src} → /context/{dst}. Restart sessions to apply.")
+        save_mounts(session_dir, mounts)
+        write_override(session_dir)
+        print(f"Added {src} → /context/{dst}. Start the session to apply.")
 
     elif sub == "remove":
-        mounts = read_mounts(sandbox_dir)
+        mounts = read_mounts(session_dir)
         filtered = [(s, d) for s, d in mounts if d != args.dst]
         if len(filtered) == len(mounts):
             die(f"no mount '{args.dst}' found. List: sandbox mount list")
-        save_mounts(sandbox_dir, filtered)
-        print(f"Removed /context/{args.dst}. Restart sessions to apply.")
+        save_mounts(session_dir, filtered)
+        write_override(session_dir)
+        print(f"Removed /context/{args.dst}. Start the session to apply.")
+
+
+def cmd_list(args) -> None:
+    project_dir = require_sandbox()
+    sessions = get_sessions(project_dir)
+    if not sessions:
+        print("No sessions. Run: sandbox init --name <name>")
+        return
+    running = subprocess.run(
+        ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    ).stdout.lower()
+    pname_prefix = f"sandbox-{project_name(project_dir)}"
+    for s in sessions:
+        env = read_env(project_dir / ".sandbox" / "sessions" / s)
+        port = env.get("SANDBOX_WEB_PORT", "")
+        active = f"{pname_prefix}-{s}_" in running
+        status = "running" if active else "stopped"
+        port_info = f"  http://localhost:{port}" if port and active else ""
+        print(f"  {s}  [{status}]{port_info}")
 
 
 def cmd_status(args) -> None:
@@ -502,16 +532,6 @@ def cmd_status(args) -> None:
     )
     lines = [ln for ln in result.stdout.splitlines() if "sandbox" in ln.lower()]
     print("\n".join(lines) if lines else "(no running containers)")
-
-    project_dir = find_sandbox_dir()
-    if project_dir:
-        sessions_dir = project_dir / ".sandbox" / "sessions"
-        if sessions_dir.is_dir():
-            sessions = sorted(d.name for d in sessions_dir.iterdir() if d.is_dir())
-            if sessions:
-                print(f"\nSessions in {project_dir}:")
-                for s in sessions:
-                    print(f"  {s}  (git remote: sandbox-{s})")
 
 
 def cmd_preset(args) -> None:
@@ -545,11 +565,12 @@ def cmd_preset(args) -> None:
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 COMMANDS = {
-    "build": cmd_build, "update": cmd_update, "run":    cmd_run,
+    "build": cmd_build, "update": cmd_update, "init":   cmd_init,
     "start": cmd_start, "stop":   cmd_stop,   "shell":  cmd_shell,
     "logs":  cmd_logs,  "web":    cmd_web,     "allow":  cmd_allow,
     "deny":  cmd_deny,  "mount":  cmd_mount,   "status": cmd_status,
-    "remove": cmd_remove, "preset": cmd_preset,
+    "list":  cmd_list,  "ls":     cmd_list,    "remove": cmd_remove,
+    "preset": cmd_preset,
 }
 
 
@@ -564,9 +585,11 @@ def main() -> None:
 
     sub.add_parser("build",  help="Build proxy + agent images")
     sub.add_parser("update", help="Rebuild images without cache")
-    sub.add_parser("status", help="List running containers and sessions")
+    sub.add_parser("list",   help="List sessions for the current project")
+    sub.add_parser("ls",     help="Alias for list")
+    sub.add_parser("status", help="List running sandbox containers")
 
-    r = sub.add_parser("run", help="Create and start a new sandbox session")
+    r = sub.add_parser("init", help="Initialize a new sandbox session (use --start to also launch)")
     r.add_argument("dir", nargs="?")
     r.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
     r.add_argument("--preset",  default=SANDBOX_PRESET)
@@ -574,6 +597,7 @@ def main() -> None:
     r.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
     r.add_argument("--no-git",  action="store_true")
     r.add_argument("--mount",   action="append", default=[], dest="mounts", metavar="SRC[:DST]")
+    r.add_argument("--start",   action="store_true", help="Also start the session after initializing")
 
     for cmd_name, hlp in [
         ("start",  "Resume a sandbox session"),
@@ -593,11 +617,12 @@ def main() -> None:
         c.add_argument("host")
         _add_name(c)
 
-    mt    = sub.add_parser("mount", help="Manage read-only reference mounts")
+    mt    = sub.add_parser("mount", help="Manage read-only reference mounts for a session")
+    _add_name(mt)
     mtsub = mt.add_subparsers(dest="subcmd")
-    mtsub.add_parser("list")
-    ma = mtsub.add_parser("add");    ma.add_argument("spec", metavar="SRC[:DST]")
-    mr = mtsub.add_parser("remove"); mr.add_argument("dst",  metavar="DST")
+    ml = mtsub.add_parser("list");   _add_name(ml)
+    ma = mtsub.add_parser("add");    ma.add_argument("spec", metavar="SRC[:DST]"); _add_name(ma)
+    mr = mtsub.add_parser("remove"); mr.add_argument("dst",  metavar="DST");       _add_name(mr)
 
     ps    = sub.add_parser("preset", help="Manage presets")
     pssub = ps.add_subparsers(dest="subcmd")
