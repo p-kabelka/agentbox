@@ -1,5 +1,5 @@
 # mitmproxy addon: allowlist enforcement, credential injection, and JSON access logging.
-import fnmatch, json, logging, os, time
+import fnmatch, json, logging, os, threading, time
 import yaml
 from mitmproxy import http
 
@@ -21,19 +21,55 @@ _log_bodies   = lcfg.get("log_bodies", False)
 
 class SandboxAddon:
     def __init__(self):
-        self._allowed, self._rules = [], []
+        self._allowed      = []
+        self._rules        = []   # (patterns, header, value) — static key injection
+        self._vertex_hosts = []   # patterns for Google APIs
+        self._vertex_creds = None # (credentials, request) — refreshed on demand
+        self._vertex_lock  = threading.Lock()
+
         for p in cfg.get("providers", []):
             if not p.get("enabled"):
                 continue
             hosts = p.get("allowed_hosts", [])
             self._allowed.extend(hosts)
-            key = os.environ.get(p.get("api_key_env", ""), "").strip()
-            if p.get("inject_header") and key:
-                self._rules.append((hosts, p["inject_header"], p.get("inject_prefix", "") + key))
-            elif p.get("inject_header") and not key and p.get("api_key_env"):
-                log.warning("Provider '%s' enabled but %s is not set",
-                            p.get("name", "?"), p["api_key_env"])
+            if p.get("name") == "vertex":
+                self._vertex_hosts = hosts
+                self._load_vertex_creds()
+            else:
+                key = os.environ.get(p.get("api_key_env", ""), "").strip()
+                if p.get("inject_header") and key:
+                    self._rules.append((hosts, p["inject_header"], p.get("inject_prefix", "") + key))
+                elif p.get("inject_header") and not key and p.get("api_key_env"):
+                    log.warning("Provider '%s' enabled but %s is not set",
+                                p.get("name", "?"), p["api_key_env"])
         self._allowed.extend(cfg.get("extra_allowed_hosts", []))
+
+    def _load_vertex_creds(self) -> None:
+        try:
+            import google.auth
+            import google.auth.transport.requests
+            # If GOOGLE_APPLICATION_CREDENTIALS points to a missing file, clear it
+            # so google.auth.default() falls through to the well-known ADC path.
+            cenv = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+            if cenv and not os.path.isfile(cenv):
+                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+            creds, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/cloud-platform"]
+            )
+            self._vertex_creds = (creds, google.auth.transport.requests.Request())
+            log.info("Loaded Google credentials for Vertex injection (type=%s)",
+                     type(creds).__name__)
+        except Exception as exc:
+            log.error("Failed to load Google credentials for Vertex: %s", exc)
+
+    def _vertex_token(self) -> str | None:
+        if not self._vertex_creds:
+            return None
+        creds, req = self._vertex_creds
+        with self._vertex_lock:
+            if not creds.valid:
+                creds.refresh(req)
+            return creds.token
 
     def request(self, flow: http.HTTPFlow) -> None:
         host = flow.request.pretty_host
@@ -48,13 +84,21 @@ class SandboxAddon:
                 "url": flow.request.pretty_url, "status": 403, "blocked": True,
             }) + "\n")
             return
+
+        # Vertex: overwrite any dummy token the agent sent with a real one
+        if self._vertex_hosts and any(fnmatch.fnmatch(host, p) for p in self._vertex_hosts):
+            if token := self._vertex_token():
+                flow.request.headers["Authorization"] = f"Bearer {token}"
+            return
+
+        # Other providers: inject static API key
         for patterns, header, value in self._rules:
             if any(fnmatch.fnmatch(host, p) for p in patterns):
                 flow.request.headers[header] = value
 
     def response(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("sandbox_blocked"):
-            return  # already logged in request()
+            return
         resp = flow.response
         entry: dict = {
             "ts": _ts(), "method": flow.request.method,
