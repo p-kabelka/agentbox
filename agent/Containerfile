@@ -1,19 +1,13 @@
-FROM node:22-slim
+FROM fedora:43
 
-# proxychains-ng intercepts connect() at the libc level via LD_PRELOAD.
-# This makes ALL outbound connections from any language/runtime go through
-# the proxy — including Node.js's built-in http/https which ignores HTTPS_PROXY.
-RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-        proxychains4 \
+RUN dnf install -y \
         curl \
         git \
         ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+        proxychains-ng \
+    && dnf clean all
 
-# Default harness: Claude Code.
-# To add more harnesses, build FROM this image or extend via compose override.
-RUN npm install -g @anthropic-ai/claude-code
+RUN curl -fsSL https://claude.ai/install.sh | sh
 
 # Uncomment to pre-install additional harnesses:
 # RUN npm install -g opencode-ai

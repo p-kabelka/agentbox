@@ -4,8 +4,8 @@ set -euo pipefail
 # Install mitmproxy CA cert into system trust store
 CA=/proxy-ca/mitmproxy-ca-cert.pem
 until [ -f "$CA" ]; do sleep 1; done
-cp "$CA" /usr/local/share/ca-certificates/proxy-ca.crt
-update-ca-certificates --fresh >/dev/null 2>&1
+cp "$CA" /etc/pki/ca-trust/source/anchors/proxy-ca.crt
+update-ca-trust extract >/dev/null 2>&1
 export NODE_EXTRA_CA_CERTS="$CA"
 export REQUESTS_CA_BUNDLE="$CA"
 

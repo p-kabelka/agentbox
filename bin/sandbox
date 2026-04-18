@@ -175,7 +175,7 @@ def write_override(session_dir: Path) -> None:
         "    volumes:",
         *proxy_volume_lines,
         "  agent:",
-        "    # runtime: krun    # uncomment for VM-level KVM isolation",
+        "    runtime: krun    # VM-level KVM isolation",
         "    volumes:",
         *volume_lines,
         "",
