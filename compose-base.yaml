@@ -18,7 +18,6 @@ services:
       - agent-net
       - proxy-net
     volumes:
-      - ${SANDBOX_DIR}/config/proxy.yaml:/config/proxy.yaml:ro,Z
       - ${SANDBOX_HOME}/secrets:/run/secrets:ro,Z
       - proxy-ca:/root/.mitmproxy:Z
       - proxy-logs:/var/log/proxy:Z

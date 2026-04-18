@@ -152,6 +152,10 @@ def write_override(session_dir: Path) -> None:
     has_bundle = (session_dir / "source.bundle").is_file()
     has_output = (sandbox_dir / f"output-{name}.git").is_dir()
 
+    proxy_volume_lines = [
+        f"      - {session_dir}/config/proxy.yaml:/config/proxy.yaml:ro,Z",
+    ]
+
     volume_lines = ["      - proxy-ca:/proxy-ca:ro,Z"]
     if has_bundle:
         volume_lines.append(f"      - {session_dir}/source.bundle:/source/project.bundle:ro,Z")
@@ -168,6 +172,8 @@ def write_override(session_dir: Path) -> None:
         "  proxy:",
         "    ports:",
         f'      - "127.0.0.1:{web_port}:8081"',
+        "    volumes:",
+        *proxy_volume_lines,
         "  agent:",
         "    # runtime: krun    # uncomment for VM-level KVM isolation",
         "    volumes:",
@@ -239,10 +245,10 @@ def cmd_run(args) -> None:
 
     print(f"==> Initializing sandbox '{name}': {project_dir}")
     sandbox_dir.mkdir(parents=True, exist_ok=True)
-    (sandbox_dir / "config").mkdir(exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
+    (session_dir / "config").mkdir(exist_ok=True)
 
-    config_file = sandbox_dir / "config" / "proxy.yaml"
+    config_file = session_dir / "config" / "proxy.yaml"
     if not config_file.is_file():
         preset_file = SANDBOX_HOME / "presets" / args.preset / "proxy.yaml"
         if not preset_file.is_file():
@@ -369,7 +375,7 @@ def cmd_web(args) -> None:
 def _update_allowlist(host: str, add: bool, name: str | None) -> None:
     project_dir = require_sandbox()
     session_dir = require_session(project_dir, name)
-    config_path = project_dir / ".sandbox" / "config" / "proxy.yaml"
+    config_path = session_dir / "config" / "proxy.yaml"
     cfg = load_yaml(config_path)
     hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
     if add:
