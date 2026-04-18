@@ -16,7 +16,7 @@ from typing import NoReturn
 
 import yaml
 
-SANDBOX_HOME   = Path(os.environ.get("AGENT_SANDBOX_HOME", Path.home() / ".agent-sandbox"))
+SANDBOX_HOME   = Path(os.environ.get("AGENT_SANDBOX_HOME", Path.home() / ".local" / "share" / "agent-sandbox"))
 SANDBOX_PRESET = os.environ.get("AGENT_SANDBOX_PRESET", "default")
 
 
@@ -186,11 +186,24 @@ def write_override(session_dir: Path) -> None:
 
 def _build_images(no_cache: bool = False) -> None:
     extra = ["--no-cache"] if no_cache else []
-    for tag, ctx in [
-        ("localhost/agent-sandbox-proxy:latest", SANDBOX_HOME / "proxy"),
-        ("localhost/agent-sandbox-agent:latest", SANDBOX_HOME / "agent"),
-    ]:
-        subprocess.run(["podman", "build", *extra, "-t", tag, str(ctx)], check=True)
+
+    (SANDBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
+
+    # Stage host claude binary into agent build context
+    claude_src = Path.home() / ".local" / "bin" / "claude"
+    claude_staged = SANDBOX_HOME / "agent" / "claude"
+    if not claude_src.is_file():
+        die(f"claude binary not found at {claude_src}")
+    shutil.copy2(claude_src, claude_staged)
+
+    try:
+        for tag, ctx in [
+            ("localhost/agent-sandbox-proxy:latest", SANDBOX_HOME / "proxy"),
+            ("localhost/agent-sandbox-agent:latest", SANDBOX_HOME / "agent"),
+        ]:
+            subprocess.run(["podman", "build", *extra, "-t", tag, str(ctx)], check=True)
+    finally:
+        claude_staged.unlink(missing_ok=True)
 
 
 def cmd_build(args) -> None:

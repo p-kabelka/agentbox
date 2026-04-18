@@ -7,7 +7,8 @@ RUN dnf install -y \
         proxychains-ng \
     && dnf clean all
 
-RUN curl -fsSL https://claude.ai/install.sh | sh
+COPY claude /usr/local/bin/claude
+RUN chmod +x /usr/local/bin/claude
 
 # Uncomment to pre-install additional harnesses:
 # RUN npm install -g opencode-ai
