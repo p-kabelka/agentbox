@@ -8,6 +8,9 @@ log = logging.getLogger(__name__)
 with open("/config/proxy.yaml") as f:
     cfg = yaml.safe_load(f)
 
+_session_name = os.environ.get("SANDBOX_NAME", "")
+_name_flag = f" --name {_session_name}" if _session_name else ""
+
 lcfg = cfg.get("logging", {})
 os.makedirs("/var/log/proxy", exist_ok=True)
 _log = open(lcfg.get("file", "/var/log/proxy/access.log"), "a", buffering=1)
@@ -36,7 +39,7 @@ class SandboxAddon:
         host = flow.request.pretty_host
         if not any(fnmatch.fnmatch(host, p) for p in self._allowed):
             flow.response = http.Response.make(
-                403, f"Host '{host}' not allowed.\nAdd it: sandbox allow {host}\n",
+                403, f"Host '{host}' not allowed.\nAdd it: sandbox allow{_name_flag} {host}\n",
                 {"Content-Type": "text/plain"},
             )
             flow.metadata["sandbox_blocked"] = True

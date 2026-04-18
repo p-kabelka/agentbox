@@ -41,7 +41,7 @@ def free_port() -> int:
 def find_sandbox_dir() -> Path | None:
     d = Path.cwd()
     while d != d.parent:
-        if (d / ".sandbox" / "config" / "proxy.yaml").is_file():
+        if (d / ".sandbox" / "sessions").is_dir():
             return d
         d = d.parent
     return None
@@ -254,7 +254,7 @@ def cmd_run(args) -> None:
         if not preset_file.is_file():
             die(f"preset '{args.preset}' not found at {preset_file}")
         shutil.copy(preset_file, config_file)
-        print(f"    Copied preset '{args.preset}' — edit .sandbox/config/proxy.yaml to enable providers.")
+        print(f"    Copied preset '{args.preset}' — edit .sandbox/sessions/{name}/config/proxy.yaml to enable providers.")
 
     git_available = False
     use_git = not args.no_git
@@ -352,6 +352,8 @@ def cmd_stop(args) -> None:
 def cmd_shell(args) -> None:
     project_dir = require_sandbox()
     session_dir = require_session(project_dir, args.name)
+    compose(session_dir, "up", "-d", "proxy", check=True)
+    wait_healthy(session_dir)
     result = compose(session_dir, "run", "--rm", "agent", "/start.sh", "--shell")
     sys.exit(result.returncode)
 
@@ -378,21 +380,22 @@ def _update_allowlist(host: str, add: bool, name: str | None) -> None:
     config_path = session_dir / "config" / "proxy.yaml"
     cfg = load_yaml(config_path)
     hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
+    session_name = session_dir.name
     if add:
         if host not in hosts:
             hosts.append(host)
             save_yaml(config_path, cfg)
-            print(f"Added '{host}' to allowlist.")
+            print(f"Added '{host}' to allowlist for session '{session_name}'.")
         else:
-            print(f"'{host}' already in allowlist.")
+            print(f"'{host}' already in allowlist for session '{session_name}'.")
     else:
         if host in hosts:
             hosts.remove(host)
             cfg["extra_allowed_hosts"] = hosts
             save_yaml(config_path, cfg)
-            print(f"Removed '{host}' from allowlist.")
+            print(f"Removed '{host}' from allowlist for session '{session_name}'.")
         else:
-            print(f"'{host}' not in allowlist.")
+            print(f"'{host}' not in allowlist for session '{session_name}'.")
     compose(session_dir, "restart", "proxy", check=True)
     wait_healthy(session_dir)
 
@@ -403,6 +406,26 @@ def cmd_allow(args) -> None:
 
 def cmd_deny(args) -> None:
     _update_allowlist(args.host, add=False, name=args.name)
+
+
+def cmd_remove(args) -> None:
+    project_dir = require_sandbox()
+    session_dir = require_session(project_dir, args.name)
+    name = session_dir.name
+    sandbox_dir = project_dir / ".sandbox"
+
+    compose(session_dir, "down", "-v", check=True)
+
+    remote = f"sandbox-{name}"
+    subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote],
+                   capture_output=True)  # best-effort; may not be a git repo
+
+    shutil.rmtree(session_dir, ignore_errors=True)
+
+    output_git = sandbox_dir / f"output-{name}.git"
+    shutil.rmtree(output_git, ignore_errors=True)
+
+    print(f"Removed session '{name}'.")
 
 
 def cmd_mount(args) -> None:
@@ -475,7 +498,7 @@ def cmd_preset(args) -> None:
         if not target.is_file():
             die(f"preset '{args.name}' not found at {target}")
         subprocess.run([os.environ.get("EDITOR", "vi"), str(target)], check=True)
-        print("Preset saved. Existing sandboxes: edit .sandbox/config/proxy.yaml and restart proxy.")
+        print("Preset saved. Existing sessions: edit .sandbox/sessions/<name>/config/proxy.yaml and restart the proxy.")
 
     elif sub == "copy":
         src_file = SANDBOX_HOME / "presets" / args.src / "proxy.yaml"
@@ -490,11 +513,11 @@ def cmd_preset(args) -> None:
 # ── Dispatch ──────────────────────────────────────────────────────────────────
 
 COMMANDS = {
-    "build": cmd_build, "update": cmd_update, "run": cmd_run,
+    "build": cmd_build, "update": cmd_update, "run":    cmd_run,
     "start": cmd_start, "stop":   cmd_stop,   "shell":  cmd_shell,
     "logs":  cmd_logs,  "web":    cmd_web,     "allow":  cmd_allow,
     "deny":  cmd_deny,  "mount":  cmd_mount,   "status": cmd_status,
-    "preset": cmd_preset,
+    "remove": cmd_remove, "preset": cmd_preset,
 }
 
 
@@ -521,11 +544,12 @@ def main() -> None:
     r.add_argument("--mount",   action="append", default=[], dest="mounts", metavar="SRC[:DST]")
 
     for cmd_name, hlp in [
-        ("start", "Resume a sandbox session"),
-        ("stop",  "Stop a sandbox session"),
-        ("shell", "Open a shell in the agent container"),
-        ("logs",  "Tail the proxy access log"),
-        ("web",   "Print the mitmweb traffic-monitor URL"),
+        ("start",  "Resume a sandbox session"),
+        ("stop",   "Stop a sandbox session"),
+        ("shell",  "Open a shell in the agent container"),
+        ("logs",   "Tail the proxy access log"),
+        ("web",    "Print the mitmweb traffic-monitor URL"),
+        ("remove", "Stop and delete a session (containers, volumes, git remote, output repo)"),
     ]:
         _add_name(sub.add_parser(cmd_name, help=hlp))
 

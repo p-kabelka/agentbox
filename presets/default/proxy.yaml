@@ -1,4 +1,4 @@
-# Default provider preset. Copied to .sandbox/config/proxy.yaml on 'sandbox run'.
+# Default provider preset. Copied to .sandbox/sessions/<name>/config/proxy.yaml on 'sandbox run --name <name>'.
 
 providers:
 

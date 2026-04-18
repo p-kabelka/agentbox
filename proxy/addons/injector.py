@@ -70,7 +70,7 @@ class CredentialInjector:
                 (
                     f"Host '{host}' is not in the allowed list.\n"
                     f"Add it with:  sandbox allow {host}\n"
-                    f"Or edit:      .sandbox/config/proxy.yaml → extra_allowed_hosts\n"
+                    f"Or edit:      .sandbox/sessions/<name>/config/proxy.yaml → extra_allowed_hosts\n"
                     f"Then restart: podman compose restart proxy\n"
                 ),
                 {"Content-Type": "text/plain"},

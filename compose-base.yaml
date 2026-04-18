@@ -22,6 +22,7 @@ services:
       - proxy-ca:/root/.mitmproxy:Z
       - proxy-logs:/var/log/proxy:Z
     environment:
+      SANDBOX_NAME:                   ${SANDBOX_NAME:-}
       ANTHROPIC_API_KEY:              ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY:                 ${OPENAI_API_KEY:-}
       AZURE_OPENAI_API_KEY:           ${AZURE_OPENAI_API_KEY:-}
