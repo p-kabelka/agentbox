@@ -187,12 +187,16 @@ def write_override(session_dir: Path) -> None:
     if env := agent_cfg.get("environment"):
         agent["environment"] = env
 
+    proxy: dict = {
+        "ports": [f"127.0.0.1:{web_port}:8081"],
+        "volumes": proxy_volumes,
+    }
+    if proxy_env := proxy_cfg.get("environment"):
+        proxy["environment"] = proxy_env
+
     override = {
         "services": {
-            "proxy": {
-                "ports": [f"127.0.0.1:{web_port}:8081"],
-                "volumes": proxy_volumes,
-            },
+            "proxy": proxy,
             "agent": agent,
         }
     }
@@ -411,7 +415,7 @@ def cmd_shell(args) -> None:
 def cmd_logs(args) -> None:
     project_dir = require_sandbox()
     session_dir = require_session(project_dir, args.name)
-    result = compose(session_dir, "exec", "proxy", "tail", "-f", "/var/log/proxy/access.log")
+    result = compose(session_dir, "logs", "--follow", "--tail=100", "proxy")
     sys.exit(result.returncode)
 
 

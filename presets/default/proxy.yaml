@@ -37,9 +37,12 @@ providers:
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts: []
 
+# Extra environment variables for the proxy container. Merged with compose-base.yaml.
+# environment:
+#   VERTEX_PROJECT_ID: my-project
+#   VERTEX_REGION: us-east5
+
 logging:
-  level: info
   log_request_headers: true
   log_response_headers: false
   log_bodies: false  # WARNING: may log sensitive prompt content if enabled
-  file: /var/log/proxy/access.log

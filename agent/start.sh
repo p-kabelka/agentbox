@@ -28,5 +28,10 @@ fi
 # here survives the raw-mode transition and translates \n back to \r.
 stty inlcr 2>/dev/null || true
 
-echo "[agent] Starting ${AGENT_HARNESS:-claude}..."
-exec "${AGENT_HARNESS:-claude}" "$@"
+if [ -z "${AGENT_HARNESS:-}" ]; then
+    echo "[agent] No AGENT_HARNESS set, starting bash."
+    exec /bin/bash
+fi
+
+echo "[agent] Starting ${AGENT_HARNESS} ${AGENT_HARNESS_ARGS:-}..."
+exec ${AGENT_HARNESS} ${AGENT_HARNESS_ARGS:-} "$@"

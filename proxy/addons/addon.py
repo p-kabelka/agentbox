@@ -1,9 +1,33 @@
 # mitmproxy addon: allowlist enforcement, credential injection, and JSON access logging.
-import fnmatch, json, logging, os, threading, time
+import fnmatch, json, logging, os, sys, threading, time
 import yaml
 from mitmproxy import http
 
-log = logging.getLogger(__name__)
+
+class JSONFormatter(logging.Formatter):
+    def __init__(self, source: str):
+        super().__init__()
+        self.source = source
+
+    def format(self, record: logging.LogRecord) -> str:
+        entry = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(record.created)),
+            "source": self.source,
+        }
+        if isinstance(record.msg, dict):
+            entry.update(record.msg)
+        else:
+            entry["level"] = record.levelname.lower()
+            entry["message"] = record.getMessage()
+        return json.dumps(entry)
+
+
+log = logging.getLogger("proxy")
+log.setLevel(logging.INFO)
+_handler = logging.StreamHandler(sys.stdout)
+_handler.setFormatter(JSONFormatter("proxy"))
+log.addHandler(_handler)
+log.propagate = False
 
 with open("/config/proxy.yaml") as f:
     cfg = yaml.safe_load(f)
@@ -12,20 +36,23 @@ _session_name = os.environ.get("SANDBOX_NAME", "")
 _name_flag = f" --name {_session_name}" if _session_name else ""
 
 lcfg = cfg.get("logging", {})
-os.makedirs("/var/log/proxy", exist_ok=True)
-_log = open(lcfg.get("file", "/var/log/proxy/access.log"), "a", buffering=1)
 _log_req_hdr  = lcfg.get("log_request_headers", True)
 _log_resp_hdr = lcfg.get("log_response_headers", False)
 _log_bodies   = lcfg.get("log_bodies", False)
 
+# Must match the access_token returned by metadata_server.py
+_MOCK_TOKEN = "dummy-replaced-by-proxy"
+
 
 class SandboxAddon:
     def __init__(self):
-        self._allowed      = []
-        self._rules        = []   # (patterns, header, value) — static key injection
-        self._vertex_hosts = []   # patterns for Google APIs
-        self._vertex_creds = None # (credentials, request) — refreshed on demand
-        self._vertex_lock  = threading.Lock()
+        self._allowed        = []
+        self._rules          = []   # (patterns, header, value) — static key injection
+        self._vertex_hosts   = []   # patterns for Google APIs (allowlist)
+        self._vertex_project = ""
+        self._vertex_region  = ""
+        self._vertex_creds   = None # (credentials, request) — refreshed on demand
+        self._vertex_lock    = threading.Lock()
 
         for p in cfg.get("providers", []):
             if not p.get("enabled"):
@@ -33,7 +60,9 @@ class SandboxAddon:
             hosts = p.get("allowed_hosts", [])
             self._allowed.extend(hosts)
             if p.get("name") == "vertex":
-                self._vertex_hosts = hosts
+                self._vertex_hosts   = hosts
+                self._vertex_project = os.environ.get("VERTEX_PROJECT_ID", "")
+                self._vertex_region  = os.environ.get("VERTEX_REGION", "us-east5")
                 self._load_vertex_creds()
             else:
                 key = os.environ.get(p.get("api_key_env", ""), "").strip()
@@ -79,16 +108,24 @@ class SandboxAddon:
                 {"Content-Type": "text/plain"},
             )
             flow.metadata["sandbox_blocked"] = True
-            _log.write(json.dumps({
-                "ts": _ts(), "method": flow.request.method,
+            log.info({
+                "method": flow.request.method,
                 "url": flow.request.pretty_url, "status": 403, "blocked": True,
-            }) + "\n")
+            })
             return
 
-        # Vertex: overwrite any dummy token the agent sent with a real one
+        # Vertex: replace mock token with a real one on inference requests only
         if self._vertex_hosts and any(fnmatch.fnmatch(host, p) for p in self._vertex_hosts):
-            if token := self._vertex_token():
-                flow.request.headers["Authorization"] = f"Bearer {token}"
+            expected_host = f"{self._vertex_region}-aiplatform.googleapis.com"
+            prefix = (f"/v1/projects/{self._vertex_project}"
+                      f"/locations/{self._vertex_region}"
+                      f"/publishers/anthropic/models/")
+            auth = flow.request.headers.get("Authorization", "")
+            if (host == expected_host
+                    and flow.request.path.startswith(prefix)
+                    and auth == f"Bearer {_MOCK_TOKEN}"):
+                if token := self._vertex_token():
+                    flow.request.headers["Authorization"] = f"Bearer {token}"
             return
 
         # Other providers: inject static API key
@@ -101,7 +138,7 @@ class SandboxAddon:
             return
         resp = flow.response
         entry: dict = {
-            "ts": _ts(), "method": flow.request.method,
+            "method": flow.request.method,
             "url": flow.request.pretty_url,
             "status": resp.status_code if resp else None,
             "duration_ms": (
@@ -116,11 +153,7 @@ class SandboxAddon:
         if _log_bodies:
             entry["req_body"]  = flow.request.get_text(strict=False)
             entry["resp_body"] = resp.get_text(strict=False) if resp else None
-        _log.write(json.dumps(entry) + "\n")
-
-
-def _ts() -> str:
-    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        log.info(entry)
 
 
 addons = [SandboxAddon()]
