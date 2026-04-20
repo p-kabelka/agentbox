@@ -576,7 +576,7 @@ def cmd_preset(args) -> None:
         shutil.copy(src_dir / "proxy.yaml", dst_dir / "proxy.yaml")
         if (src_dir / "agent.yaml").is_file():
             shutil.copy(src_dir / "agent.yaml", dst_dir / "agent.yaml")
-        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit {args.dst}")
+        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit <proxy|agent>{args.dst}")
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
