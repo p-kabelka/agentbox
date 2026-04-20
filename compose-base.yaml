@@ -20,7 +20,6 @@ services:
     volumes:
       - ${AGENTBOX_HOME}/secrets:/run/secrets:ro,Z
       - proxy-ca:/root/.mitmproxy:Z
-      - proxy-logs:/var/log/proxy:Z
     environment:
       AGENTBOX_NAME:                   ${AGENTBOX_NAME:-}
       ANTHROPIC_API_KEY:              ${ANTHROPIC_API_KEY:-}

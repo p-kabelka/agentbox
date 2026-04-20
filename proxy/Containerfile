@@ -11,7 +11,5 @@ COPY metadata_server.py /app/metadata_server.py
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-RUN mkdir -p /var/log/proxy
-
 EXPOSE 8080 8081 9090
 CMD ["/start.sh"]
