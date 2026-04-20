@@ -1,5 +1,5 @@
 # Shared base compose — do not edit per-project settings here.
-# Per-project overrides live in <project>/.sandbox/compose.override.yaml.
+# Per-project overrides live in <project>/.agentbox/compose.override.yaml.
 
 volumes:
   proxy-ca:    # mitmproxy CA cert shared between proxy and agent
@@ -13,16 +13,16 @@ networks:
 services:
 
   proxy:
-    image: localhost/agent-sandbox-proxy:latest
+    image: localhost/agentbox-proxy:latest
     networks:
       - agent-net
       - proxy-net
     volumes:
-      - ${SANDBOX_HOME}/secrets:/run/secrets:ro,Z
+      - ${AGENTBOX_HOME}/secrets:/run/secrets:ro,Z
       - proxy-ca:/root/.mitmproxy:Z
       - proxy-logs:/var/log/proxy:Z
     environment:
-      SANDBOX_NAME:                   ${SANDBOX_NAME:-}
+      AGENTBOX_NAME:                   ${AGENTBOX_NAME:-}
       ANTHROPIC_API_KEY:              ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY:                 ${OPENAI_API_KEY:-}
       AZURE_OPENAI_API_KEY:           ${AZURE_OPENAI_API_KEY:-}
@@ -40,7 +40,7 @@ services:
       start_period: 25s
 
   agent:
-    image: localhost/agent-sandbox-agent:latest
+    image: localhost/agentbox-agent:latest
     networks:
       - agent-net          # internal only — no direct internet access
     depends_on:
@@ -49,7 +49,7 @@ services:
     environment:
       AGENT_HARNESS:      ${AGENT_HARNESS:-}
       AGENT_HARNESS_ARGS: ${AGENT_HARNESS_ARGS:-}
-      SANDBOX_NAME:       ${SANDBOX_NAME:-}
+      AGENTBOX_NAME:       ${AGENTBOX_NAME:-}
 
       # Dummy credentials — proxy injects real values via mitmproxy
       # ANTHROPIC_API_KEY:    dummy

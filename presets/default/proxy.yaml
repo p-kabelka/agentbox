@@ -1,4 +1,4 @@
-# Default provider preset. Copied to .sandbox/sessions/<name>/config/proxy.yaml on 'sandbox run --name <name>'.
+# Default provider preset. Copied to .agentbox/sessions/<name>/config/proxy.yaml on 'agentbox run --name <name>'.
 
 providers:
 
@@ -18,7 +18,7 @@ providers:
     allowed_hosts:
       - api.openai.com
 
-  # Requires credentials at ~/.agent-sandbox/secrets/credentials.json
+  # Requires credentials at ~/.agentbox/secrets/credentials.json
   - name: vertex
     enabled: false
     metadata_server: true  # starts fake GCE metadata sidecar on proxy:9090

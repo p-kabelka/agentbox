@@ -1,12 +1,12 @@
-# agent-sandbox Technical Specification
+# agentbox Technical Specification
 
 ## 1. Overview
 
-agent-sandbox creates isolated, credential-safe workspaces for running AI coding agents such as Claude Code, OpenCode, and Codex CLI. Each sandbox is a pair of Podman containers — a proxy and an agent — connected by a private internal network that provides full network mediation without requiring host-level privileges.
+agentbox creates isolated, credential-safe workspaces for running AI coding agents such as Claude Code, OpenCode, and Codex CLI. Each agentbox is a pair of Podman containers — a proxy and an agent — connected by a private internal network that provides full network mediation without requiring host-level privileges.
 
 The core problem is that AI agents run with broad process permissions. If an agent is compromised through prompt injection or malicious content in the working directory, it can read API credentials from environment variables or well-known paths, exfiltrate them to attacker-controlled endpoints, make arbitrary outbound network calls, or inject malicious hooks into the host's `.git/` directory that execute silently when a developer runs routine git operations.
 
-agent-sandbox defends against these threats by structuring the environment so that the primitives required for attacks are never available to the agent process: real credentials live only in the proxy container, external TCP is only reachable through a TLS-intercepting proxy that enforces an allowlist, and the host git repository is never mounted into the agent container — instead, a read-only bundle is used for input and a bare repository with immutable hooks is used for output.
+agentbox defends against these threats by structuring the environment so that the primitives required for attacks are never available to the agent process: real credentials live only in the proxy container, external TCP is only reachable through a TLS-intercepting proxy that enforces an allowlist, and the host git repository is never mounted into the agent container — instead, a read-only bundle is used for input and a bare repository with immutable hooks is used for output.
 
 ---
 
@@ -15,16 +15,16 @@ agent-sandbox defends against these threats by structuring the environment so th
 ### 2.1 Primary Threats Defended Against
 
 **API credential exfiltration**
-A compromised agent attempts to read `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `application_default_credentials.json`, OAuth tokens, or any other long-lived credential and transmit it to an attacker-controlled endpoint. agent-sandbox ensures that real credentials are never present in the agent container's environment or filesystem. The agent receives dummy placeholder values; the proxy rewrites requests with real credentials before forwarding them upstream.
+A compromised agent attempts to read `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `application_default_credentials.json`, OAuth tokens, or any other long-lived credential and transmit it to an attacker-controlled endpoint. agentbox ensures that real credentials are never present in the agent container's environment or filesystem. The agent receives dummy placeholder values; the proxy rewrites requests with real credentials before forwarding them upstream.
 
 **Arbitrary outbound network access**
 The agent attempts to connect to an attacker-controlled server to exfiltrate data, receive instructions, or download malicious payloads. The agent container is attached only to a Podman internal network with no default gateway. All external TCP connections are forced through the mitmproxy instance, which enforces a per-project allowlist and blocks connections to non-whitelisted hosts with an HTTP 403 before the connection is established.
 
 **Git repository poisoning**
-The agent writes executable scripts to `.git/hooks/` (e.g., `post-checkout`, `pre-push`) that would execute on the host when a developer runs routine git operations after retrieving the agent's output. agent-sandbox ensures the host's `.git/` directory is never mounted into the agent container. The agent writes commits to a bare output repository whose `hooks/` directory is created with `chmod 555` (no write permission for any user), and the host fetches commits using `git -c core.hooksPath=/dev/null`.
+The agent writes executable scripts to `.git/hooks/` (e.g., `post-checkout`, `pre-push`) that would execute on the host when a developer runs routine git operations after retrieving the agent's output. agentbox ensures the host's `.git/` directory is never mounted into the agent container. The agent writes commits to a bare output repository whose `hooks/` directory is created with `chmod 555` (no write permission for any user), and the host fetches commits using `git -c core.hooksPath=/dev/null`.
 
 **Prompt injection via untrusted working directory content**
-Malicious content embedded in files, commit messages, or other project artifacts causes the agent to interpret attacker instructions and take actions outside the intended task scope. agent-sandbox does not eliminate this class of threat at the network layer, but the other controls above ensure that even a successfully injected agent cannot exfiltrate real credentials, reach arbitrary network destinations, or poison the host git state.
+Malicious content embedded in files, commit messages, or other project artifacts causes the agent to interpret attacker instructions and take actions outside the intended task scope. agentbox does not eliminate this class of threat at the network layer, but the other controls above ensure that even a successfully injected agent cannot exfiltrate real credentials, reach arbitrary network destinations, or poison the host git state.
 
 ### 2.2 Out of Scope / Residual Risks
 
@@ -32,7 +32,7 @@ Malicious content embedded in files, commit messages, or other project artifacts
 
 **Covert timing channels.** An agent can encode information in request timing patterns observable to the LLM provider. This is not addressed.
 
-**Agent writing malicious scripts to tracked hook directories.** If the project tracks a hooks directory (e.g., `.husky/`, `scripts/`) and the agent adds a malicious script to it, that script becomes part of the git commit and could execute on the host after the developer merges. This is mitigated by code review at `sandbox fetch` time; it is not blocked automatically.
+**Agent writing malicious scripts to tracked hook directories.** If the project tracks a hooks directory (e.g., `.husky/`, `scripts/`) and the agent adds a malicious script to it, that script becomes part of the git commit and could execute on the host after the developer merges. This is mitigated by code review at `agentbox fetch` time; it is not blocked automatically.
 
 ---
 
@@ -40,19 +40,19 @@ Malicious content embedded in files, commit messages, or other project artifacts
 
 ### Use Case 1: Isolated Feature Development
 
-A developer creates a sandbox for a feature branch, provides the agent with a task prompt, and lets it implement the feature autonomously. The agent works inside the container, commits its changes to the output remote, and the developer retrieves them with `sandbox fetch`. The developer reviews the diff — including any new scripts or hook files — before merging into their working branch. The host repository and credentials are never at risk during the agent session.
+A developer creates a agentbox for a feature branch, provides the agent with a task prompt, and lets it implement the feature autonomously. The agent works inside the container, commits its changes to the output remote, and the developer retrieves them with `agentbox fetch`. The developer reviews the diff — including any new scripts or hook files — before merging into their working branch. The host repository and credentials are never at risk during the agent session.
 
 ### Use Case 2: Multi-Repo Context
 
-The agent needs read access to a shared internal library while implementing changes to the main project. The developer adds the library path with `sandbox mount add ~/libs/shared-lib`. The library is mounted read-only into the agent container as an additional reference directory. The agent can read its source but cannot modify it or push to it. The mount configuration is stored in `mounts.yaml` and persists across sandbox restarts.
+The agent needs read access to a shared internal library while implementing changes to the main project. The developer adds the library path with `agentbox mount add ~/libs/shared-lib`. The library is mounted read-only into the agent container as an additional reference directory. The agent can read its source but cannot modify it or push to it. The mount configuration is stored in `mounts.yaml` and persists across agentbox restarts.
 
 ### Use Case 3: Restricted Provider Switching
 
-A team running inference through Anthropic's direct API wants to switch to Vertex AI (e.g., for quota reasons) without changing the agent harness or the developer's workflow. The developer selects a Vertex preset with `sandbox run --preset vertex`. The proxy container starts the fake GCE metadata server, the agent's `GCE_METADATA_HOST` points to it, and the Google auth library fetches short-lived tokens transparently. The agent harness code is unchanged; no GCP service account key is ever present in the agent container.
+A team running inference through Anthropic's direct API wants to switch to Vertex AI (e.g., for quota reasons) without changing the agent harness or the developer's workflow. The developer selects a Vertex preset with `agentbox run --preset vertex`. The proxy container starts the fake GCE metadata server, the agent's `GCE_METADATA_HOST` points to it, and the Google auth library fetches short-lived tokens transparently. The agent harness code is unchanged; no GCP service account key is ever present in the agent container.
 
-### Use Case 4: Parallel Sandboxes
+### Use Case 4: Parallel Agentboxes
 
-A developer runs multiple simultaneous sandboxes for different projects or branches — for example, one agent refactoring a backend service and another writing tests for a frontend library. Each sandbox has its own isolated Podman network, its own proxy container with a separate credential environment, and its own web UI port assigned from a configurable port range. The sandboxes do not share network namespaces and cannot observe each other's traffic.
+A developer runs multiple simultaneous agentboxes for different projects or branches — for example, one agent refactoring a backend service and another writing tests for a frontend library. Each agentbox has its own isolated Podman network, its own proxy container with a separate credential environment, and its own web UI port assigned from a configurable port range. The agentboxes do not share network namespaces and cannot observe each other's traffic.
 
 ---
 
@@ -60,7 +60,7 @@ A developer runs multiple simultaneous sandboxes for different projects or branc
 
 ### 4.1 Network Topology
 
-Two Podman networks are created per sandbox:
+Two Podman networks are created per agentbox:
 
 - **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent container is connected only to this network.
 - **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy container is attached to this network.
@@ -122,29 +122,29 @@ mitmproxy terminates the TLS session from the agent, inspects the plaintext requ
 
 **Source (read-only input)**
 
-Before starting the agent, `sandbox run` creates a git bundle of the project branch:
+Before starting the agent, `agentbox run` creates a git bundle of the project branch:
 
 ```
-git bundle create .sandbox/source.bundle <branch>
+git bundle create .agentbox/source.bundle <branch>
 ```
 
 The bundle is mounted read-only into the agent container at `/source/project.bundle`. `start.sh` clones from this bundle, producing a fresh `.git` directory inside the container with no connection to the host's `.git/` directory. The host git working directory and object store are never accessible from within the container.
 
 **Output (write-only barrier)**
 
-A bare repository is created at `.sandbox/output.git/` on the host at first use. Immediately after creation, its `hooks/` directory is set to `chmod 555` (read and execute for all; write for none). The bare repo is mounted into the agent container as a git remote named `output`. The agent can push commits to this remote. When the developer is ready to review the agent's work, they run:
+A bare repository is created at `.agentbox/output.git/` on the host at first use. Immediately after creation, its `hooks/` directory is set to `chmod 555` (read and execute for all; write for none). The bare repo is mounted into the agent container as a git remote named `output`. The agent can push commits to this remote. When the developer is ready to review the agent's work, they run:
 
 ```
-sandbox fetch <branch>
+agentbox fetch <branch>
 ```
 
 This executes:
 
 ```
-git -c core.hooksPath=/dev/null fetch .sandbox/output.git <branch>:refs/sandbox/<branch>
+git -c core.hooksPath=/dev/null fetch .agentbox/output.git <branch>:refs/agentbox/<branch>
 ```
 
-The `core.hooksPath=/dev/null` flag ensures that even if the agent has somehow written files into `hooks/` (which `chmod 555` prevents), none of them execute during the fetch. The fetched commits land in `refs/sandbox/<branch>` for review before any merge.
+The `core.hooksPath=/dev/null` flag ensures that even if the agent has somehow written files into `hooks/` (which `chmod 555` prevents), none of them execute during the fetch. The fetched commits land in `refs/agentbox/<branch>` for review before any merge.
 
 ---
 
@@ -163,7 +163,7 @@ Reads `config/proxy.yaml` at startup. For each intercepted request:
 1. Checks the destination hostname against the configured allowlist. If not listed, responds with HTTP 403 and logs the block. The upstream connection is never opened.
 2. If the destination matches a configured provider, strips any existing authorization header and injects the real credential (API key, Bearer token) from the proxy container's environment.
 
-The allowlist always includes the configured provider endpoints. Additional hosts are added and removed at runtime via `sandbox allow` and `sandbox deny`, which signal mitmproxy to reload the addon.
+The allowlist always includes the configured provider endpoints. Additional hosts are added and removed at runtime via `agentbox allow` and `agentbox deny`, which signal mitmproxy to reload the addon.
 
 **`addons/logger.py`**
 
@@ -194,7 +194,7 @@ Executed as the container entrypoint. Performs in order:
 
 `node:22-slim` with Claude Code pre-installed. Designed to be extended for other harnesses via a derived Containerfile.
 
-### 5.3 `bin/sandbox` CLI
+### 5.3 `bin/agentbox` CLI
 
 A Python script installed to `PATH` by `install.sh`. Commands are grouped by function:
 
@@ -208,23 +208,23 @@ A Python script installed to `PATH` by `install.sh`. Commands are grouped by fun
 | Reference mounts | `mount list`, `mount add <path>`, `mount remove <path>` |
 | Observation | `status` |
 
-`sandbox run` is the primary entry point. It refreshes `source.bundle`, regenerates `compose.override.yaml` from `mounts.yaml` and current git state, assigns a web UI port, writes `.env`, and starts the Compose stack.
+`agentbox run` is the primary entry point. It refreshes `source.bundle`, regenerates `compose.override.yaml` from `mounts.yaml` and current git state, assigns a web UI port, writes `.env`, and starts the Compose stack.
 
-`sandbox fetch` runs the `core.hooksPath=/dev/null` fetch and reports the resulting ref for review.
+`agentbox fetch` runs the `core.hooksPath=/dev/null` fetch and reports the resulting ref for review.
 
-`sandbox allow` and `sandbox deny` append or remove entries from the allowlist in `config/proxy.yaml` and send a reload signal to the mitmproxy process.
+`agentbox allow` and `agentbox deny` append or remove entries from the allowlist in `config/proxy.yaml` and send a reload signal to the mitmproxy process.
 
 ### 5.4 Configuration Files
 
-| File | Location | Purpose | Overwritten by `sandbox run`? |
+| File | Location | Purpose | Overwritten by `agentbox run`? |
 |------|----------|---------|-------------------------------|
-| `proxy.yaml` (preset) | `~/.agent-sandbox/presets/<name>/` | Global default provider config | N/A — global |
-| `config/proxy.yaml` | `.sandbox/config/` | Per-project provider config, allowlist | No — user-owned |
-| `mounts.yaml` | `.sandbox/` | Persistent extra reference mounts | No — user-owned |
-| `compose.override.yaml` | `.sandbox/` | Generated Compose overrides (port, volumes) | Yes — regenerated from `mounts.yaml` and git state |
-| `.env` | `.sandbox/` | `SANDBOX_WEB_PORT`, `AGENT_HARNESS` | Yes |
-| `source.bundle` | `.sandbox/` | Read-only git snapshot | Yes — refreshed on each `sandbox run` |
-| `output.git/` | `.sandbox/` | Bare repo output barrier | Created once; agent pushes here |
+| `proxy.yaml` (preset) | `~/.agentbox/presets/<name>/` | Global default provider config | N/A — global |
+| `config/proxy.yaml` | `.agentbox/config/` | Per-project provider config, allowlist | No — user-owned |
+| `mounts.yaml` | `.agentbox/` | Persistent extra reference mounts | No — user-owned |
+| `compose.override.yaml` | `.agentbox/` | Generated Compose overrides (port, volumes) | Yes — regenerated from `mounts.yaml` and git state |
+| `.env` | `.agentbox/` | `AGENTBOX_WEB_PORT`, `AGENT_HARNESS` | Yes |
+| `source.bundle` | `.agentbox/` | Read-only git snapshot | Yes — refreshed on each `agentbox run` |
+| `output.git/` | `.agentbox/` | Bare repo output barrier | Created once; agent pushes here |
 
 ---
 
@@ -239,7 +239,7 @@ A Python script installed to `PATH` by `install.sh`. Commands are grouped by fun
 | Host `.git/` is never accessible to agent | Source delivered as git bundle; no host git mount | No filesystem path to host's `.git/` exists in the container |
 | Agent cannot plant executable hooks in host git | `output.git/hooks/` is `chmod 555` at creation; fetch uses `core.hooksPath=/dev/null` | No new files can be written to hooks dir; hooks do not execute on fetch |
 | All agent network traffic is auditable | mitmproxy full TLS termination; structured JSON access log | Every request, including blocked ones, is logged with URL and status |
-| Sandbox network isolation requires no host privilege | Podman internal networks via container runtime namespaces | No `sudo`, no host iptables or nftables changes needed |
+| Agentbox network isolation requires no host privilege | Podman internal networks via container runtime namespaces | No `sudo`, no host iptables or nftables changes needed |
 
 ---
 
@@ -248,39 +248,39 @@ A Python script installed to `PATH` by `install.sh`. Commands are grouped by fun
 ### 7.1 First-Time Setup (One Machine)
 
 ```bash
-git clone <repo> ~/.agent-sandbox
-~/.agent-sandbox/install.sh
+git clone <repo> ~/.agentbox
+~/.agentbox/install.sh
 source ~/.bashrc
 
-sandbox preset edit                       # enable provider, e.g. anthropic.enabled: true
+agentbox preset edit                       # enable provider, e.g. anthropic.enabled: true
 export ANTHROPIC_API_KEY=sk-ant-...      # add to ~/.bashrc
 
-sandbox build                            # builds container images; ~2 minutes; once per machine
+agentbox build                            # builds container images; ~2 minutes; once per machine
 ```
 
-### 7.2 Starting a Project Sandbox
+### 7.2 Starting a Project Agentbox
 
 ```bash
 cd ~/projects/my-app
-sandbox run                              # uses default preset and harness
+agentbox run                              # uses default preset and harness
 # or:
-sandbox run --preset webdev --harness opencode
+agentbox run --preset webdev --harness opencode
 # proxy starts in background; agent starts interactively
 ```
 
 ### 7.3 During a Session
 
 ```bash
-sandbox allow pypi.org                  # add a host to the egress allowlist
-sandbox deny pypi.org                   # remove it
+agentbox allow pypi.org                  # add a host to the egress allowlist
+agentbox deny pypi.org                   # remove it
 
-sandbox logs                            # tail the JSON access log from the proxy
-sandbox web                             # open traffic monitor at http://localhost:<port>
+agentbox logs                            # tail the JSON access log from the proxy
+agentbox web                             # open traffic monitor at http://localhost:<port>
 
-sandbox mount add ~/libs/shared-lib     # add a read-only reference mount
-sandbox start                           # restart agent container to apply new mount
+agentbox mount add ~/libs/shared-lib     # add a read-only reference mount
+agentbox start                           # restart agent container to apply new mount
 
-sandbox status                          # show container state, assigned port, active mounts
+agentbox status                          # show container state, assigned port, active mounts
 ```
 
 ### 7.4 Retrieving Agent Output
@@ -290,13 +290,13 @@ sandbox status                          # show container state, assigned port, a
 #   git push output HEAD:agent-work
 
 # On the host:
-sandbox fetch agent-work                # fetches to refs/sandbox/agent-work using core.hooksPath=/dev/null
+agentbox fetch agent-work                # fetches to refs/agentbox/agent-work using core.hooksPath=/dev/null
 
-git log refs/sandbox/agent-work         # review commit history
-git diff HEAD refs/sandbox/agent-work   # review all changes before merging
-git merge refs/sandbox/agent-work       # merge after review
+git log refs/agentbox/agent-work         # review commit history
+git diff HEAD refs/agentbox/agent-work   # review all changes before merging
+git merge refs/agentbox/agent-work       # merge after review
 
-sandbox stop                            # tear down containers and networks
+agentbox stop                            # tear down containers and networks
 ```
 
 ---
@@ -312,25 +312,25 @@ Add a stanza to `config/proxy.yaml` specifying `name`, `enabled`, `api_key_env`,
 Extend the agent Containerfile:
 
 ```dockerfile
-FROM localhost/agent-sandbox-agent:latest
+FROM localhost/agentbox-agent:latest
 RUN npm install -g opencode   # or pip install codex, etc.
 ```
 
-Set `AGENT_HARNESS=<binary>` in `.sandbox/.env` or pass `--harness <binary>` to `sandbox run`. `start.sh` execs the specified binary as the final step.
+Set `AGENT_HARNESS=<binary>` in `.agentbox/.env` or pass `--harness <binary>` to `agentbox run`. `start.sh` execs the specified binary as the final step.
 
 **VM-level isolation**
 
-Uncomment `runtime: krun` in `.sandbox/compose.override.yaml` (requires `crun-vm` / `krun` installed on the host). Each container runs in its own KVM microVM. The two-network topology and credential flow are unchanged; the isolation boundary moves from Linux namespaces to a hypervisor boundary.
+Uncomment `runtime: krun` in `.agentbox/compose.override.yaml` (requires `crun-vm` / `krun` installed on the host). Each container runs in its own KVM microVM. The two-network topology and credential flow are unchanged; the isolation boundary moves from Linux namespaces to a hypervisor boundary.
 
 **Custom preset**
 
 ```bash
-sandbox preset copy default mypreset
-sandbox preset edit mypreset
-sandbox run --preset mypreset
+agentbox preset copy default mypreset
+agentbox preset edit mypreset
+agentbox run --preset mypreset
 ```
 
-Presets are stored in `~/.agent-sandbox/presets/<name>/` and contain a `proxy.yaml` with provider configuration. Copying from `default` gives a starting point with all fields documented.
+Presets are stored in `~/.agentbox/presets/<name>/` and contain a `proxy.yaml` with provider configuration. Copying from `default` gives a starting point with all fields documented.
 
 ---
 
@@ -342,6 +342,6 @@ Presets are stored in `~/.agent-sandbox/presets/<name>/` and contain a `proxy.ya
 
 **DNS resolution of external hostnames.** The agent container can resolve external hostnames via the container runtime's DNS resolver, but cannot TCP-connect to them (no default gateway). DNS-based data exfiltration (encoding data in query labels sent to an attacker-controlled nameserver) is not blocked. Mitigation: configure a restricted DNS resolver in the agent container and add `/etc/hosts` entries for all required hostnames, disabling recursive resolution.
 
-**`core.hooksPath` set in tracked configuration files.** If the project tracks a file (e.g., `.gitconfig`, `.husky/.huskyrc`) that sets `core.hooksPath = ./hooks`, and the agent adds a malicious executable script to that directory, the script becomes part of the git commit and could execute on the host after the developer merges and runs a git operation. The `chmod 555` on `output.git/hooks/` does not protect against this because the malicious script lives in the tracked working tree, not in the bare repo's hooks directory. Mitigation: inspect all new or modified scripts in hook-related directories at `sandbox fetch` time before merging.
+**`core.hooksPath` set in tracked configuration files.** If the project tracks a file (e.g., `.gitconfig`, `.husky/.huskyrc`) that sets `core.hooksPath = ./hooks`, and the agent adds a malicious executable script to that directory, the script becomes part of the git commit and could execute on the host after the developer merges and runs a git operation. The `chmod 555` on `output.git/hooks/` does not protect against this because the malicious script lives in the tracked working tree, not in the bare repo's hooks directory. Mitigation: inspect all new or modified scripts in hook-related directories at `agentbox fetch` time before merging.
 
 **proxychains LD_PRELOAD bypass by static binaries.** proxychains4 intercepts socket calls by injecting a shared library via `LD_PRELOAD`, which applies only to dynamically linked executables. A static binary (one that does not use libc's dynamic linker) would bypass proxychains and, if it had a way to route to the internet, could make unmediated connections. In practice, no common agent harness ships as a fully static binary; this is noted as a residual risk for custom harness configurations.

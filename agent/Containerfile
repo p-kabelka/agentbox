@@ -14,7 +14,7 @@ RUN chmod +x /usr/local/bin/claude
 COPY start.sh /start.sh
 RUN chmod +x /start.sh
 
-RUN git config --global user.email "agent@sandbox" && \
+RUN git config --global user.email "agent@agentbox" && \
     git config --global user.name "Agent"
 
 WORKDIR /workspace

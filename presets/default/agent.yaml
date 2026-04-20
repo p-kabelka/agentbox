@@ -1,4 +1,4 @@
-# Agent preset — copied to .sandbox/sessions/<name>/config/agent.yaml on 'sandbox init --name <name>'.
+# Agent preset — copied to .agentbox/sessions/<name>/config/agent.yaml on 'agentbox init --name <name>'.
 
 # Extra environment variables injected into the agent container.
 # These are merged with (and can override) the base env in compose-base.yaml.
@@ -11,9 +11,9 @@ environment: {}
 # Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
 dotfiles: {}
   # .bashrc: |
-  #   export PS1="\u@sandbox:\w\$ "
+  #   export PS1="\u@agentbox:\w\$ "
   #   alias ll='ls -la'
   # .gitconfig: |
   #   [user]
   #       name = Agent
-  #       email = agent@sandbox
+  #       email = agent@agentbox

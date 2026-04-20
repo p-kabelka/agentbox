@@ -1,4 +1,4 @@
-# agent-sandbox — Architecture
+# agentbox — Architecture
 
 > This document describes **why** the system is designed the way it is.
 > For **what** each component does in detail, see [SPEC.md](SPEC.md).
@@ -13,7 +13,7 @@ The two dominant attack surfaces are:
 
 **Credential theft.** The agent has access to the same API keys and credential files the developer uses. A prompt-injected agent can read these and exfiltrate them over the network, giving an attacker persistent access to the developer's accounts.
 
-**Repository poisoning.** The agent has write access to the project's `.git/` directory. A malicious commit hook planted there executes silently on the developer's machine the next time they run a routine git operation — potentially after the sandbox session is over and the threat is no longer visible.
+**Repository poisoning.** The agent has write access to the project's `.git/` directory. A malicious commit hook planted there executes silently on the developer's machine the next time they run a routine git operation — potentially after the agentbox session is over and the threat is no longer visible.
 
 The architectural goal is to eliminate both attack surfaces without making the legitimate workflow impractical.
 
@@ -49,9 +49,9 @@ A team uses different LLM providers depending on task sensitivity — a hosted p
 
 ### 2.5 Parallel workstreams
 
-A developer runs multiple sandboxes simultaneously — one per feature branch, or multiple agents exploring different approaches to the same problem. Each sandbox must be fully isolated from the others; a credential or network event in one must have no effect on another.
+A developer runs multiple agentboxes simultaneously — one per feature branch, or multiple agents exploring different approaches to the same problem. Each agentbox must be fully isolated from the others; a credential or network event in one must have no effect on another.
 
-**Architectural requirements:** Sandboxes must not share networks, volumes, or host ports. Container images must be shared to avoid duplicating disk usage and build time. Creating a new sandbox must not require modifying any existing sandbox's state.
+**Architectural requirements:** Agentboxes must not share networks, volumes, or host ports. Container images must be shared to avoid duplicating disk usage and build time. Creating a new agentbox must not require modifying any existing agentbox's state.
 
 ### 2.6 Supervised exploration
 
@@ -147,7 +147,7 @@ The system is structured in five layers, each with a distinct responsibility:
 ```
 ┌────────────────────────────────────────────────────────┐
 │  5. ORCHESTRATION                                      │
-│     sandbox CLI — project lifecycle, preset management │
+│     agentbox CLI — project lifecycle, preset management │
 │     compose-base.yaml — shared service definitions     │
 └──────────────────────────────┬─────────────────────────┘
                                │
@@ -220,7 +220,7 @@ The output bare repository provides the reverse channel. It accepts pushes from 
 
 ### 6.5 Two compose files over a generated monolith
 
-The base compose file defines services, networks, volumes, and all configuration that is identical across every project. Per-project concerns (mitmweb port, git mounts, reference mounts) live in a generated override file in the project's `.sandbox/` directory.
+The base compose file defines services, networks, volumes, and all configuration that is identical across every project. Per-project concerns (mitmweb port, git mounts, reference mounts) live in a generated override file in the project's `.agentbox/` directory.
 
 `podman compose -f base.yaml -f override.yaml` merges these at runtime. This means images are defined once and reused across all projects. A change to the proxy's Python addons requires rebuilding one image, not regenerating every project's configuration.
 
@@ -235,10 +235,10 @@ The architecture is designed so that the most common customisations require no c
 | Customisation | Mechanism | Requires code change? |
 |--------------|-----------|----------------------|
 | Add a new LLM provider | Add a stanza to `proxy.yaml` | No |
-| Open additional egress | `sandbox allow <host>` | No |
+| Open additional egress | `agentbox allow <host>` | No |
 | Switch agent harness | Set `AGENT_HARNESS` | No |
-| Add a read-only reference project | `sandbox mount add` | No |
-| Use a different preset per project | `sandbox run --preset` | No |
+| Add a read-only reference project | `agentbox mount add` | No |
+| Use a different preset per project | `agentbox run --preset` | No |
 | Enable VM-level isolation | Uncomment `runtime: krun` | No |
 | Add a new harness package | Extend the agent Containerfile | One Containerfile change |
 | Add a new credential protocol | New addon script or metadata server | Python code |
@@ -253,11 +253,11 @@ The proxy's addon interface (mitmproxy's Python API) is the primary extension po
 
 **Transparency.** Every network request the agent makes is visible. The mitmweb interface shows live traffic. The JSON access log is persistent. Blocked requests are recorded. A developer running an agent for the first time can watch exactly what it does.
 
-**Usability.** The target for starting a new project sandbox is a single command after one-time setup. Configuration is in files, not flags. Mounts, allowlist changes, and harness selection are all handled without stopping and recreating the sandbox from scratch.
+**Usability.** The target for starting a new project agentbox is a single command after one-time setup. Configuration is in files, not flags. Mounts, allowlist changes, and harness selection are all handled without stopping and recreating the agentbox from scratch.
 
 **Portability.** The system requires Podman and Python 3 with PyYAML. It runs on any Linux system without root privileges. The optional krun runtime for VM-level isolation requires KVM but is opt-in and does not change the configuration interface.
 
-**Reproducibility.** The proxy and agent images are built once and reused. A project's `.sandbox/` directory fully describes its configuration. Two developers with the same base images and the same `.sandbox/` directory get equivalent environments.
+**Reproducibility.** The proxy and agent images are built once and reused. A project's `.agentbox/` directory fully describes its configuration. Two developers with the same base images and the same `.agentbox/` directory get equivalent environments.
 
 ---
 
@@ -269,4 +269,4 @@ The proxy's addon interface (mitmproxy's Python API) is the primary extension po
 
 **Process-level isolation within the agent container.** The architecture isolates the agent container from the host but does not restrict what the agent can do within its own container. A contained agent process can still read other files in the container, spawn subprocesses, and use all available CPU and memory. This is a deliberate trade-off for compatibility — adding seccomp profiles or capability restrictions would break legitimate agent workflows.
 
-**Protecting against a developer who deliberately misconfigures the sandbox.** The system trusts the developer's intent. If a developer mounts sensitive files read-write, disables the proxy, or copies real credentials into the agent container, the security properties no longer hold. The design makes the secure path the easy path, not the only path.
+**Protecting against a developer who deliberately misconfigures the agentbox.** The system trusts the developer's intent. If a developer mounts sensitive files read-write, disables the proxy, or copies real credentials into the agent container, the security properties no longer hold. The design makes the secure path the easy path, not the only path.

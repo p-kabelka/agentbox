@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""sandbox — isolated agent workspace manager"""
+"""agentbox — isolated agent workspace manager"""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ from typing import NoReturn
 
 import yaml
 
-SANDBOX_HOME   = Path(os.environ.get("AGENT_SANDBOX_HOME", Path.home() / ".local" / "share" / "agent-sandbox"))
-SANDBOX_PRESET = os.environ.get("AGENT_SANDBOX_PRESET", "default")
+AGENTBOX_HOME   = Path(os.environ.get("AGENTBOX_HOME", Path.home() / ".local" / "share" / "agentbox"))
+AGENTBOX_PRESET = os.environ.get("AGENTBOX_PRESET", "default")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -29,7 +29,7 @@ def die(msg: str) -> NoReturn:
 
 def project_name(path: Path) -> str:
     name = re.sub(r"[^a-z0-9]+", "-", path.resolve().name.lower()).strip("-")
-    return name or "sandbox"
+    return name or "agentbox"
 
 
 def free_port() -> int:
@@ -38,41 +38,41 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def find_sandbox_dir() -> Path | None:
+def find_agentbox_dir() -> Path | None:
     d = Path.cwd()
     while d != d.parent:
-        if (d / ".sandbox" / "sessions").is_dir():
+        if (d / ".agentbox" / "sessions").is_dir():
             return d
         d = d.parent
     return None
 
 
-def require_sandbox() -> Path:
-    p = find_sandbox_dir()
+def require_agentbox() -> Path:
+    p = find_agentbox_dir()
     if p is None:
-        die("no .sandbox/ found in this directory or any parent.\n"
-            "       Run 'sandbox run --name <name>' to create one.")
+        die("no .agentbox/ found in this directory or any parent.\n"
+            "       Run 'agentbox run --name <name>' to create one.")
     return p  # type: ignore[return-value]
 
 
 def get_sessions(project_dir: Path) -> list[str]:
-    sessions_dir = project_dir / ".sandbox" / "sessions"
+    sessions_dir = project_dir / ".agentbox" / "sessions"
     return sorted(d.name for d in sessions_dir.iterdir() if d.is_dir()) if sessions_dir.is_dir() else []
 
 
 def require_session(project_dir: Path, name: str | None) -> Path:
     """Return session_dir, auto-detecting if exactly one session exists."""
-    sessions_dir = project_dir / ".sandbox" / "sessions"
+    sessions_dir = project_dir / ".agentbox" / "sessions"
     if name:
         d = sessions_dir / name
         if not d.is_dir():
-            die(f"session '{name}' not found — run: sandbox list")
+            die(f"session '{name}' not found — run: agentbox list")
         return d
     sessions = get_sessions(project_dir)
     if len(sessions) == 1:
         return sessions_dir / sessions[0]
     elif not sessions:
-        die("No sessions. Run: sandbox init --name <name>")
+        die("No sessions. Run: agentbox init --name <name>")
     else:
         die(f"Multiple sessions ({', '.join(sessions)}) — specify: --name <name>")
     raise AssertionError  # unreachable
@@ -81,16 +81,16 @@ def require_session(project_dir: Path, name: str | None) -> Path:
 def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
     name = session_dir.name
     project_dir = session_dir.parent.parent.parent
-    sandbox_dir = project_dir / ".sandbox"
+    agentbox_dir = project_dir / ".agentbox"
     env = {
         **os.environ,
-        "SANDBOX_HOME": str(SANDBOX_HOME),
-        "SANDBOX_DIR":  str(sandbox_dir.resolve()),
+        "AGENTBOX_HOME": str(AGENTBOX_HOME),
+        "AGENTBOX_DIR":  str(agentbox_dir.resolve()),
     }
     cmd = [
         "podman", "compose",
-        "--project-name", f"sandbox-{project_name(project_dir)}-{name}",
-        "-f", str(SANDBOX_HOME / "compose-base.yaml"),
+        "--project-name", f"agentbox-{project_name(project_dir)}-{name}",
+        "-f", str(AGENTBOX_HOME / "compose-base.yaml"),
         "-f", str((session_dir / "compose.override.yaml").resolve()),
         "--env-file", str((session_dir / ".env").resolve()),
         *args,
@@ -121,7 +121,7 @@ def read_env(session_dir: Path) -> dict[str, str]:
 
 
 def read_port(session_dir: Path) -> int | None:
-    val = read_env(session_dir).get("SANDBOX_WEB_PORT")
+    val = read_env(session_dir).get("AGENTBOX_WEB_PORT")
     return int(val) if val else None
 
 
@@ -135,16 +135,16 @@ def save_yaml(path: Path, cfg: dict) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
 
-def read_mounts(sandbox_dir: Path) -> list[tuple[str, str]]:
-    p = sandbox_dir / "mounts.yaml"
+def read_mounts(agentbox_dir: Path) -> list[tuple[str, str]]:
+    p = agentbox_dir / "mounts.yaml"
     if not p.is_file():
         return []
     return [(m["src"], m["dst"]) for m in (yaml.safe_load(p.read_text()) or [])]
 
 
-def save_mounts(sandbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
+def save_mounts(agentbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
     data = [{"src": src, "dst": dst} for src, dst in mounts]
-    (sandbox_dir / "mounts.yaml").write_text(
+    (agentbox_dir / "mounts.yaml").write_text(
         yaml.dump(data, default_flow_style=False, allow_unicode=True)
     )
 
@@ -152,19 +152,19 @@ def save_mounts(sandbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
 def write_override(session_dir: Path) -> None:
     name = session_dir.name
     project_dir = session_dir.parent.parent.parent
-    sandbox_dir = project_dir / ".sandbox"
+    agentbox_dir = project_dir / ".agentbox"
     web_port = read_port(session_dir) or 8081
     has_bundle = (session_dir / "source.bundle").is_file()
-    has_output = (sandbox_dir / f"output-{name}.git").is_dir()
+    has_output = (agentbox_dir / f"output-{name}.git").is_dir()
 
     dotfiles_dir = session_dir / "dotfiles"
     agent_volumes = ["proxy-ca:/proxy-ca:ro,Z"]
     if dotfiles_dir.is_dir():
-        agent_volumes.append(f"{dotfiles_dir}:/sandbox-dotfiles:ro,Z")
+        agent_volumes.append(f"{dotfiles_dir}:/agentbox-dotfiles:ro,Z")
     if has_bundle:
         agent_volumes.append(f"{session_dir}/source.bundle:/source/project.bundle:ro,Z")
     if has_output:
-        agent_volumes.append(f"{sandbox_dir}/output-{name}.git:/output/repo.git:Z")
+        agent_volumes.append(f"{agentbox_dir}/output-{name}.git:/output/repo.git:Z")
     if not has_bundle and not has_output:
         agent_volumes.append(f"{project_dir}:/workspace:Z")
     for src, dst in read_mounts(session_dir):
@@ -202,7 +202,7 @@ def write_override(session_dir: Path) -> None:
     }
 
     (session_dir / "compose.override.yaml").write_text(
-        "# Generated by sandbox — re-run 'sandbox init' to regenerate.\n"
+        "# Generated by agentbox — re-run 'agentbox init' to regenerate.\n"
         + yaml.dump(override, default_flow_style=False, allow_unicode=True, sort_keys=False)
     )
 
@@ -212,19 +212,19 @@ def write_override(session_dir: Path) -> None:
 def _build_images(no_cache: bool = False) -> None:
     extra = ["--no-cache"] if no_cache else []
 
-    (SANDBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
+    (AGENTBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
 
     # Stage host claude binary into agent build context
     claude_src = Path.home() / ".local" / "bin" / "claude"
-    claude_staged = SANDBOX_HOME / "agent" / "claude"
+    claude_staged = AGENTBOX_HOME / "agent" / "claude"
     if not claude_src.is_file():
         die(f"claude binary not found at {claude_src}")
     shutil.copy2(claude_src, claude_staged)
 
     try:
         for tag, ctx in [
-            ("localhost/agent-sandbox-proxy:latest", SANDBOX_HOME / "proxy"),
-            ("localhost/agent-sandbox-agent:latest", SANDBOX_HOME / "agent"),
+            ("localhost/agentbox-proxy:latest", AGENTBOX_HOME / "proxy"),
+            ("localhost/agentbox-agent:latest", AGENTBOX_HOME / "agent"),
         ]:
             subprocess.run(["podman", "build", *extra, "-t", tag, str(ctx)], check=True)
     finally:
@@ -234,7 +234,7 @@ def _build_images(no_cache: bool = False) -> None:
 def cmd_build(args) -> None:
     print("==> Building images...")
     _build_images()
-    print("==> Done. Run 'sandbox update' after pulling a new version.")
+    print("==> Done. Run 'agentbox update' after pulling a new version.")
 
 
 def cmd_update(args) -> None:
@@ -250,19 +250,19 @@ def _launch(session_dir: Path) -> None:
     wait_healthy(session_dir)
     web_port = read_port(session_dir)
     if web_port:
-        print(f"  Traffic monitor: http://localhost:{web_port} | sandbox logs | git fetch sandbox-{name}")
+        print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
     result = compose(session_dir, "run", "--rm", "agent")
     # Auto-fetch when the session ends
-    output_git = project_dir / ".sandbox" / f"output-{name}.git"
+    output_git = project_dir / ".agentbox" / f"output-{name}.git"
     if output_git.is_dir():
-        print(f"\n==> Fetching agent output (sandbox-{name})...")
+        print(f"\n==> Fetching agent output (agentbox-{name})...")
         r = subprocess.run(
             ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null",
-             "fetch", f"sandbox-{name}"],
+             "fetch", f"agentbox-{name}"],
         )
         if r.returncode == 0:
             ls = subprocess.run(
-                ["git", "-C", str(project_dir), "branch", "-r", "--list", f"sandbox-{name}/*"],
+                ["git", "-C", str(project_dir), "branch", "-r", "--list", f"agentbox-{name}/*"],
                 capture_output=True, text=True,
             )
             branches = [b.strip() for b in ls.stdout.splitlines() if b.strip()]
@@ -275,25 +275,25 @@ def _launch(session_dir: Path) -> None:
 
 def cmd_init(args) -> None:
     project_dir = Path(args.dir).resolve() if args.dir else Path.cwd()
-    sandbox_dir = project_dir / ".sandbox"
+    agentbox_dir = project_dir / ".agentbox"
     name = args.name or time.strftime("%Y%m%d-%H%M%S")
     if not re.match(r"^[a-z0-9][a-z0-9._-]*$", name):
         die(f"invalid session name '{name}' — use lowercase letters, digits, hyphens, dots")
-    session_dir = sandbox_dir / "sessions" / name
+    session_dir = agentbox_dir / "sessions" / name
 
-    print(f"==> Initializing sandbox '{name}': {project_dir}")
-    sandbox_dir.mkdir(parents=True, exist_ok=True)
+    print(f"==> Initializing agentbox '{name}': {project_dir}")
+    agentbox_dir.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
     (session_dir / "config").mkdir(exist_ok=True)
 
     config_file = session_dir / "config" / "proxy.yaml"
     agent_config_file = session_dir / "config" / "agent.yaml"
-    preset_dir = SANDBOX_HOME / "presets" / args.preset
+    preset_dir = AGENTBOX_HOME / "presets" / args.preset
     if not (preset_dir / "proxy.yaml").is_file():
         die(f"preset '{args.preset}' not found at {preset_dir}")
     if not config_file.is_file():
         shutil.copy(preset_dir / "proxy.yaml", config_file)
-        print(f"    Copied preset '{args.preset}' — edit .sandbox/sessions/{name}/config/proxy.yaml to enable providers.")
+        print(f"    Copied preset '{args.preset}' — edit .agentbox/sessions/{name}/config/proxy.yaml to enable providers.")
     if not agent_config_file.is_file() and (preset_dir / "agent.yaml").is_file():
         shutil.copy(preset_dir / "agent.yaml", agent_config_file)
 
@@ -337,12 +337,12 @@ def cmd_init(args) -> None:
                 check=True,
             )
 
-            output_git = sandbox_dir / f"output-{name}.git"
+            output_git = agentbox_dir / f"output-{name}.git"
             subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
             (output_git / "hooks").mkdir(exist_ok=True)
             (output_git / "hooks").chmod(0o555)
 
-            remote = f"sandbox-{name}"
+            remote = f"agentbox-{name}"
             has_remote = subprocess.run(
                 ["git", "-C", str(project_dir), "remote", "get-url", remote],
                 capture_output=True,
@@ -358,7 +358,7 @@ def cmd_init(args) -> None:
 
     web_port = read_port(session_dir) or free_port()
     (session_dir / ".env").write_text(
-        f"SANDBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\nSANDBOX_NAME={name}\n"
+        f"AGENTBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\nAGENTBOX_NAME={name}\n"
     )
 
     if args.mounts:
@@ -380,31 +380,31 @@ def cmd_init(args) -> None:
     if git_available:
         gitignore = project_dir / ".gitignore"
         existing = gitignore.read_text() if gitignore.is_file() else ""
-        if ".sandbox/" not in existing.splitlines():
+        if ".agentbox/" not in existing.splitlines():
             with gitignore.open("a") as f:
-                f.write(".sandbox/\n")
+                f.write(".agentbox/\n")
 
     if args.start:
         _launch(session_dir)
     else:
-        print(f"  Initialized. Run 'sandbox start --name {name}' to start.")
+        print(f"  Initialized. Run 'agentbox start --name {name}' to start.")
 
 
 def cmd_start(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     write_override(session_dir)
     _launch(session_dir)
 
 
 def cmd_stop(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     compose(session_dir, "down", check=True)
 
 
 def cmd_shell(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     compose(session_dir, "up", "-d", "proxy", check=True)
     wait_healthy(session_dir)
@@ -413,23 +413,23 @@ def cmd_shell(args) -> None:
 
 
 def cmd_logs(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     result = compose(session_dir, "logs", "--follow", "--tail=100", "proxy")
     sys.exit(result.returncode)
 
 
 def cmd_web(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     web_port = read_port(session_dir)
     if not web_port:
-        die("SANDBOX_WEB_PORT not found in session .env")
+        die("AGENTBOX_WEB_PORT not found in session .env")
     print(f"http://localhost:{web_port}")
 
 
 def _update_allowlist(host: str, add: bool, name: str | None) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, name)
     config_path = session_dir / "config" / "proxy.yaml"
     cfg = load_yaml(config_path)
@@ -463,20 +463,20 @@ def cmd_deny(args) -> None:
 
 
 def cmd_remove(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     name = session_dir.name
-    sandbox_dir = project_dir / ".sandbox"
+    agentbox_dir = project_dir / ".agentbox"
 
     compose(session_dir, "down", "-v", check=True)
 
-    remote = f"sandbox-{name}"
+    remote = f"agentbox-{name}"
     subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote],
                    capture_output=True)  # best-effort; may not be a git repo
 
     shutil.rmtree(session_dir, ignore_errors=True)
 
-    output_git = sandbox_dir / f"output-{name}.git"
+    output_git = agentbox_dir / f"output-{name}.git"
     shutil.rmtree(output_git, ignore_errors=True)
 
     print(f"Removed session '{name}'.")
@@ -484,13 +484,13 @@ def cmd_remove(args) -> None:
 
 def cmd_mount(args) -> None:
     sub = args.subcmd or "list"
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
 
     if sub == "list":
         mounts = read_mounts(session_dir)
         if not mounts:
-            print("No extra reference mounts. Add one: sandbox mount add /path/to/project[:name]")
+            print("No extra reference mounts. Add one: agentbox mount add /path/to/project[:name]")
         else:
             for src, dst in mounts:
                 tag = "  [MISSING]" if not Path(src).exists() else ""
@@ -504,7 +504,7 @@ def cmd_mount(args) -> None:
             die(f"source path does not exist: {src}")
         mounts = read_mounts(session_dir)
         if any(d == dst for _, d in mounts):
-            die(f"/context/{dst} already mounted. Remove first: sandbox mount remove {dst}")
+            die(f"/context/{dst} already mounted. Remove first: agentbox mount remove {dst}")
         mounts.append((src, dst))
         save_mounts(session_dir, mounts)
         write_override(session_dir)
@@ -514,26 +514,26 @@ def cmd_mount(args) -> None:
         mounts = read_mounts(session_dir)
         filtered = [(s, d) for s, d in mounts if d != args.dst]
         if len(filtered) == len(mounts):
-            die(f"no mount '{args.dst}' found. List: sandbox mount list")
+            die(f"no mount '{args.dst}' found. List: agentbox mount list")
         save_mounts(session_dir, filtered)
         write_override(session_dir)
         print(f"Removed /context/{args.dst}. Start the session to apply.")
 
 
 def cmd_list(args) -> None:
-    project_dir = require_sandbox()
+    project_dir = require_agentbox()
     sessions = get_sessions(project_dir)
     if not sessions:
-        print("No sessions. Run: sandbox init --name <name>")
+        print("No sessions. Run: agentbox init --name <name>")
         return
     running = subprocess.run(
         ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
         capture_output=True, text=True,
     ).stdout.lower()
-    pname_prefix = f"sandbox-{project_name(project_dir)}"
+    pname_prefix = f"agentbox-{project_name(project_dir)}"
     for s in sessions:
-        env = read_env(project_dir / ".sandbox" / "sessions" / s)
-        port = env.get("SANDBOX_WEB_PORT", "")
+        env = read_env(project_dir / ".agentbox" / "sessions" / s)
+        port = env.get("AGENTBOX_WEB_PORT", "")
         active = f"{pname_prefix}-{s}_" in running
         status = "running" if active else "stopped"
         port_info = f"  http://localhost:{port}" if port and active else ""
@@ -547,7 +547,7 @@ def cmd_status(args) -> None:
          "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"],
         capture_output=True, text=True,
     )
-    lines = [ln for ln in result.stdout.splitlines() if "sandbox" in ln.lower()]
+    lines = [ln for ln in result.stdout.splitlines() if "agentbox" in ln.lower()]
     print("\n".join(lines) if lines else "(no running containers)")
 
 
@@ -555,28 +555,28 @@ def cmd_preset(args) -> None:
     sub = args.subcmd or "list"
 
     if sub == "list":
-        for p in sorted((SANDBOX_HOME / "presets").iterdir()):
+        for p in sorted((AGENTBOX_HOME / "presets").iterdir()):
             if p.is_dir():
                 print(p.name)
 
     elif sub == "edit":
         filename = f"{args.file}.yaml"
-        target = SANDBOX_HOME / "presets" / args.name / filename
+        target = AGENTBOX_HOME / "presets" / args.name / filename
         if not target.is_file():
             die(f"preset '{args.name}' {filename} not found at {target}")
         subprocess.run([os.environ.get("EDITOR", "vi"), str(target)], check=True)
         print(f"Preset saved ({filename}).")
 
     elif sub == "copy":
-        src_dir = SANDBOX_HOME / "presets" / args.src
+        src_dir = AGENTBOX_HOME / "presets" / args.src
         if not (src_dir / "proxy.yaml").is_file():
             die(f"source preset '{args.src}' not found")
-        dst_dir = SANDBOX_HOME / "presets" / args.dst
+        dst_dir = AGENTBOX_HOME / "presets" / args.dst
         dst_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy(src_dir / "proxy.yaml", dst_dir / "proxy.yaml")
         if (src_dir / "agent.yaml").is_file():
             shutil.copy(src_dir / "agent.yaml", dst_dir / "agent.yaml")
-        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: sandbox preset edit {args.dst}")
+        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit {args.dst}")
 
 
 # ── Dispatch ──────────────────────────────────────────────────────────────────
@@ -597,19 +597,19 @@ def _add_name(p: argparse.ArgumentParser) -> None:
 
 
 def main() -> None:
-    p = argparse.ArgumentParser(prog="sandbox", description="Isolated agent workspace manager.")
+    p = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
     sub = p.add_subparsers(dest="cmd")
 
     sub.add_parser("build",  help="Build proxy + agent images")
     sub.add_parser("update", help="Rebuild images without cache")
     sub.add_parser("list",   help="List sessions for the current project")
     sub.add_parser("ls",     help="Alias for list")
-    sub.add_parser("status", help="List running sandbox containers")
+    sub.add_parser("status", help="List running agentbox containers")
 
-    r = sub.add_parser("init", help="Initialize a new sandbox session (use --start to also launch)")
+    r = sub.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
     r.add_argument("dir", nargs="?")
     r.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
-    r.add_argument("--preset",  default=SANDBOX_PRESET)
+    r.add_argument("--preset",  default=AGENTBOX_PRESET)
     r.add_argument("--branch",  default="")
     r.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
     r.add_argument("--no-git",  action="store_true")
@@ -617,8 +617,8 @@ def main() -> None:
     r.add_argument("--start",   action="store_true", help="Also start the session after initializing")
 
     for cmd_name, hlp in [
-        ("start",  "Resume a sandbox session"),
-        ("stop",   "Stop a sandbox session"),
+        ("start",  "Resume a agentbox session"),
+        ("stop",   "Stop a agentbox session"),
         ("shell",  "Open a shell in the agent container"),
         ("logs",   "Tail the proxy access log"),
         ("web",    "Print the mitmweb traffic-monitor URL"),
@@ -646,7 +646,7 @@ def main() -> None:
     pssub.add_parser("list")
     pe = pssub.add_parser("edit", help="Edit proxy or agent config of a preset")
     pe.add_argument("file", choices=["proxy", "agent"])
-    pe.add_argument("name", nargs="?", default=SANDBOX_PRESET)
+    pe.add_argument("name", nargs="?", default=AGENTBOX_PRESET)
     pc = pssub.add_parser("copy"); pc.add_argument("src"); pc.add_argument("dst")
 
     args = p.parse_args()

@@ -32,7 +32,7 @@ log.propagate = False
 with open("/config/proxy.yaml") as f:
     cfg = yaml.safe_load(f)
 
-_session_name = os.environ.get("SANDBOX_NAME", "")
+_session_name = os.environ.get("AGENTBOX_NAME", "")
 _name_flag = f" --name {_session_name}" if _session_name else ""
 
 lcfg = cfg.get("logging", {})
@@ -44,7 +44,7 @@ _log_bodies   = lcfg.get("log_bodies", False)
 _MOCK_TOKEN = "dummy-replaced-by-proxy"
 
 
-class SandboxAddon:
+class AgentboxAddon:
     def __init__(self):
         self._allowed        = []
         self._rules          = []   # (patterns, header, value) — static key injection
@@ -104,10 +104,10 @@ class SandboxAddon:
         host = flow.request.pretty_host
         if not any(fnmatch.fnmatch(host, p) for p in self._allowed):
             flow.response = http.Response.make(
-                403, f"Host '{host}' not allowed.\nAdd it: sandbox allow{_name_flag} {host}\n",
+                403, f"Host '{host}' not allowed.\nAdd it: agentbox allow{_name_flag} {host}\n",
                 {"Content-Type": "text/plain"},
             )
-            flow.metadata["sandbox_blocked"] = True
+            flow.metadata["agentbox_blocked"] = True
             log.info({
                 "method": flow.request.method,
                 "url": flow.request.pretty_url, "status": 403, "blocked": True,
@@ -134,7 +134,7 @@ class SandboxAddon:
                 flow.request.headers[header] = value
 
     def response(self, flow: http.HTTPFlow) -> None:
-        if flow.metadata.get("sandbox_blocked"):
+        if flow.metadata.get("agentbox_blocked"):
             return
         resp = flow.response
         entry: dict = {
@@ -156,4 +156,4 @@ class SandboxAddon:
         log.info(entry)
 
 
-addons = [SandboxAddon()]
+addons = [AgentboxAddon()]

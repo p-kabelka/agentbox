@@ -62,7 +62,7 @@ class MetadataHandler(BaseHTTPRequestHandler):
                 "token_type":   "Bearer",
             }).encode())
         elif "service-accounts/default/email" in path:
-            self._reply(200, "agent@sandbox.local", "text/plain")
+            self._reply(200, "agent@agentbox.local", "text/plain")
         elif "service-accounts/default" in path or "service-accounts/" in path:
             self._reply(200, json.dumps({"default": {}}).encode())
         elif "project/project-id" in path:

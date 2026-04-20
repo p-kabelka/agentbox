@@ -19,7 +19,7 @@ if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
 fi
 
 # Apply preset dotfiles to home directory
-[ -d /sandbox-dotfiles ] && cp -rT /sandbox-dotfiles ~/
+[ -d /agentbox-dotfiles ] && cp -rT /agentbox-dotfiles ~/
 
 [ "${1:-}" = "--shell" ] && exec /bin/bash
 
