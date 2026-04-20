@@ -1,0 +1,48 @@
+# Agent preset — copied to .agentbox/sessions/<name>/config/agent.yaml on 'agentbox init --name <name>'.
+
+# Extra environment variables injected into the agent container.
+# These are merged with (and can override) the base env in compose-base.yaml.
+environment:
+  IS_SANDBOX: 1 # required to allow --dangerously-skip-permissions
+  AGENT_HARNESS: claude
+  AGENT_HARNESS_ARGS: --dangerously-skip-permissions
+  CLAUDE_CODE_USE_VERTEX: 1
+  ANTHROPIC_VERTEX_PROJECT_ID: itpc-gcp-pnd-pe-eng-claude
+  CLOUD_ML_REGION: us-east5
+
+# Dotfiles placed in the agent's $HOME at session start.
+# Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
+dotfiles:
+  .bashrc: |
+    # .bashrc
+
+    # Source global definitions
+    if [ -f /etc/bashrc ]; then
+        . /etc/bashrc
+    fi
+
+    # User specific environment
+    if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]; then
+        PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+    fi
+    export PATH
+
+    # Uncomment the following line if you don't like systemctl's auto-paging feature:
+    # export SYSTEMD_PAGER=
+
+    # User specific aliases and functions
+    if [ -d ~/.bashrc.d ]; then
+        for rc in ~/.bashrc.d/*; do
+            if [ -f "$rc" ]; then
+                . "$rc"
+            fi
+        done
+    fi
+    unset rc
+
+    # CUSTOM
+    export EDITOR=vim
+  .gitconfig: |
+    [user]
+        name = Agent
+        email = agent@agentbox

@@ -1,0 +1,22 @@
+# Default provider preset. Copied to .agentbox/sessions/<name>/config/proxy.yaml on 'agentbox run --name <name>'.
+
+providers:
+  - name: vertex
+    enabled: true
+    metadata_server: true  # starts fake GCE metadata sidecar on proxy:9090
+    allowed_hosts:
+      - "*-aiplatform.googleapis.com"
+
+# Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
+extra_allowed_hosts: []
+
+# Extra environment variables for the proxy container. Merged with compose-base.yaml.
+environment:
+  GOOGLE_CLOUD_PROJECT: itpc-gcp-pnd-pe-eng-claude
+  VERTEX_PROJECT_ID: itpc-gcp-pnd-pe-eng-claude
+  VERTEX_REGION: us-east5
+
+logging:
+  log_request_headers: false
+  log_response_headers: false
+  log_bodies: false  # WARNING: may log sensitive prompt content if enabled
