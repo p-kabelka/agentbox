@@ -32,7 +32,7 @@ Malicious content embedded in files, commit messages, or other project artifacts
 
 **Covert timing channels.** An agent can encode information in request timing patterns observable to the LLM provider. This is not addressed.
 
-**Agent writing malicious scripts to tracked hook directories.** If the project tracks a hooks directory (e.g., `.husky/`, `scripts/`) and the agent adds a malicious script to it, that script becomes part of the git commit and could execute on the host after the developer merges. This is mitigated by code review at `agentbox fetch` time; it is not blocked automatically.
+**Agent writing malicious scripts to tracked hook directories.** If the project tracks a hooks directory (e.g., `.husky/`, `scripts/`) and the agent adds a malicious script to it, that script becomes part of the git commit and could execute on the host after the developer merges. This is mitigated by code review of the fetched branch before merging; it is not blocked automatically.
 
 ---
 
@@ -40,7 +40,7 @@ Malicious content embedded in files, commit messages, or other project artifacts
 
 ### Use Case 1: Isolated Feature Development
 
-A developer creates a agentbox for a feature branch, provides the agent with a task prompt, and lets it implement the feature autonomously. The agent works inside the container, commits its changes to the output remote, and the developer retrieves them with `agentbox fetch`. The developer reviews the diff — including any new scripts or hook files — before merging into their working branch. The host repository and credentials are never at risk during the agent session.
+A developer creates a agentbox for a feature branch, provides the agent with a task prompt, and lets it implement the feature autonomously. The agent works inside the container, commits its changes to the output remote, and the developer reviews the auto-fetched output — including any new scripts or hook files — before merging into their working branch. The host repository and credentials are never at risk during the agent session.
 
 ### Use Case 2: Multi-Repo Context
 
@@ -48,7 +48,7 @@ The agent needs read access to a shared internal library while implementing chan
 
 ### Use Case 3: Restricted Provider Switching
 
-A team running inference through Anthropic's direct API wants to switch to Vertex AI (e.g., for quota reasons) without changing the agent harness or the developer's workflow. The developer selects a Vertex preset with `agentbox run --preset vertex`. The proxy container starts the fake GCE metadata server, the agent's `GCE_METADATA_HOST` points to it, and the Google auth library fetches short-lived tokens transparently. The agent harness code is unchanged; no GCP service account key is ever present in the agent container.
+A team running inference through Anthropic's direct API wants to switch to Vertex AI (e.g., for quota reasons) without changing the agent harness or the developer's workflow. The developer initialises the session with `agentbox init --preset vertex --start`. The proxy container starts the fake GCE metadata server; the agent's `GCE_METADATA_HOST` points to it so the Google auth library initialises normally, and the proxy addon replaces the dummy token with a real OAuth token on every Vertex API call. The agent harness code is unchanged; no GCP service account key is ever present in the agent container.
 
 ### Use Case 4: Parallel Agentboxes
 
@@ -103,11 +103,17 @@ Runs the configured agent harness (e.g., `claude`, `opencode`, `codex`). Contain
 
 **Direct API providers (Anthropic, OpenAI, etc.)**
 
-The agent container receives a dummy placeholder value for the relevant API key environment variable (e.g., `ANTHROPIC_API_KEY=dummy`). When the agent makes an HTTPS call to the provider's API, the connection is intercepted by mitmproxy. The `injector.py` addon reads the allowlist from `config/proxy.yaml`, verifies the destination host is permitted, strips the dummy key from the request headers, and injects the real key from the proxy container's environment. The real key never enters the agent container's memory or filesystem.
+The agent container receives a dummy placeholder value for the relevant API key environment variable (e.g., `ANTHROPIC_API_KEY=dummy`). When the agent makes an HTTPS call to the provider's API, the connection is intercepted by mitmproxy. The `addon.py` module reads the allowlist from `config/proxy.yaml`, verifies the destination host is permitted, strips the dummy key from the request headers, and injects the real key from the proxy container's environment. The real key never enters the agent container's memory or filesystem.
 
 **GCP Vertex AI**
 
-The agent container has `GCE_METADATA_HOST=proxy:9090`. When the Google auth library requests an access token, it calls the fake metadata server running in the proxy container. The metadata server holds the real GCP credentials (service account key or refresh token) and returns a short-lived OAuth 2.0 access token with a 1-hour TTL scoped to `https://www.googleapis.com/auth/cloud-platform`. The access token itself reaches the agent container (it must, to authenticate API calls), but the long-lived credential never does.
+The agent container has `GCE_METADATA_HOST=proxy:9090`. The credential flow uses a two-stage dummy-token mechanism:
+
+1. The Google auth library in the agent calls the fake metadata server at `proxy:9090/service-accounts/default/token`. The metadata server returns a fixed dummy token (`dummy-replaced-by-proxy`) — it holds no real GCP credentials. This satisfies the ADC initialization check and gives the agent a token to use in subsequent requests.
+
+2. When the agent sends a request to the Vertex inference endpoint (`{region}-aiplatform.googleapis.com`) carrying the dummy token in its `Authorization` header, the mitmproxy addon (`addon.py`) intercepts it. The addon calls `google.auth.default()` on the proxy side — where the real credentials live via `GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials — and replaces the dummy token with a real short-lived OAuth 2.0 access token before forwarding the request upstream.
+
+The real token (1-hour TTL, scoped to `https://www.googleapis.com/auth/cloud-platform`) does reach the agent container's process environment after the first token refresh, but the long-lived credential (service account key or refresh token) never does.
 
 ### 4.4 Traffic Interception
 
@@ -116,35 +122,31 @@ proxychains4 is configured in `dynamic_chain` mode inside the agent container:
 - Connections to `proxy:8080` and `proxy:9090` are within the same `agent-net` network and are reachable directly without going through a SOCKS proxy.
 - All connections to external hosts have no direct route (no default gateway on `agent-net`). proxychains intercepts these at the libc socket layer via `LD_PRELOAD` and tunnels them to mitmproxy using an HTTP CONNECT request.
 
-mitmproxy terminates the TLS session from the agent, inspects the plaintext request, applies the allowlist, injects credentials if applicable, re-encrypts the request, and forwards it to the real upstream server. The mitmproxy CA certificate is installed in the agent container's system trust store and exported via `NODE_EXTRA_CA_CERTS` so that both system-level and Node.js TLS verification succeed.
+mitmproxy terminates the TLS session from the agent, inspects the plaintext request, applies the allowlist, injects credentials if applicable, re-encrypts the request, and forwards it to the real upstream server. The mitmproxy CA certificate is installed in the agent container's system trust store (via `update-ca-trust`) and exported via `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` so that system-level, Node.js, and Python TLS verification all succeed.
 
 ### 4.5 Git Isolation: The Two-Remote Pattern
 
 **Source (read-only input)**
 
-Before starting the agent, `agentbox run` creates a git bundle of the project branch:
+`agentbox init` creates a git bundle of the current branch at session creation time:
 
 ```
-git bundle create .agentbox/source.bundle <branch>
+git bundle create .agentbox/sessions/<name>/source.bundle HEAD <branch>
 ```
 
 The bundle is mounted read-only into the agent container at `/source/project.bundle`. `start.sh` clones from this bundle, producing a fresh `.git` directory inside the container with no connection to the host's `.git/` directory. The host git working directory and object store are never accessible from within the container.
 
 **Output (write-only barrier)**
 
-A bare repository is created at `.agentbox/output.git/` on the host at first use. Immediately after creation, its `hooks/` directory is set to `chmod 555` (read and execute for all; write for none). The bare repo is mounted into the agent container as a git remote named `output`. The agent can push commits to this remote. When the developer is ready to review the agent's work, they run:
+A bare repository is created at `.agentbox/output-<name>.git/` on the host during `agentbox init`. Immediately after creation, its `hooks/` directory is set to `chmod 555` (read and execute for all; write for none). The bare repo is mounted into the agent container as a git remote named `output`. The agent can push commits to this remote.
+
+A host-side git remote named `agentbox-<name>` is registered pointing to the bare repo. When the agent container exits, `agentbox start` automatically fetches from it:
 
 ```
-agentbox fetch <branch>
+git -c core.hooksPath=/dev/null fetch agentbox-<name>
 ```
 
-This executes:
-
-```
-git -c core.hooksPath=/dev/null fetch .agentbox/output.git <branch>:refs/agentbox/<branch>
-```
-
-The `core.hooksPath=/dev/null` flag ensures that even if the agent has somehow written files into `hooks/` (which `chmod 555` prevents), none of them execute during the fetch. The fetched commits land in `refs/agentbox/<branch>` for review before any merge.
+The `core.hooksPath=/dev/null` flag ensures that even if the agent has somehow written files into `hooks/` (which `chmod 555` prevents), none of them execute during the fetch. Fetched branches land under `agentbox-<name>/` for review before any merge. The developer can also fetch mid-session by running `git fetch agentbox-<name>` directly.
 
 ---
 
@@ -154,20 +156,25 @@ The `core.hooksPath=/dev/null` flag ensures that even if the agent has somehow w
 
 **mitmweb**
 
-Full TLS MITM proxy. Loads two Python addons at startup.
+Full TLS MITM proxy. Loads one Python addon at startup.
 
-**`addons/injector.py`**
+**`addons/addon.py`**
 
-Reads `config/proxy.yaml` at startup. For each intercepted request:
+A single mitmproxy addon module implementing allowlist enforcement, credential injection, and structured access logging via the `AgentboxAddon` class.
 
-1. Checks the destination hostname against the configured allowlist. If not listed, responds with HTTP 403 and logs the block. The upstream connection is never opened.
-2. If the destination matches a configured provider, strips any existing authorization header and injects the real credential (API key, Bearer token) from the proxy container's environment.
+Reads `config/proxy.yaml` at startup and builds:
+- An allowlist of hostname patterns (from `allowed_hosts` across all enabled providers plus `extra_allowed_hosts`).
+- Injection rules: for each non-Vertex provider, a `(host_patterns, header, value)` tuple constructed from the provider's `inject_header`, `inject_prefix`, and the real API key read from the proxy container's environment.
+- Vertex state: the Google credentials object loaded via `google.auth.default()`, a threading lock for safe token refresh, and the project/region configuration.
 
-The allowlist always includes the configured provider endpoints. Additional hosts are added and removed at runtime via `agentbox allow` and `agentbox deny`, which signal mitmproxy to reload the addon.
+**`request()` hook** — for each intercepted request:
+1. Checks the destination hostname against the allowlist using `fnmatch` patterns. If not listed, responds with HTTP 403 (the upstream connection is never opened) and logs the block.
+2. For Vertex requests: if the host matches the configured Vertex endpoint and the `Authorization` header contains the dummy token, calls `google.auth.default()` credentials on the proxy side to obtain (and cache/refresh) a real OAuth token, then replaces the header value.
+3. For all other enabled providers: injects the real API key into the configured header.
 
-**`addons/logger.py`**
+**`response()` hook** — logs all non-blocked responses to stdout as structured JSON. Each entry includes timestamp, method, URL, status code, and round-trip duration. Request headers, response headers, and bodies can be included via `logging` settings in `proxy.yaml` (all off by default except request headers).
 
-Writes a structured JSON access log to `/var/log/proxy/access.log`. Each entry includes timestamp, method, URL, response status, response size, and a `blocked` boolean. Request and response bodies can optionally be logged for debugging. Blocked requests are logged before the connection is refused.
+Additional hosts are added and removed via `agentbox allow` and `agentbox deny`, which update `config/proxy.yaml` and restart the proxy container so the addon reloads the configuration.
 
 **`metadata_server.py`**
 
@@ -183,48 +190,53 @@ Configured in `dynamic_chain` mode. The chain list contains a single entry: the 
 
 Executed as the container entrypoint. Performs in order:
 
-1. Installs the mitmproxy CA certificate into the system trust store and sets `NODE_EXTRA_CA_CERTS`.
-2. Clones the project from the bundle at `/source/project.bundle`.
-3. Adds the output bare repository as a git remote named `output`.
-4. Mounts any additional reference repositories passed via `compose.override.yaml`.
-5. Sets environment variables appropriate to the configured harness.
-6. Launches the agent harness binary.
+1. Polls until the mitmproxy CA certificate appears at `/proxy-ca/mitmproxy-ca-cert.pem`, then installs it into the Fedora system trust store (`update-ca-trust extract`) and exports `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` for Node.js and Python clients.
+2. If `/source/project.bundle` is present and `/workspace/.git` does not yet exist, clones the bundle to `/workspace`, renames the `origin` remote to `source`, and adds `/output/repo.git` as the `output` remote.
+3. Copies preset dotfiles from `/agentbox-dotfiles` into the container's home directory (if the directory is mounted).
+4. Applies a `stty inlcr` workaround so that Node.js readline in raw mode works correctly with krun's virtio-console (which sends `\n` instead of `\r` for Enter).
+5. Execs the binary named by `AGENT_HARNESS` with optional `AGENT_HARNESS_ARGS`. Falls back to an interactive bash shell if `AGENT_HARNESS` is unset.
 
 **Base image**
 
-`node:22-slim` with Claude Code pre-installed. Designed to be extended for other harnesses via a derived Containerfile.
+`fedora:43` with `curl`, `git`, `proxychains-ng`, and `vim` installed. The Claude Code binary is staged from the host at image build time (`~/.local/bin/claude` → `/usr/local/bin/claude`). Designed to be extended for other harnesses via a derived Containerfile.
 
 ### 5.3 `bin/agentbox` CLI
 
-A Python script installed to `PATH` by `install.sh`. Commands are grouped by function:
+A Python script in `bin/agentbox`, added to `PATH` as part of initial setup. Commands are grouped by function:
 
 | Group | Commands |
 |-------|----------|
-| Setup | `build`, `update`, `preset list`, `preset edit`, `preset copy` |
-| Project lifecycle | `run [--preset <name>] [--harness <binary>]`, `start`, `stop`, `shell` |
+| Setup | `build`, `update`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
+| Project lifecycle | `init [--preset <name>] [--harness <binary>] [--name <name>] [--branch <branch>] [--mount SRC[:DST]] [--start]`, `start`, `stop`, `shell`, `remove` |
 | Monitoring | `logs`, `web` |
 | Egress control | `allow <host>`, `deny <host>` |
-| Code retrieval | `fetch <branch>` |
 | Reference mounts | `mount list`, `mount add <path>`, `mount remove <path>` |
-| Observation | `status` |
+| Observation | `status`, `list` / `ls` |
 
-`agentbox run` is the primary entry point. It refreshes `source.bundle`, regenerates `compose.override.yaml` from `mounts.yaml` and current git state, assigns a web UI port, writes `.env`, and starts the Compose stack.
+`agentbox init` is the primary entry point. It creates a timestamped (or named) session directory under `.agentbox/sessions/`, copies the chosen preset's `proxy.yaml` and `agent.yaml`, extracts any inline dotfiles from `agent.yaml`, creates a git bundle of the current branch, initialises the bare output repository (with its `hooks/` directory `chmod 555`), registers the `agentbox-<name>` git remote, assigns a web UI port, writes `.env`, generates `compose.override.yaml`, and optionally launches the session immediately if `--start` is passed.
 
-`agentbox fetch` runs the `core.hooksPath=/dev/null` fetch and reports the resulting ref for review.
+`agentbox start` re-generates `compose.override.yaml` from the current session state, starts the proxy container in the background (waiting for its health check), then runs the agent container interactively. When the agent container exits, it automatically fetches from the output repository with `core.hooksPath=/dev/null` and prints the available branches for review.
 
-`agentbox allow` and `agentbox deny` append or remove entries from the allowlist in `config/proxy.yaml` and send a reload signal to the mitmproxy process.
+`agentbox allow` and `agentbox deny` append or remove entries from `extra_allowed_hosts` in the session's `config/proxy.yaml`, then restart the proxy container so the addon reloads the configuration. They wait for the proxy health check to pass before returning.
+
+All commands that operate on a specific session accept `--name <name>`. If the project has exactly one session, `--name` is optional and the session is auto-detected.
 
 ### 5.4 Configuration Files
 
-| File | Location | Purpose | Overwritten by `agentbox run`? |
+Sessions live under `.agentbox/sessions/<name>/`. Each session directory is self-contained. The bare output repository sits one level up (at `.agentbox/`) so it persists independently of the session directory.
+
+| File | Location | Purpose | Overwritten by `agentbox init`? |
 |------|----------|---------|-------------------------------|
-| `proxy.yaml` (preset) | `~/.agentbox/presets/<name>/` | Global default provider config | N/A — global |
-| `config/proxy.yaml` | `.agentbox/config/` | Per-project provider config, allowlist | No — user-owned |
-| `mounts.yaml` | `.agentbox/` | Persistent extra reference mounts | No — user-owned |
-| `compose.override.yaml` | `.agentbox/` | Generated Compose overrides (port, volumes) | Yes — regenerated from `mounts.yaml` and git state |
-| `.env` | `.agentbox/` | `AGENTBOX_WEB_PORT`, `AGENT_HARNESS` | Yes |
-| `source.bundle` | `.agentbox/` | Read-only git snapshot | Yes — refreshed on each `agentbox run` |
-| `output.git/` | `.agentbox/` | Bare repo output barrier | Created once; agent pushes here |
+| `proxy.yaml` (preset) | `$AGENTBOX_HOME/presets/<name>/` | Global default provider config | N/A — global |
+| `agent.yaml` (preset) | `$AGENTBOX_HOME/presets/<name>/` | Global default agent env and dotfiles | N/A — global |
+| `config/proxy.yaml` | `.agentbox/sessions/<name>/config/` | Per-session provider config, allowlist | No — user-owned after init |
+| `config/agent.yaml` | `.agentbox/sessions/<name>/config/` | Per-session agent env overrides, dotfiles | No — user-owned after init |
+| `dotfiles/` | `.agentbox/sessions/<name>/dotfiles/` | Extracted dotfiles from `agent.yaml` | Only on first init |
+| `mounts.yaml` | `.agentbox/` | Persistent extra reference mounts (shared across sessions) | No — user-owned |
+| `compose.override.yaml` | `.agentbox/sessions/<name>/` | Generated Compose overrides (port, volumes, runtime) | Yes — regenerated on each `agentbox start` |
+| `.env` | `.agentbox/sessions/<name>/` | `AGENTBOX_WEB_PORT`, `AGENT_HARNESS`, `AGENTBOX_NAME` | Created on init; port preserved on subsequent starts |
+| `source.bundle` | `.agentbox/sessions/<name>/` | Read-only git snapshot of the source branch | Created once on `agentbox init` |
+| `output-<name>.git/` | `.agentbox/` | Bare repo output barrier | Created once; agent pushes here |
 
 ---
 
@@ -233,11 +245,11 @@ A Python script installed to `PATH` by `install.sh`. Commands are grouped by fun
 | Property | Mechanism | Guarantee |
 |----------|-----------|-----------|
 | Real API keys never enter agent container | Proxy-side env; agent sees `dummy` placeholder | Keys absent from agent process memory and filesystem |
-| GCP long-lived credentials never enter agent container | Fake metadata server returns short-lived tokens only | SA key / refresh token stays on proxy side |
+| GCP long-lived credentials never enter agent container | Fake metadata server returns dummy tokens; real tokens fetched and injected by proxy addon | SA key / refresh token stays on proxy side |
 | Agent cannot make arbitrary internet connections | Podman `internal: true` network; no default gateway | All external TCP must transit mitmproxy |
-| Agent can only reach allowlisted API endpoints | mitmproxy injector addon enforces allowlist | Non-listed hosts receive HTTP 403; upstream connection never opened |
+| Agent can only reach allowlisted API endpoints | mitmproxy `addon.py` enforces allowlist | Non-listed hosts receive HTTP 403; upstream connection never opened |
 | Host `.git/` is never accessible to agent | Source delivered as git bundle; no host git mount | No filesystem path to host's `.git/` exists in the container |
-| Agent cannot plant executable hooks in host git | `output.git/hooks/` is `chmod 555` at creation; fetch uses `core.hooksPath=/dev/null` | No new files can be written to hooks dir; hooks do not execute on fetch |
+| Agent cannot plant executable hooks in host git | `output-<name>.git/hooks/` is `chmod 555` at creation; auto-fetch at session end uses `core.hooksPath=/dev/null` | No new files can be written to hooks dir; hooks do not execute on fetch |
 | All agent network traffic is auditable | mitmproxy full TLS termination; structured JSON access log | Every request, including blocked ones, is logged with URL and status |
 | Agentbox network isolation requires no host privilege | Podman internal networks via container runtime namespaces | No `sudo`, no host iptables or nftables changes needed |
 
@@ -248,55 +260,69 @@ A Python script installed to `PATH` by `install.sh`. Commands are grouped by fun
 ### 7.1 First-Time Setup (One Machine)
 
 ```bash
-git clone <repo> ~/.agentbox
-~/.agentbox/install.sh
-source ~/.bashrc
+# Clone agentbox and add bin/ to PATH (e.g. via ~/.bashrc or ~/.zshrc)
+git clone <repo> ~/.local/share/agentbox
+export PATH="$HOME/.local/share/agentbox/bin:$PATH"
 
-agentbox preset edit                       # enable provider, e.g. anthropic.enabled: true
-export ANTHROPIC_API_KEY=sk-ant-...      # add to ~/.bashrc
+agentbox preset edit proxy               # enable provider — set anthropic.enabled: true
+export ANTHROPIC_API_KEY=sk-ant-...     # add to shell profile
 
-agentbox build                            # builds container images; ~2 minutes; once per machine
+agentbox build                           # builds container images; ~2 minutes; once per machine
 ```
+
+`AGENTBOX_HOME` defaults to `~/.local/share/agentbox` and can be overridden in the environment.
 
 ### 7.2 Starting a Project Agentbox
 
 ```bash
 cd ~/projects/my-app
-agentbox run                              # uses default preset and harness
-# or:
-agentbox run --preset webdev --harness opencode
+
+# Init and launch in a single step:
+agentbox init --start                    # uses default preset and harness (claude)
+
+# Or specify options:
+agentbox init --preset webdev --harness opencode --start
+
+# Or init first, then start separately:
+agentbox init --name mywork
+agentbox start --name mywork
 # proxy starts in background; agent starts interactively
 ```
 
 ### 7.3 During a Session
 
 ```bash
-agentbox allow pypi.org                  # add a host to the egress allowlist
-agentbox deny pypi.org                   # remove it
+agentbox allow pypi.org                  # add a host to the egress allowlist (restarts proxy)
+agentbox deny pypi.org                   # remove it (restarts proxy)
 
 agentbox logs                            # tail the JSON access log from the proxy
-agentbox web                             # open traffic monitor at http://localhost:<port>
+agentbox web                             # print the mitmweb traffic-monitor URL
 
 agentbox mount add ~/libs/shared-lib     # add a read-only reference mount
-agentbox start                           # restart agent container to apply new mount
+agentbox start                           # restart session to apply new mount
 
-agentbox status                          # show container state, assigned port, active mounts
+agentbox list                            # list all sessions for this project with status
+agentbox status                          # list all running agentbox containers across projects
 ```
 
 ### 7.4 Retrieving Agent Output
 
 ```bash
-# Inside the agent container, the agent has run:
+# Inside the agent container, the agent runs:
 #   git push output HEAD:agent-work
 
-# On the host:
-agentbox fetch agent-work                # fetches to refs/agentbox/agent-work using core.hooksPath=/dev/null
+# Output is auto-fetched from the output repo when the session ends (agent container exits).
+# The CLI prints the available remote branches and suggests a merge command.
 
-git log refs/agentbox/agent-work         # review commit history
-git diff HEAD refs/agentbox/agent-work   # review all changes before merging
-git merge refs/agentbox/agent-work       # merge after review
+# To fetch mid-session without stopping:
+git fetch agentbox-mywork                # core.hooksPath=/dev/null applied automatically at session end
+
+git log agentbox-mywork/agent-work       # review commit history
+git diff HEAD agentbox-mywork/agent-work # review all changes before merging
+git merge agentbox-mywork/agent-work     # merge after review
 
 agentbox stop                            # tear down containers and networks
+agentbox remove                          # stop, delete session dir, output repo, and git remote
 ```
 
 ---
@@ -309,28 +335,28 @@ Add a stanza to `config/proxy.yaml` specifying `name`, `enabled`, `api_key_env`,
 
 **New agent harness**
 
-Extend the agent Containerfile:
+For harnesses that are not already installed in the agent image, extend the Containerfile:
 
 ```dockerfile
 FROM localhost/agentbox-agent:latest
 RUN npm install -g opencode   # or pip install codex, etc.
 ```
 
-Set `AGENT_HARNESS=<binary>` in `.agentbox/.env` or pass `--harness <binary>` to `agentbox run`. `start.sh` execs the specified binary as the final step.
+Then rebuild with `agentbox build`. Set `AGENT_HARNESS=<binary>` via `--harness <binary>` on `agentbox init`, or by setting it in `config/agent.yaml` under `environment`. `start.sh` execs the specified binary as the final step, passing `AGENT_HARNESS_ARGS` and any additional arguments.
 
 **VM-level isolation**
 
-Uncomment `runtime: krun` in `.agentbox/compose.override.yaml` (requires `crun-vm` / `krun` installed on the host). Each container runs in its own KVM microVM. The two-network topology and credential flow are unchanged; the isolation boundary moves from Linux namespaces to a hypervisor boundary.
+Install `crun-vm` / `krun` on the host. `agentbox start` always generates `compose.override.yaml` with `runtime: krun` for the agent container; if `krun` is present, each agent runs in its own KVM microVM. The two-network topology and credential flow are unchanged; the isolation boundary moves from Linux namespaces to a hypervisor boundary.
 
 **Custom preset**
 
 ```bash
 agentbox preset copy default mypreset
-agentbox preset edit mypreset
-agentbox run --preset mypreset
+agentbox preset edit proxy mypreset
+agentbox init --preset mypreset --start
 ```
 
-Presets are stored in `~/.agentbox/presets/<name>/` and contain a `proxy.yaml` with provider configuration. Copying from `default` gives a starting point with all fields documented.
+Presets are stored in `$AGENTBOX_HOME/presets/<name>/` and contain a `proxy.yaml` (provider config) and optionally an `agent.yaml` (environment overrides and dotfiles). Copying from `default` gives a starting point with all fields documented.
 
 ---
 
@@ -342,6 +368,6 @@ Presets are stored in `~/.agentbox/presets/<name>/` and contain a `proxy.yaml` w
 
 **DNS resolution of external hostnames.** The agent container can resolve external hostnames via the container runtime's DNS resolver, but cannot TCP-connect to them (no default gateway). DNS-based data exfiltration (encoding data in query labels sent to an attacker-controlled nameserver) is not blocked. Mitigation: configure a restricted DNS resolver in the agent container and add `/etc/hosts` entries for all required hostnames, disabling recursive resolution.
 
-**`core.hooksPath` set in tracked configuration files.** If the project tracks a file (e.g., `.gitconfig`, `.husky/.huskyrc`) that sets `core.hooksPath = ./hooks`, and the agent adds a malicious executable script to that directory, the script becomes part of the git commit and could execute on the host after the developer merges and runs a git operation. The `chmod 555` on `output.git/hooks/` does not protect against this because the malicious script lives in the tracked working tree, not in the bare repo's hooks directory. Mitigation: inspect all new or modified scripts in hook-related directories at `agentbox fetch` time before merging.
+**`core.hooksPath` set in tracked configuration files.** If the project tracks a file (e.g., `.gitconfig`, `.husky/.huskyrc`) that sets `core.hooksPath = ./hooks`, and the agent adds a malicious executable script to that directory, the script becomes part of the git commit and could execute on the host after the developer merges and runs a git operation. The `chmod 555` on `output-<name>.git/hooks/` does not protect against this because the malicious script lives in the tracked working tree, not in the bare repo's hooks directory. Mitigation: inspect all new or modified scripts in hook-related directories before merging the fetched branch.
 
 **proxychains LD_PRELOAD bypass by static binaries.** proxychains4 intercepts socket calls by injecting a shared library via `LD_PRELOAD`, which applies only to dynamically linked executables. A static binary (one that does not use libc's dynamic linker) would bypass proxychains and, if it had a way to route to the internet, could make unmediated connections. In practice, no common agent harness ships as a fully static binary; this is noted as a residual risk for custom harness configurations.

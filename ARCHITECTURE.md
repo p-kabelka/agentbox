@@ -160,8 +160,8 @@ The system is structured in five layers, each with a distinct responsibility:
                                │
 ┌──────────────────────────────┴─────────────────────────┐
 │  3. CREDENTIAL                                         │
-│     mitmproxy injector (header swap for direct APIs)   │
-│     GCE metadata server (token issuance for Vertex)    │
+│     mitmproxy addon (header swap; Vertex token swap)   │
+│     GCE metadata server (dummy token for ADC init)     │
 │     proxy.yaml (provider config, allowlist)            │
 └──────────────────────────────┬─────────────────────────┘
                                │
@@ -192,7 +192,7 @@ A forwarding proxy like Squid can enforce allowlists for HTTPS connections using
 
 Credential injection requires modifying request headers inside the TLS layer. This demands full TLS termination (MITM), which mitmproxy provides natively. The tradeoff is that the agent container must trust a custom CA certificate, which is handled automatically by sharing the certificate through a named volume.
 
-The gain is significant: a single proxy handles allowlist enforcement, credential injection, and request logging with full header visibility, using a programmable Python addon API.
+The gain is significant: a single proxy handles allowlist enforcement, credential injection, and request logging with full header visibility, using a programmable Python addon API — all implemented in one auditable module (`addons/addon.py`).
 
 ### 6.2 proxychains over HTTPS_PROXY environment variable
 
@@ -224,7 +224,7 @@ The base compose file defines services, networks, volumes, and all configuration
 
 `podman compose -f base.yaml -f override.yaml` merges these at runtime. This means images are defined once and reused across all projects. A change to the proxy's Python addons requires rebuilding one image, not regenerating every project's configuration.
 
-The override file is regenerated from persistent state files (`mounts.yaml`, `.env`, presence of `source.bundle`/`output.git`) rather than being hand-maintained, so it can be safely overwritten without losing user configuration.
+The override file is regenerated from persistent state files (`mounts.yaml`, `.env`, presence of `source.bundle`/`output-<name>.git`) rather than being hand-maintained, so it can be safely overwritten without losing user configuration.
 
 ---
 
@@ -238,18 +238,18 @@ The architecture is designed so that the most common customisations require no c
 | Open additional egress | `agentbox allow <host>` | No |
 | Switch agent harness | Set `AGENT_HARNESS` | No |
 | Add a read-only reference project | `agentbox mount add` | No |
-| Use a different preset per project | `agentbox run --preset` | No |
-| Enable VM-level isolation | Uncomment `runtime: krun` | No |
+| Use a different preset per project | `agentbox init --preset` | No |
+| Enable VM-level isolation | Install `crun-vm` / `krun`; `runtime: krun` is always generated in the override | No |
 | Add a new harness package | Extend the agent Containerfile | One Containerfile change |
 | Add a new credential protocol | New addon script or metadata server | Python code |
 
-The proxy's addon interface (mitmproxy's Python API) is the primary extension point for new credential schemes. The `injector.py` addon handles the common case of header-based API keys. New protocols — HMAC signing, OAuth client credentials, AWS SigV4 — can be added as separate addon scripts without modifying existing code.
+The proxy's addon interface (mitmproxy's Python API) is the primary extension point for new credential schemes. The `addon.py` module handles the common cases: header-based API key injection for direct providers, and Vertex OAuth token replacement. New protocols — HMAC signing, OAuth client credentials, AWS SigV4 — can be added as separate addon scripts or extending the existing module without modifying the rest of the system.
 
 ---
 
 ## 8. Quality Attributes
 
-**Security.** The system is designed so that the tools required for the primary attack classes are structurally absent from the agent container, not merely restricted by policy that could be circumvented. The proxy's code surface is intentionally minimal — two Python addon scripts, a small HTTP server, and a shell entrypoint — to make auditing practical.
+**Security.** The system is designed so that the tools required for the primary attack classes are structurally absent from the agent container, not merely restricted by policy that could be circumvented. The proxy's code surface is intentionally minimal — one Python addon module (`addon.py`), a small HTTP server (`metadata_server.py`), and a shell entrypoint — to make auditing practical.
 
 **Transparency.** Every network request the agent makes is visible. The mitmweb interface shows live traffic. The JSON access log is persistent. Blocked requests are recorded. A developer running an agent for the first time can watch exactly what it does.
 
