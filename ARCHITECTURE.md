@@ -224,7 +224,7 @@ The base compose file defines services, networks, volumes, and all configuration
 
 `podman compose -f base.yaml -f override.yaml` merges these at runtime. This means images are defined once and reused across all projects. A change to the proxy's Python addons requires rebuilding one image, not regenerating every project's configuration.
 
-The override file is regenerated from persistent state files (`mounts.yaml`, `.env`, presence of `source.bundle`/`output-<name>.git`) rather than being hand-maintained, so it can be safely overwritten without losing user configuration.
+The override file is regenerated from persistent state files (`mounts.yaml`, `.env`, presence of `source.bundle`/`output.git`) rather than being hand-maintained, so it can be safely overwritten without losing user configuration.
 
 ---
 

@@ -138,7 +138,7 @@ The bundle is mounted read-only into the agent container at `/source/project.bun
 
 **Output (write-only barrier)**
 
-A bare repository is created at `.agentbox/output-<name>.git/` on the host during `agentbox init`. Immediately after creation, its `hooks/` directory is set to `chmod 555` as a host-side safeguard. The bare repo is mounted into the agent container as a git remote named `output`, and the hooks directory is separately bind-mounted read-only (`/output/repo.git/hooks:ro`) on top of the writable repo mount. This second mount is kernel-enforced: the agent cannot write to or chmod the hooks directory regardless of process permissions, without `CAP_SYS_ADMIN`. The agent can push commits to the `output` remote.
+A bare repository is created at `.agentbox/sessions/<name>/output.git/` on the host during `agentbox init`. Immediately after creation, its `hooks/` directory is set to `chmod 555` as a host-side safeguard. The bare repo is mounted into the agent container as a git remote named `output`, and the hooks directory is separately bind-mounted read-only (`/output/repo.git/hooks:ro`) on top of the writable repo mount. This second mount is kernel-enforced: the agent cannot write to or chmod the hooks directory regardless of process permissions, without `CAP_SYS_ADMIN`. The agent can push commits to the `output` remote.
 
 A host-side git remote named `agentbox-<name>` is registered pointing to the bare repo. When the agent container exits, `agentbox start` automatically fetches from it:
 
@@ -223,7 +223,7 @@ All commands that operate on a specific session accept `--name <name>`. If the p
 
 ### 5.4 Configuration Files
 
-Sessions live under `.agentbox/sessions/<name>/`. Each session directory is self-contained. The bare output repository sits one level up (at `.agentbox/`) so it persists independently of the session directory.
+Each session is fully self-contained under `.agentbox/sessions/<name>/`.
 
 | File | Location | Purpose | Overwritten by `agentbox init`? |
 |------|----------|---------|-------------------------------|
@@ -236,7 +236,7 @@ Sessions live under `.agentbox/sessions/<name>/`. Each session directory is self
 | `compose.override.yaml` | `.agentbox/sessions/<name>/` | Generated Compose overrides (port, volumes, runtime) | Yes — regenerated on each `agentbox start` |
 | `.env` | `.agentbox/sessions/<name>/` | `AGENTBOX_WEB_PORT`, `AGENT_HARNESS`, `AGENTBOX_NAME` | Created on init; port preserved on subsequent starts |
 | `source.bundle` | `.agentbox/sessions/<name>/` | Read-only git snapshot of the source branch | Created once on `agentbox init` |
-| `output-<name>.git/` | `.agentbox/` | Bare repo output barrier | Created once; agent pushes here |
+| `output.git/` | `.agentbox/sessions/<name>/` | Bare repo output barrier | Created once; agent pushes here |
 
 ---
 
@@ -368,6 +368,6 @@ Presets are stored in `$AGENTBOX_HOME/presets/<name>/` and contain a `proxy.yaml
 
 **DNS resolution of external hostnames.** The agent container can resolve external hostnames via the container runtime's DNS resolver, but cannot TCP-connect to them (no default gateway). DNS-based data exfiltration (encoding data in query labels sent to an attacker-controlled nameserver) is not blocked. Mitigation: configure a restricted DNS resolver in the agent container and add `/etc/hosts` entries for all required hostnames, disabling recursive resolution.
 
-**`core.hooksPath` set in tracked configuration files.** If the project tracks a file (e.g., `.gitconfig`, `.husky/.huskyrc`) that sets `core.hooksPath = ./hooks`, and the agent adds a malicious executable script to that directory, the script becomes part of the git commit and could execute on the host after the developer merges and runs a git operation. The `chmod 555` on `output-<name>.git/hooks/` does not protect against this because the malicious script lives in the tracked working tree, not in the bare repo's hooks directory. Mitigation: inspect all new or modified scripts in hook-related directories before merging the fetched branch.
+**`core.hooksPath` set in tracked configuration files.** If the project tracks a file (e.g., `.gitconfig`, `.husky/.huskyrc`) that sets `core.hooksPath = ./hooks`, and the agent adds a malicious executable script to that directory, the script becomes part of the git commit and could execute on the host after the developer merges and runs a git operation. The `chmod 555` on `output.git/hooks/` does not protect against this because the malicious script lives in the tracked working tree, not in the bare repo's hooks directory. Mitigation: inspect all new or modified scripts in hook-related directories before merging the fetched branch.
 
 **proxychains LD_PRELOAD bypass by static binaries.** proxychains4 intercepts socket calls by injecting a shared library via `LD_PRELOAD`, which applies only to dynamically linked executables. A static binary (one that does not use libc's dynamic linker) would bypass proxychains and, if it had a way to route to the internet, could make unmediated connections. In practice, no common agent harness ships as a fully static binary; this is noted as a residual risk for custom harness configurations.

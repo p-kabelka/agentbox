@@ -150,12 +150,10 @@ def save_mounts(agentbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
 
 
 def write_override(session_dir: Path) -> None:
-    name = session_dir.name
     project_dir = session_dir.parent.parent.parent
-    agentbox_dir = project_dir / ".agentbox"
     web_port = read_port(session_dir) or 8081
     has_bundle = (session_dir / "source.bundle").is_file()
-    has_output = (agentbox_dir / f"output-{name}.git").is_dir()
+    output_dir = (session_dir / "output.git")
 
     dotfiles_dir = session_dir / "dotfiles"
     agent_volumes = ["proxy-ca:/proxy-ca:ro,Z"]
@@ -163,12 +161,12 @@ def write_override(session_dir: Path) -> None:
         agent_volumes.append(f"{dotfiles_dir}:/agentbox-dotfiles:ro,Z")
     if has_bundle:
         agent_volumes.append(f"{session_dir}/source.bundle:/source/project.bundle:ro,Z")
-    if has_output:
-        agent_volumes.append(f"{agentbox_dir}/output-{name}.git:/output/repo.git:Z")
+    if output_dir.is_dir():
+        agent_volumes.append(f"{output_dir.resolve()}:/output/repo.git:Z")
         # Read-only bind mount over hooks — kernel-enforced, not just chmod.
         # Without this the agent can chmod 755 the dir and write executable hooks.
-        agent_volumes.append(f"{agentbox_dir}/output-{name}.git/hooks:/output/repo.git/hooks:ro")
-    if not has_bundle and not has_output:
+        agent_volumes.append(f"{output_dir.resolve()}/hooks:/output/repo.git/hooks:ro")
+    if not has_bundle and not output_dir.is_dir():
         agent_volumes.append(f"{project_dir}:/workspace:Z")
     for src, dst in read_mounts(session_dir):
         agent_volumes.append(f"{src}:/context/{dst}:ro,Z")
@@ -256,7 +254,7 @@ def _launch(session_dir: Path) -> None:
         print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
     result = compose(session_dir, "run", "--rm", "agent")
     # Auto-fetch when the session ends
-    output_git = project_dir / ".agentbox" / f"output-{name}.git"
+    output_git = session_dir / "output.git"
     if output_git.is_dir():
         print(f"\n==> Fetching agent output (agentbox-{name})...")
         r = subprocess.run(
@@ -340,7 +338,7 @@ def cmd_init(args) -> None:
                 check=True,
             )
 
-            output_git = agentbox_dir / f"output-{name}.git"
+            output_git = session_dir / "output.git"
             subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
             (output_git / "hooks").mkdir(exist_ok=True)
             (output_git / "hooks").chmod(0o555)
@@ -478,9 +476,6 @@ def cmd_remove(args) -> None:
                    capture_output=True)  # best-effort; may not be a git repo
 
     shutil.rmtree(session_dir, ignore_errors=True)
-
-    output_git = agentbox_dir / f"output-{name}.git"
-    shutil.rmtree(output_git, ignore_errors=True)
 
     print(f"Removed session '{name}'.")
 
