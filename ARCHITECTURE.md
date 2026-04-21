@@ -216,7 +216,7 @@ Mounting the project directory directly into the agent container gives the agent
 
 A git bundle is a single portable file containing the complete history of a branch. When the agent clones from it, it gets a fresh git repository with no mount path back to the host. The agent can commit, branch, and rebase freely inside the container without any of those operations affecting the host repository.
 
-The output bare repository provides the reverse channel. It accepts pushes from the agent but — because its `hooks/` directory is created immutable — cannot be used to inject code that runs on the host. The developer retrieves commits by fetching with hook execution disabled.
+The output bare repository provides the reverse channel. It accepts pushes from the agent but cannot be used to inject code that runs on the host: the `hooks/` directory is bind-mounted read-only into the agent container (kernel-enforced, not just `chmod`), and the developer retrieves commits with hook execution explicitly disabled.
 
 ### 6.5 Two compose files over a generated monolith
 

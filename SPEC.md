@@ -138,7 +138,7 @@ The bundle is mounted read-only into the agent container at `/source/project.bun
 
 **Output (write-only barrier)**
 
-A bare repository is created at `.agentbox/output-<name>.git/` on the host during `agentbox init`. Immediately after creation, its `hooks/` directory is set to `chmod 555` (read and execute for all; write for none). The bare repo is mounted into the agent container as a git remote named `output`. The agent can push commits to this remote.
+A bare repository is created at `.agentbox/output-<name>.git/` on the host during `agentbox init`. Immediately after creation, its `hooks/` directory is set to `chmod 555` as a host-side safeguard. The bare repo is mounted into the agent container as a git remote named `output`, and the hooks directory is separately bind-mounted read-only (`/output/repo.git/hooks:ro`) on top of the writable repo mount. This second mount is kernel-enforced: the agent cannot write to or chmod the hooks directory regardless of process permissions, without `CAP_SYS_ADMIN`. The agent can push commits to the `output` remote.
 
 A host-side git remote named `agentbox-<name>` is registered pointing to the bare repo. When the agent container exits, `agentbox start` automatically fetches from it:
 
@@ -249,7 +249,7 @@ Sessions live under `.agentbox/sessions/<name>/`. Each session directory is self
 | Agent cannot make arbitrary internet connections | Podman `internal: true` network; no default gateway | All external TCP must transit mitmproxy |
 | Agent can only reach allowlisted API endpoints | mitmproxy `addon.py` enforces allowlist | Non-listed hosts receive HTTP 403; upstream connection never opened |
 | Host `.git/` is never accessible to agent | Source delivered as git bundle; no host git mount | No filesystem path to host's `.git/` exists in the container |
-| Agent cannot plant executable hooks in host git | `output-<name>.git/hooks/` is `chmod 555` at creation; auto-fetch at session end uses `core.hooksPath=/dev/null` | No new files can be written to hooks dir; hooks do not execute on fetch |
+| Agent cannot plant executable hooks in host git | `hooks/` is bind-mounted read-only (`:ro`) over the writable repo mount; auto-fetch uses `core.hooksPath=/dev/null` | Kernel-enforced read-only mount prevents writes regardless of process permissions; hooks do not execute on fetch |
 | All agent network traffic is auditable | mitmproxy full TLS termination; structured JSON access log | Every request, including blocked ones, is logged with URL and status |
 | Agentbox network isolation requires no host privilege | Podman internal networks via container runtime namespaces | No `sudo`, no host iptables or nftables changes needed |
 

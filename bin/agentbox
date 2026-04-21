@@ -165,6 +165,9 @@ def write_override(session_dir: Path) -> None:
         agent_volumes.append(f"{session_dir}/source.bundle:/source/project.bundle:ro,Z")
     if has_output:
         agent_volumes.append(f"{agentbox_dir}/output-{name}.git:/output/repo.git:Z")
+        # Read-only bind mount over hooks — kernel-enforced, not just chmod.
+        # Without this the agent can chmod 755 the dir and write executable hooks.
+        agent_volumes.append(f"{agentbox_dir}/output-{name}.git/hooks:/output/repo.git/hooks:ro")
     if not has_bundle and not has_output:
         agent_volumes.append(f"{project_dir}:/workspace:Z")
     for src, dst in read_mounts(session_dir):
