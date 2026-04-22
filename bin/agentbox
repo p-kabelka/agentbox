@@ -568,82 +568,100 @@ def cmd_preset(args) -> None:
         print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit <proxy|agent>{args.dst}")
 
 
-# ── Dispatch ──────────────────────────────────────────────────────────────────
-
-COMMANDS = {
-    "build": cmd_build, "update": cmd_update, "init":   cmd_init,
-    "start": cmd_start, "stop":   cmd_stop,
-    "logs":  cmd_logs,  "web":    cmd_web,     "allow":  cmd_allow,
-    "deny":  cmd_deny,  "mount":  cmd_mount,   "status": cmd_status,
-    "list":  cmd_list,  "ls":     cmd_list,    "remove": cmd_remove,
-    "preset": cmd_preset,
-}
-
-
-def _add_name(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--name", "-n", metavar="NAME",
-                   help="Session name (auto-detected if only one session exists)")
-
-
 def main() -> None:
-    p = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
-    sub = p.add_subparsers(dest="cmd")
+    def _add_name(p: argparse.ArgumentParser) -> None:
+        p.add_argument("--name", "-n", metavar="NAME", help="Session name (auto-detected if only one session exists)")
 
-    sub.add_parser("build",  help="Build proxy + agent images")
-    sub.add_parser("update", help="Rebuild images without cache")
-    sub.add_parser("list",   help="List sessions for the current project")
-    sub.add_parser("ls",     help="Alias for list")
-    sub.add_parser("status", help="List running agentbox containers")
+    parser = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
+    subcommand = parser.add_subparsers(dest="cmd")
 
-    r = sub.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
-    r.add_argument("dir", nargs="?")
-    r.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
-    r.add_argument("--preset",  default=AGENTBOX_PRESET)
-    r.add_argument("--branch",  default="")
-    r.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
-    r.add_argument("--no-git",  action="store_true")
-    r.add_argument("--mount",   action="append", default=[], dest="mounts", metavar="SRC[:DST]")
-    r.add_argument("--start",   action="store_true", help="Also start the session after initializing")
+    subcommand.add_parser("build", help="Build proxy + agent images")
+    subcommand.add_parser("update", help="Rebuild images without cache")
+    subcommand.add_parser("list", help="List sessions for the current project")
+    subcommand.add_parser("ls", help="Alias for list")
+    subcommand.add_parser("status", help="List running agentbox containers")
 
-    st = sub.add_parser("start", help="Launch a agentbox session (optionally override the command)")
-    _add_name(st)
-    st.add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
+    init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
+    init_subcommand.add_argument("dir", nargs="?")
+    init_subcommand.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
+    init_subcommand.add_argument("--preset", default=AGENTBOX_PRESET)
+    init_subcommand.add_argument("--branch", default="")
+    init_subcommand.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
+    init_subcommand.add_argument("--no-git", action="store_true")
+    init_subcommand.add_argument("--mount", action="append", default=[], dest="mounts", metavar="SRC[:DST]")
+    init_subcommand.add_argument("--start", action="store_true", help="Also start the session after initializing")
 
-    for cmd_name, hlp in [
-        ("stop",   "Stop a agentbox session"),
-        ("logs",   "Tail the proxy access log"),
-        ("web",    "Print the mitmweb traffic-monitor URL"),
-        ("remove", "Stop and delete a session (containers, volumes, git remote, output repo)"),
-    ]:
-        _add_name(sub.add_parser(cmd_name, help=hlp))
+    start_subcommand = subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)")
+    _add_name(start_subcommand)
+    start_subcommand.add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
 
-    for cmd_name, hlp in [
-        ("allow", "Add a host to the egress allowlist"),
-        ("deny",  "Remove a host from the egress allowlist"),
-    ]:
-        c = sub.add_parser(cmd_name, help=hlp)
-        c.add_argument("host")
-        _add_name(c)
+    stop_subcommand = subcommand.add_parser("stop", help="Stop a agentbox session")
+    _add_name(stop_subcommand)
 
-    mt    = sub.add_parser("mount", help="Manage read-only reference mounts for a session")
-    _add_name(mt)
-    mtsub = mt.add_subparsers(dest="subcmd")
-    ml = mtsub.add_parser("list");   _add_name(ml)
-    ma = mtsub.add_parser("add");    ma.add_argument("spec", metavar="SRC[:DST]"); _add_name(ma)
-    mr = mtsub.add_parser("remove"); mr.add_argument("dst",  metavar="DST");       _add_name(mr)
+    logs_subcommand = subcommand.add_parser("logs", help="Tail the proxy access log")
+    _add_name(logs_subcommand)
 
-    ps    = sub.add_parser("preset", help="Manage presets")
-    pssub = ps.add_subparsers(dest="subcmd")
-    pssub.add_parser("list")
-    pe = pssub.add_parser("edit", help="Edit proxy or agent config of a preset")
-    pe.add_argument("file", choices=["proxy", "agent"])
-    pe.add_argument("name", nargs="?", default=AGENTBOX_PRESET)
-    pc = pssub.add_parser("copy"); pc.add_argument("src"); pc.add_argument("dst")
+    web_subcommand = subcommand.add_parser("web", help="Print the mitmweb traffic-monitor URL")
+    _add_name(web_subcommand)
 
-    args = p.parse_args()
+    remove_subcommand = subcommand.add_parser("remove", help="Stop and delete a session (containers, volumes, git remote, output repo)")
+    _add_name(remove_subcommand)
+
+    allow_subcommand = subcommand.add_parser("allow", help="Add a host to the egress allowlist")
+    allow_subcommand.add_argument("host")
+    _add_name(allow_subcommand)
+
+    deny_subcommand = subcommand.add_parser("deny", help="Remove a host from the egress allowlist")
+    deny_subcommand.add_argument("host")
+    _add_name(deny_subcommand)
+
+    mount_subcommand    = subcommand.add_parser("mount", help="Manage read-only reference mounts for a session")
+    _add_name(mount_subcommand)
+
+    mount_subparser = mount_subcommand.add_subparsers(dest="subcmd")
+    mount_list = mount_subparser.add_parser("list")
+    _add_name(mount_list)
+
+    mount_add = mount_subparser.add_parser("add")
+    mount_add.add_argument("spec", metavar="SRC[:DST]")
+    _add_name(mount_add)
+
+    mount_remove = mount_subparser.add_parser("remove")
+    mount_remove.add_argument("dst", metavar="DST")
+    _add_name(mount_remove)
+
+    preset_subcommand    = subcommand.add_parser("preset", help="Manage presets")
+    preset_subparser = preset_subcommand.add_subparsers(dest="subcmd")
+    preset_subparser.add_parser("list")
+    preset_edit = preset_subparser.add_parser("edit", help="Edit proxy or agent config of a preset")
+    preset_edit.add_argument("file", choices=["proxy", "agent"])
+    preset_edit.add_argument("name", nargs="?", default=AGENTBOX_PRESET)
+    preset_copy = preset_subparser.add_parser("copy")
+    preset_copy.add_argument("src")
+    preset_copy.add_argument("dst")
+
+    args = parser.parse_args()
     if not args.cmd:
-        p.print_help()
+        parser.print_help()
         return
+
+    COMMANDS = {
+        "build": cmd_build,
+        "update": cmd_update,
+        "init": cmd_init,
+        "start": cmd_start,
+        "stop": cmd_stop,
+        "logs": cmd_logs,
+        "web": cmd_web,
+        "allow": cmd_allow,
+        "deny": cmd_deny,
+        "mount": cmd_mount,
+        "status": cmd_status,
+        "list": cmd_list,
+        "ls": cmd_list,
+        "remove": cmd_remove,
+        "preset": cmd_preset,
+    }
 
     try:
         COMMANDS[args.cmd](args)
