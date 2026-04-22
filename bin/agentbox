@@ -569,8 +569,9 @@ def cmd_preset(args) -> None:
 
 
 def main() -> None:
-    def _add_name(p: argparse.ArgumentParser) -> None:
+    def subparser_with_name(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         p.add_argument("--name", "-n", metavar="NAME", help="Session name (auto-detected if only one session exists)")
+        return p
 
     parser = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
     subcommand = parser.add_subparsers(dest="cmd")
@@ -592,45 +593,29 @@ def main() -> None:
     init_subcommand.add_argument("--start", action="store_true", help="Also start the session after initializing")
 
     start_subcommand = subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)")
-    _add_name(start_subcommand)
-    start_subcommand.add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
+    subparser_with_name(start_subcommand).add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
 
-    stop_subcommand = subcommand.add_parser("stop", help="Stop a agentbox session")
-    _add_name(stop_subcommand)
-
-    logs_subcommand = subcommand.add_parser("logs", help="Tail the proxy access log")
-    _add_name(logs_subcommand)
-
-    web_subcommand = subcommand.add_parser("web", help="Print the mitmweb traffic-monitor URL")
-    _add_name(web_subcommand)
-
-    remove_subcommand = subcommand.add_parser("remove", help="Stop and delete a session (containers, volumes, git remote, output repo)")
-    _add_name(remove_subcommand)
-
-    allow_subcommand = subcommand.add_parser("allow", help="Add a host to the egress allowlist")
+    subparser_with_name(subcommand.add_parser("stop", help="Stop a agentbox session"))
+    subparser_with_name(subcommand.add_parser("logs", help="Tail the proxy access log"))
+    subparser_with_name(subcommand.add_parser("web", help="Print the mitmweb traffic-monitor URL"))
+    subparser_with_name(subcommand.add_parser("remove", help="Stop and delete a session (containers, volumes, git remote, output repo)"))
+    allow_subcommand = subparser_with_name(subcommand.add_parser("allow", help="Add a host to the egress allowlist"))
     allow_subcommand.add_argument("host")
-    _add_name(allow_subcommand)
-
-    deny_subcommand = subcommand.add_parser("deny", help="Remove a host from the egress allowlist")
+    deny_subcommand = subparser_with_name(subcommand.add_parser("deny", help="Remove a host from the egress allowlist"))
     deny_subcommand.add_argument("host")
-    _add_name(deny_subcommand)
 
-    mount_subcommand    = subcommand.add_parser("mount", help="Manage read-only reference mounts for a session")
-    _add_name(mount_subcommand)
+    mount_subcommand = subparser_with_name(subcommand.add_parser("mount", help="Manage read-only reference mounts for a session"))
 
     mount_subparser = mount_subcommand.add_subparsers(dest="subcmd")
-    mount_list = mount_subparser.add_parser("list")
-    _add_name(mount_list)
+    subparser_with_name(mount_subparser.add_parser("list"))
 
-    mount_add = mount_subparser.add_parser("add")
+    mount_add = subparser_with_name(mount_subparser.add_parser("add"))
     mount_add.add_argument("spec", metavar="SRC[:DST]")
-    _add_name(mount_add)
 
-    mount_remove = mount_subparser.add_parser("remove")
+    mount_remove = subparser_with_name(mount_subparser.add_parser("remove"))
     mount_remove.add_argument("dst", metavar="DST")
-    _add_name(mount_remove)
 
-    preset_subcommand    = subcommand.add_parser("preset", help="Manage presets")
+    preset_subcommand = subcommand.add_parser("preset", help="Manage presets")
     preset_subparser = preset_subcommand.add_subparsers(dest="subcmd")
     preset_subparser.add_parser("list")
     preset_edit = preset_subparser.add_parser("edit", help="Edit proxy or agent config of a preset")
