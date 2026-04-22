@@ -61,7 +61,7 @@ extra_allowed_hosts: []
 # Extra environment variables for the proxy container. Merged with compose-base.yaml.
 # environment:
 #   VERTEX_PROJECT_ID: my-project
-#   VERTEX_REGION: us-east5
+#   VERTEX_REGION: global
 
 logging:
   log_request_headers: true

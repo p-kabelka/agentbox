@@ -20,7 +20,7 @@ extra_allowed_hosts: []
 environment:
   GOOGLE_CLOUD_PROJECT: itpc-gcp-pnd-pe-eng-claude
   VERTEX_PROJECT_ID: itpc-gcp-pnd-pe-eng-claude
-  VERTEX_REGION: us-east5
+  VERTEX_REGION: global
 
 logging:
   log_request_headers: false

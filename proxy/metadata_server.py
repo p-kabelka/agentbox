@@ -37,7 +37,7 @@ log.propagate = False
 
 PORT       = int(os.environ.get("METADATA_PORT", "9090"))
 PROJECT_ID = os.environ.get("VERTEX_PROJECT_ID", "")
-REGION     = os.environ.get("VERTEX_REGION", "us-east5")
+REGION     = os.environ.get("VERTEX_REGION", "global")
 
 
 class MetadataHandler(BaseHTTPRequestHandler):

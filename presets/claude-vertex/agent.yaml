@@ -8,7 +8,7 @@ environment:
   AGENT_HARNESS_ARGS: --dangerously-skip-permissions
   CLAUDE_CODE_USE_VERTEX: 1
   ANTHROPIC_VERTEX_PROJECT_ID: itpc-gcp-pnd-pe-eng-claude
-  CLOUD_ML_REGION: us-east5
+  CLOUD_ML_REGION: global
 
 # Dotfiles placed in the agent's $HOME at session start.
 # Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).

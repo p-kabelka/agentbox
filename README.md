@@ -153,7 +153,7 @@ providers:
 environment:
   GOOGLE_CLOUD_PROJECT: my-gcp-project
   VERTEX_PROJECT_ID: my-gcp-project
-  VERTEX_REGION: us-east5
+  VERTEX_REGION: global
 ```
 
 Place GCP credentials at `$AGENTBOX_HOME/secrets/credentials.json`, or let the proxy use your local gcloud ADC (`~/.config/gcloud` is mounted read-only when Vertex is enabled).
