@@ -148,6 +148,7 @@ providers:
     enabled: true
     metadata_server: true
     allowed_hosts:
+      - "aiplatform.googleapis.com"
       - "*-aiplatform.googleapis.com"
 
 environment:
