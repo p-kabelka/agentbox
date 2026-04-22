@@ -4,35 +4,56 @@ providers:
 
   - name: anthropic
     enabled: false
+    credential_type: static
+    # api_key_file: /secrets/anthropic_key  # read key from file (takes precedence over env)
     api_key_env: ANTHROPIC_API_KEY
     inject_header: x-api-key
     inject_prefix: ""
     allowed_hosts:
       - api.anthropic.com
+    path_prefixes:
+      - /v1/messages
+      - /v1/complete
+      - /v1/models
 
   - name: openai
     enabled: false
+    credential_type: static
     api_key_env: OPENAI_API_KEY
     inject_header: Authorization
     inject_prefix: "Bearer "
     allowed_hosts:
       - api.openai.com
+    path_prefixes:
+      - /v1/chat/completions
+      - /v1/completions
+      - /v1/embeddings
+      - /v1/responses
 
   # Requires credentials at ~/.agentbox/secrets/credentials.json
   - name: vertex
     enabled: false
-    metadata_server: true  # starts fake GCE metadata sidecar on proxy:9090
+    credential_type: oauth
+    metadata_server: true
+    inject_header: Authorization
+    inject_prefix: "Bearer "
+    replace_token: "dummy-replaced-by-proxy"
     allowed_hosts:
       - "*.googleapis.com"
+    path_prefixes:
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/"
 
   # Azure: uncomment and set api_key_env + allowed_hosts to add Azure OpenAI
   # - name: azure-openai
   #   enabled: false
+  #   credential_type: static
   #   api_key_env: AZURE_OPENAI_API_KEY
   #   inject_header: api-key
   #   inject_prefix: ""
   #   allowed_hosts:
   #     - "*.openai.azure.com"
+  #   path_prefixes:
+  #     - /openai/deployments/
 
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts: []

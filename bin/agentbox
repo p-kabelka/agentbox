@@ -181,6 +181,17 @@ def write_override(session_dir: Path) -> None:
         gcloud = Path.home() / ".config" / "gcloud"
         if gcloud.is_dir():
             proxy_volumes.append(f"{gcloud}:/root/.config/gcloud:ro,Z")
+    for p in proxy_cfg.get("providers", []):
+        if not p.get("enabled"):
+            continue
+        key_file = p.get("api_key_file", "")
+        if key_file:
+            host_path = Path(key_file).expanduser().resolve()
+            if host_path.is_file():
+                proxy_volumes.append(f"{host_path}:/run/secrets/{host_path.name}:ro,Z")
+            else:
+                log.warning("Provider '%s': api_key_file not found: %s",
+                            p.get("name", "?"), host_path)
 
     agent_cfg = load_yaml(session_dir / "config" / "agent.yaml") if (session_dir / "config" / "agent.yaml").is_file() else {}
 

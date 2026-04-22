@@ -3,9 +3,15 @@
 providers:
   - name: vertex
     enabled: true
-    metadata_server: true  # starts fake GCE metadata sidecar on proxy:9090
+    credential_type: oauth
+    metadata_server: true
+    inject_header: Authorization
+    inject_prefix: "Bearer "
+    replace_token: "dummy-replaced-by-proxy"
     allowed_hosts:
       - "*-aiplatform.googleapis.com"
+    path_prefixes:
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/"
 
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts: []

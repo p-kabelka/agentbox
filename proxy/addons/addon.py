@@ -1,7 +1,14 @@
 # mitmproxy addon: allowlist enforcement, credential injection, and JSON access logging.
-import fnmatch, json, logging, os, sys, threading, time
+import fnmatch, json, logging, os, sys, time
 import yaml
 from mitmproxy import http
+
+_addon_dir = os.path.dirname(os.path.abspath(__file__))
+if _addon_dir not in sys.path:
+    sys.path.insert(0, _addon_dir)
+
+from provider import Provider
+from resolvers import RESOLVER_CLASSES
 
 
 class JSONFormatter(logging.Formatter):
@@ -40,65 +47,27 @@ _log_req_hdr  = lcfg.get("log_request_headers", True)
 _log_resp_hdr = lcfg.get("log_response_headers", False)
 _log_bodies   = lcfg.get("log_bodies", False)
 
-# Must match the access_token returned by metadata_server.py
-_MOCK_TOKEN = "dummy-replaced-by-proxy"
-
 
 class AgentboxAddon:
     def __init__(self):
-        self._allowed        = []
-        self._rules          = []   # (patterns, header, value) — static key injection
-        self._vertex_hosts   = []   # patterns for Google APIs (allowlist)
-        self._vertex_project = ""
-        self._vertex_region  = ""
-        self._vertex_creds   = None # (credentials, request) — refreshed on demand
-        self._vertex_lock    = threading.Lock()
+        self._allowed: list[str] = []
+        self._providers: list[Provider] = []
 
         for p in cfg.get("providers", []):
             if not p.get("enabled"):
                 continue
-            hosts = p.get("allowed_hosts", [])
-            self._allowed.extend(hosts)
-            if p.get("name") == "vertex":
-                self._vertex_hosts   = hosts
-                self._vertex_project = os.environ.get("VERTEX_PROJECT_ID", "")
-                self._vertex_region  = os.environ.get("VERTEX_REGION", "us-east5")
-                self._load_vertex_creds()
-            else:
-                key = os.environ.get(p.get("api_key_env", ""), "").strip()
-                if p.get("inject_header") and key:
-                    self._rules.append((hosts, p["inject_header"], p.get("inject_prefix", "") + key))
-                elif p.get("inject_header") and not key and p.get("api_key_env"):
-                    log.warning("Provider '%s' enabled but %s is not set",
-                                p.get("name", "?"), p["api_key_env"])
+            self._allowed.extend(p.get("allowed_hosts", []))
+            cred_type = p.get("credential_type")
+            if cred_type:
+                resolver_cls = RESOLVER_CLASSES.get(cred_type)
+                if resolver_cls:
+                    resolver = resolver_cls(p)
+                    self._providers.append(Provider(p, resolver))
+                else:
+                    log.error("Unknown credential_type '%s' for provider '%s'",
+                              cred_type, p.get("name", "?"))
+
         self._allowed.extend(cfg.get("extra_allowed_hosts", []))
-
-    def _load_vertex_creds(self) -> None:
-        try:
-            import google.auth
-            import google.auth.transport.requests
-            # If GOOGLE_APPLICATION_CREDENTIALS points to a missing file, clear it
-            # so google.auth.default() falls through to the well-known ADC path.
-            cenv = os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
-            if cenv and not os.path.isfile(cenv):
-                del os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
-            creds, _ = google.auth.default(
-                scopes=["https://www.googleapis.com/auth/cloud-platform"]
-            )
-            self._vertex_creds = (creds, google.auth.transport.requests.Request())
-            log.info("Loaded Google credentials for Vertex injection (type=%s)",
-                     type(creds).__name__)
-        except Exception as exc:
-            log.error("Failed to load Google credentials for Vertex: %s", exc)
-
-    def _vertex_token(self) -> str | None:
-        if not self._vertex_creds:
-            return None
-        creds, req = self._vertex_creds
-        with self._vertex_lock:
-            if not creds.valid:
-                creds.refresh(req)
-            return creds.token
 
     def request(self, flow: http.HTTPFlow) -> None:
         host = flow.request.pretty_host
@@ -114,24 +83,10 @@ class AgentboxAddon:
             })
             return
 
-        # Vertex: replace mock token with a real one on inference requests only
-        if self._vertex_hosts and any(fnmatch.fnmatch(host, p) for p in self._vertex_hosts):
-            expected_host = f"{self._vertex_region}-aiplatform.googleapis.com"
-            prefix = (f"/v1/projects/{self._vertex_project}"
-                      f"/locations/{self._vertex_region}"
-                      f"/publishers/anthropic/models/")
-            auth = flow.request.headers.get("Authorization", "")
-            if (host == expected_host
-                    and flow.request.path.startswith(prefix)
-                    and auth == f"Bearer {_MOCK_TOKEN}"):
-                if token := self._vertex_token():
-                    flow.request.headers["Authorization"] = f"Bearer {token}"
-            return
-
-        # Other providers: inject static API key
-        for patterns, header, value in self._rules:
-            if any(fnmatch.fnmatch(host, p) for p in patterns):
-                flow.request.headers[header] = value
+        for provider in self._providers:
+            if provider.matches(flow):
+                provider.inject(flow)
+                return
 
     def response(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("agentbox_blocked"):
