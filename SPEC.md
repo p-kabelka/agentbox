@@ -188,13 +188,13 @@ Configured in `dynamic_chain` mode. The chain list contains a single entry: the 
 
 **`start.sh`**
 
-Executed as the container entrypoint. Performs in order:
+The container entrypoint (declared as `ENTRYPOINT`, not `CMD`, so any arguments passed to `compose run` or `podman exec` are forwarded to it as `$@`). Performs in order:
 
 1. Polls until the mitmproxy CA certificate appears at `/proxy-ca/mitmproxy-ca-cert.pem`, then installs it into the Fedora system trust store (`update-ca-trust extract`) and exports `NODE_EXTRA_CA_CERTS` and `REQUESTS_CA_BUNDLE` for Node.js and Python clients.
 2. If `/source/project.bundle` is present and `/workspace/.git` does not yet exist, clones the bundle to `/workspace`, renames the `origin` remote to `source`, and adds `/output/repo.git` as the `output` remote.
 3. Copies preset dotfiles from `/agentbox-dotfiles` into the container's home directory (if the directory is mounted).
-4. Applies a `stty inlcr` workaround so that Node.js readline in raw mode works correctly with krun's virtio-console (which sends `\n` instead of `\r` for Enter).
-5. Execs the binary named by `AGENT_HARNESS` with optional `AGENT_HARNESS_ARGS`. Falls back to an interactive bash shell if `AGENT_HARNESS` is unset.
+4. Applies `stty inlcr` so that Node.js readline in raw mode works correctly with krun's virtio-console (which sends `\n` instead of `\r` for Enter). This is set unconditionally so that any process launched from this container — including a shell the user later starts a harness from — gets the correct terminal mode.
+5. If arguments were passed (`$# > 0`), execs them directly. Otherwise execs `AGENT_HARNESS` with `AGENT_HARNESS_ARGS`, or falls back to bash.
 
 **Base image**
 
@@ -207,7 +207,7 @@ A Python script in `bin/agentbox`, added to `PATH` as part of initial setup. Com
 | Group | Commands |
 |-------|----------|
 | Setup | `build`, `update`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
-| Project lifecycle | `init [--preset <name>] [--harness <binary>] [--name <name>] [--branch <branch>] [--mount SRC[:DST]] [--start]`, `start`, `stop`, `shell`, `remove` |
+| Project lifecycle | `init [--preset <name>] [--harness <binary>] [--name <name>] [--branch <branch>] [--mount SRC[:DST]] [--start]`, `start [-- CMD]`, `stop`, `remove` |
 | Monitoring | `logs`, `web` |
 | Egress control | `allow <host>`, `deny <host>` |
 | Reference mounts | `mount list`, `mount add <path>`, `mount remove <path>` |
@@ -215,7 +215,7 @@ A Python script in `bin/agentbox`, added to `PATH` as part of initial setup. Com
 
 `agentbox init` is the primary entry point. It creates a timestamped (or named) session directory under `.agentbox/sessions/`, copies the chosen preset's `proxy.yaml` and `agent.yaml`, extracts any inline dotfiles from `agent.yaml`, creates a git bundle of the current branch, initialises the bare output repository (with its `hooks/` directory `chmod 555`), registers the `agentbox-<name>` git remote, assigns a web UI port, writes `.env`, generates `compose.override.yaml`, and optionally launches the session immediately if `--start` is passed.
 
-`agentbox start` re-generates `compose.override.yaml` from the current session state, starts the proxy container in the background (waiting for its health check), then runs the agent container interactively. When the agent container exits, it automatically fetches from the output repository with `core.hooksPath=/dev/null` and prints the available branches for review.
+`agentbox start` re-generates `compose.override.yaml`, starts the proxy in the background (waiting for its health check), then runs a new agent container interactively via `compose run --rm agent`. Any arguments after `--` are forwarded to `start.sh` and override what gets exec'd (e.g. `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently. Because each agent runs in a krun microVM, `podman exec` cannot reach a running container.
 
 `agentbox allow` and `agentbox deny` append or remove entries from `extra_allowed_hosts` in the session's `config/proxy.yaml`, then restart the proxy container so the addon reloads the configuration. They wait for the proxy health check to pass before returning.
 

@@ -18,4 +18,4 @@ RUN git config --global user.email "agent@agentbox" && \
     git config --global user.name "Agent"
 
 WORKDIR /workspace
-CMD ["/start.sh"]
+ENTRYPOINT ["/start.sh"]

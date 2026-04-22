@@ -244,7 +244,7 @@ def cmd_update(args) -> None:
     print("==> Done.")
 
 
-def _launch(session_dir: Path) -> None:
+def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     name = session_dir.name
     project_dir = session_dir.parent.parent.parent
     compose(session_dir, "up", "-d", "proxy", check=True)
@@ -252,7 +252,7 @@ def _launch(session_dir: Path) -> None:
     web_port = read_port(session_dir)
     if web_port:
         print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
-    result = compose(session_dir, "run", "--rm", "agent")
+    result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
     # Auto-fetch when the session ends
     output_git = session_dir / "output.git"
     if output_git.is_dir():
@@ -395,22 +395,14 @@ def cmd_start(args) -> None:
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     write_override(session_dir)
-    _launch(session_dir)
+    cmd = [a for a in (args.exec_cmd or [])] or None
+    _launch(session_dir, cmd)
 
 
 def cmd_stop(args) -> None:
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     compose(session_dir, "down", check=True)
-
-
-def cmd_shell(args) -> None:
-    project_dir = require_agentbox()
-    session_dir = require_session(project_dir, args.name)
-    compose(session_dir, "up", "-d", "proxy", check=True)
-    wait_healthy(session_dir)
-    result = compose(session_dir, "run", "--rm", "agent", "/start.sh", "--shell")
-    sys.exit(result.returncode)
 
 
 def cmd_logs(args) -> None:
@@ -467,7 +459,6 @@ def cmd_remove(args) -> None:
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
     name = session_dir.name
-    agentbox_dir = project_dir / ".agentbox"
 
     compose(session_dir, "down", "-v", check=True)
 
@@ -581,7 +572,7 @@ def cmd_preset(args) -> None:
 
 COMMANDS = {
     "build": cmd_build, "update": cmd_update, "init":   cmd_init,
-    "start": cmd_start, "stop":   cmd_stop,   "shell":  cmd_shell,
+    "start": cmd_start, "stop":   cmd_stop,
     "logs":  cmd_logs,  "web":    cmd_web,     "allow":  cmd_allow,
     "deny":  cmd_deny,  "mount":  cmd_mount,   "status": cmd_status,
     "list":  cmd_list,  "ls":     cmd_list,    "remove": cmd_remove,
@@ -614,10 +605,12 @@ def main() -> None:
     r.add_argument("--mount",   action="append", default=[], dest="mounts", metavar="SRC[:DST]")
     r.add_argument("--start",   action="store_true", help="Also start the session after initializing")
 
+    st = sub.add_parser("start", help="Launch a agentbox session (optionally override the command)")
+    _add_name(st)
+    st.add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
+
     for cmd_name, hlp in [
-        ("start",  "Resume a agentbox session"),
         ("stop",   "Stop a agentbox session"),
-        ("shell",  "Open a shell in the agent container"),
         ("logs",   "Tail the proxy access log"),
         ("web",    "Print the mitmweb traffic-monitor URL"),
         ("remove", "Stop and delete a session (containers, volumes, git remote, output repo)"),

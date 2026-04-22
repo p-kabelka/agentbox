@@ -21,17 +21,16 @@ fi
 # Apply preset dotfiles to home directory
 [ -d /agentbox-dotfiles ] && cp -rT /agentbox-dotfiles ~/
 
-[ "${1:-}" = "--shell" ] && exec /bin/bash
-
 # krun's virtio-console sends \n for Enter instead of \r. Node.js readline in
 # raw mode expects \r. setRawMode() clears icrnl but not inlcr, so inlcr set
 # here survives the raw-mode transition and translates \n back to \r.
 stty inlcr 2>/dev/null || true
 
-if [ -z "${AGENT_HARNESS:-}" ]; then
-    echo "[agent] No AGENT_HARNESS set, starting bash."
+if [ $# -gt 0 ]; then
+    exec "$@"
+elif [ -n "${AGENT_HARNESS:-}" ]; then
+    echo "[agent] Starting ${AGENT_HARNESS} ${AGENT_HARNESS_ARGS:-}..."
+    exec ${AGENT_HARNESS} ${AGENT_HARNESS_ARGS:-}
+else
     exec /bin/bash
 fi
-
-echo "[agent] Starting ${AGENT_HARNESS} ${AGENT_HARNESS_ARGS:-}..."
-exec ${AGENT_HARNESS} ${AGENT_HARNESS_ARGS:-} "$@"

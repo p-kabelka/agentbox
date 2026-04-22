@@ -74,13 +74,12 @@ agentbox init --start
 
 ```bash
 agentbox init [--name NAME] [--preset NAME] [--harness BINARY] [--branch BRANCH] [--start]
-agentbox start [--name NAME]   # re-generate podman-compose override config and launch agent harness
-agentbox stop  [--name NAME]   # stop containers
-agentbox shell [--name NAME]   # open a shell in the agent (no harness)
-agentbox remove [--name NAME]  # stop, delete session, output repo, and git remote
+agentbox start [--name NAME] [-- CMD]        # launch agent harness (or CMD, e.g. -- bash, -- tmux)
+agentbox stop  [--name NAME]                 # stop containers
+agentbox remove [--name NAME]                # stop, delete session, output repo, and git remote
 ```
 
-`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected.
+`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. `agentbox start` can be called multiple times on the same session to run independent agent containers concurrently. Because agents run in krun microVMs, `podman exec` cannot reach a running container — use `agentbox start -- bash` to open a shell in a new container instead.
 
 ### Monitoring
 
