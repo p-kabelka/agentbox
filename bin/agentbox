@@ -190,8 +190,7 @@ def write_override(session_dir: Path) -> None:
             if host_path.is_file():
                 proxy_volumes.append(f"{host_path}:/run/secrets/{host_path.name}:ro,Z")
             else:
-                log.warning("Provider '%s': api_key_file not found: %s",
-                            p.get("name", "?"), host_path)
+                print(f"Provider {p.get("name", "?")}: api_key_file not found: {host_path}")
 
     agent_cfg = load_yaml(session_dir / "config" / "agent.yaml") if (session_dir / "config" / "agent.yaml").is_file() else {}
 
@@ -226,12 +225,20 @@ def _build_images(no_cache: bool = False) -> None:
 
     (AGENTBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
 
-    # Stage host claude binary into agent build context
-    claude_src = Path.home() / ".local" / "bin" / "claude"
-    claude_staged = AGENTBOX_HOME / "agent" / "claude"
-    if not claude_src.is_file():
-        die(f"claude binary not found at {claude_src}")
-    shutil.copy2(claude_src, claude_staged)
+    harness_dir = AGENTBOX_HOME / "agent" / "harnesses"
+    harness_dir.mkdir(exist_ok=True)
+    (harness_dir / ".placeholder").touch()
+    known_harnesses = ["claude", "opencode"]
+    found = []
+    for name in known_harnesses:
+        path = shutil.which(name)
+        if path:
+            shutil.copy2(path, harness_dir / name)
+            found.append(name)
+    if found:
+        print(f"Staged harness binaries: {", ".join(found)}")
+    else:
+        print(f"No harness binaries found on PATH ({", ".join(known_harnesses)})")
 
     try:
         for tag, ctx in [
@@ -240,7 +247,7 @@ def _build_images(no_cache: bool = False) -> None:
         ]:
             subprocess.run(["podman", "build", *extra, "-t", tag, str(ctx)], check=True)
     finally:
-        claude_staged.unlink(missing_ok=True)
+        shutil.rmtree(harness_dir, ignore_errors=True)
 
 
 def cmd_build(args) -> None:

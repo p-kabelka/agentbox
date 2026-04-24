@@ -3,8 +3,18 @@
 # Extra environment variables injected into the agent container.
 # These are merged with (and can override) the base env in compose-base.yaml.
 environment: {}
+  # Claude Code
+  # IS_SANDBOX: 1 # required to allow --dangerously-skip-permissions
   # AGENT_HARNESS: claude
   # AGENT_HARNESS_ARGS: --dangerously-skip-permissions
+  # CLAUDE_CODE_USE_VERTEX: 1
+  # ANTHROPIC_VERTEX_PROJECT_ID: my-project
+  # CLOUD_ML_REGION: global
+
+  # OpenCode
+  # GOOGLE_CLOUD_PROJECT: my-project
+  # VERTEX_LOCATION: global
+
   # NODE_ENV: development
 
 # Dotfiles placed in the agent's $HOME at session start.

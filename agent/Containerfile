@@ -8,8 +8,8 @@ RUN dnf install -y \
         vim \
     && dnf clean all
 
-COPY claude /usr/local/bin/claude
-RUN chmod +x /usr/local/bin/claude
+COPY harnesses/ /usr/local/bin/
+RUN rm -f /usr/local/bin/.placeholder
 
 COPY start.sh /start.sh
 RUN chmod +x /start.sh

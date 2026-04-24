@@ -2,3 +2,4 @@ secrets/credentials.json
 secrets/*.json
 secrets/*.pem
 .env
+agent/harnesses/

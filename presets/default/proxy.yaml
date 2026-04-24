@@ -39,7 +39,8 @@ providers:
     inject_prefix: "Bearer "
     replace_token: "dummy-replaced-by-proxy"
     allowed_hosts:
-      - "*.googleapis.com"
+      - "aiplatform.googleapis.com"
+      - "*-aiplatform.googleapis.com"
     path_prefixes:
       - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/"
 
