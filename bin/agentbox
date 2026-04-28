@@ -359,7 +359,6 @@ def cmd_init(args) -> None:
             output_git = session_dir / "output.git"
             subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
             (output_git / "hooks").mkdir(exist_ok=True)
-            (output_git / "hooks").chmod(0o555)
 
             remote = f"agentbox-{name}"
             has_remote = subprocess.run(
