@@ -6,6 +6,7 @@ RUN dnf install -y \
         ca-certificates \
         proxychains-ng \
         vim \
+        tmux \
     && dnf clean all
 
 COPY harnesses/ /usr/local/bin/
