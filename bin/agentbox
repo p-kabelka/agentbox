@@ -135,15 +135,15 @@ def save_yaml(path: Path, cfg: dict) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
 
-def read_mounts(agentbox_dir: Path) -> list[tuple[str, str]]:
+def read_mounts(agentbox_dir: Path) -> list[tuple[str, str, bool]]:
     p = agentbox_dir / "mounts.yaml"
     if not p.is_file():
         return []
-    return [(m["src"], m["dst"]) for m in (yaml.safe_load(p.read_text()) or [])]
+    return [(m["src"], m["dst"], m["writable"]) for m in (yaml.safe_load(p.read_text()) or [])]
 
 
-def save_mounts(agentbox_dir: Path, mounts: list[tuple[str, str]]) -> None:
-    data = [{"src": src, "dst": dst} for src, dst in mounts]
+def save_mounts(agentbox_dir: Path, mounts: list[tuple[str, str, bool]]) -> None:
+    data = [{"src": s, "dst": d, "writable": w} for s, d, w in mounts]
     (agentbox_dir / "mounts.yaml").write_text(
         yaml.dump(data, default_flow_style=False, allow_unicode=True)
     )
@@ -168,8 +168,9 @@ def write_override(session_dir: Path) -> None:
         agent_volumes.append(f"{output_dir.resolve()}/hooks:/output/repo.git/hooks:ro")
     if not has_bundle and not output_dir.is_dir():
         agent_volumes.append(f"{project_dir}:/workspace:Z")
-    for src, dst in read_mounts(session_dir):
-        agent_volumes.append(f"{src}:/context/{dst}:ro,Z")
+    for src, dst, writable in read_mounts(session_dir):
+        opts = "Z" if writable else "ro,Z"
+        agent_volumes.append(f"{src}:/context/{dst}:{opts}")
 
     proxy_cfg = load_yaml(session_dir / "config" / "proxy.yaml")
     vertex_enabled = any(
@@ -379,17 +380,26 @@ def cmd_init(args) -> None:
         f"AGENTBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\nAGENTBOX_NAME={name}\n"
     )
 
-    if args.mounts:
+    if args.ro_mounts or args.rw_mounts:
         existing = read_mounts(session_dir)
-        existing_dsts = {d for _, d in existing}
-        for spec in args.mounts:
+        existing_dsts = {d for _, d, _ in existing}
+        for spec in args.ro_mounts:
             src_str, _, dst = spec.partition(":")
             src = str(Path(src_str).resolve())
             dst = dst or Path(src_str).name
             if not Path(src).exists():
                 die(f"mount source does not exist: {src}")
             if dst not in existing_dsts:
-                existing.append((src, dst))
+                existing.append((src, dst, False))
+                existing_dsts.add(dst)
+        for spec in args.rw_mounts:
+            src_str, _, dst = spec.partition(":")
+            src = str(Path(src_str).resolve())
+            dst = dst or Path(src_str).name
+            if not Path(src).exists():
+                die(f"mount source does not exist: {src}")
+            if dst not in existing_dsts:
+                existing.append((src, dst, True))
                 existing_dsts.add(dst)
         save_mounts(session_dir, existing)
 
@@ -498,9 +508,10 @@ def cmd_mount(args) -> None:
         if not mounts:
             print("No extra reference mounts. Add one: agentbox mount add /path/to/project[:name]")
         else:
-            for src, dst in mounts:
+            for src, dst, writable in mounts:
+                mode = "[rw]" if writable else "[ro]"
                 tag = "  [MISSING]" if not Path(src).exists() else ""
-                print(f"  {src}  →  /context/{dst}{tag}")
+                print(f"  {src}  →  /context/{dst}  {mode}{tag}")
 
     elif sub == "add":
         src_str, _, dst = args.spec.partition(":")
@@ -509,16 +520,17 @@ def cmd_mount(args) -> None:
         if not Path(src).exists():
             die(f"source path does not exist: {src}")
         mounts = read_mounts(session_dir)
-        if any(d == dst for _, d in mounts):
+        if any(d == dst for _, d, _ in mounts):
             die(f"/context/{dst} already mounted. Remove first: agentbox mount remove {dst}")
-        mounts.append((src, dst))
+        mounts.append((src, dst, args.writable))
         save_mounts(session_dir, mounts)
         write_override(session_dir)
-        print(f"Added {src} → /context/{dst}. Start the session to apply.")
+        mode = "[rw]" if args.writable else "[ro]"
+        print(f"Added {src} → /context/{dst} {mode}. Start the session to apply.")
 
     elif sub == "remove":
         mounts = read_mounts(session_dir)
-        filtered = [(s, d) for s, d in mounts if d != args.dst]
+        filtered = [(s, d, w) for s, d, w in mounts if d != args.dst]
         if len(filtered) == len(mounts):
             die(f"no mount '{args.dst}' found. List: agentbox mount list")
         save_mounts(session_dir, filtered)
@@ -606,7 +618,8 @@ def main() -> None:
     init_subcommand.add_argument("--branch", default="")
     init_subcommand.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
     init_subcommand.add_argument("--no-git", action="store_true")
-    init_subcommand.add_argument("--mount", action="append", default=[], dest="mounts", metavar="SRC[:DST]")
+    init_subcommand.add_argument("--ro-mount", action="append", default=[], dest="ro_mounts", metavar="SRC[:DST]", help="Mount read-only reference directory")
+    init_subcommand.add_argument("--rw-mount", action="append", default=[], dest="rw_mounts", metavar="SRC[:DST]", help="Mount writable reference directory")
     init_subcommand.add_argument("--start", action="store_true", help="Also start the session after initializing")
 
     start_subcommand = subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)")
@@ -628,6 +641,7 @@ def main() -> None:
 
     mount_add = subparser_with_name(mount_subparser.add_parser("add"))
     mount_add.add_argument("spec", metavar="SRC[:DST]")
+    mount_add.add_argument("-w", "--writable", action="store_true", help="Mount read-write instead of read-only")
 
     mount_remove = subparser_with_name(mount_subparser.add_parser("remove"))
     mount_remove.add_argument("dst", metavar="DST")
