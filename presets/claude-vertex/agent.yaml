@@ -42,6 +42,7 @@ dotfiles:
 
     # CUSTOM
     export EDITOR=vim
+    alias agent="$AGENT_HARNESS $AGENT_HARNESS_ARGS"
   .gitconfig: |
     [user]
         name = Agent
