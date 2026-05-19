@@ -163,9 +163,11 @@ def write_override(session_dir: Path) -> None:
         agent_volumes.append(f"{session_dir}/source.bundle:/source/project.bundle:ro,Z")
     if output_dir.is_dir():
         agent_volumes.append(f"{output_dir.resolve()}:/output/repo.git:Z")
-        # Read-only bind mount over hooks — kernel-enforced, not just chmod.
-        # Without this the agent can chmod 755 the dir and write executable hooks.
+        # Read-only bind mount over hooks and git config — kernel-enforced, not just chmod.
+        # Without this the agent can chmod 755 the dir and write executable
+        # hooks or custom scripts in git config.
         agent_volumes.append(f"{output_dir.resolve()}/hooks:/output/repo.git/hooks:ro")
+        agent_volumes.append(f"{output_dir.resolve()}/config:/output/repo.git/config:ro")
     if not has_bundle and not output_dir.is_dir():
         agent_volumes.append(f"{project_dir}:/workspace:Z")
     for src, dst, writable in read_mounts(session_dir):
@@ -360,6 +362,7 @@ def cmd_init(args) -> None:
             output_git = session_dir / "output.git"
             subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
             (output_git / "hooks").mkdir(exist_ok=True)
+            (output_git / "config").touch(exist_ok=True)
 
             remote = f"agentbox-{name}"
             has_remote = subprocess.run(
