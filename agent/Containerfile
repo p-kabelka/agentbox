@@ -7,6 +7,7 @@ RUN dnf install -y \
         proxychains-ng \
         vim \
         tmux \
+        jq \
     && dnf clean all
 
 COPY harnesses/ /usr/local/bin/

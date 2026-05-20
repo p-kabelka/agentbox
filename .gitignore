@@ -1,3 +1,4 @@
 secrets/
 .env
 agent/harnesses/
+custom/

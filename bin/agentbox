@@ -142,6 +142,23 @@ def read_mounts(agentbox_dir: Path) -> list[tuple[str, str, bool]]:
     return [(m["src"], m["dst"], m["writable"]) for m in (yaml.safe_load(p.read_text()) or [])]
 
 
+def resolve_preset(name: str) -> Path:
+    custom = AGENTBOX_HOME / "custom" / "presets" / name
+    if custom.is_dir():
+        return custom
+    return AGENTBOX_HOME / "presets" / name
+
+
+def resolve_preset_file(preset_dir: Path, filename: str) -> Path | None:
+    path = preset_dir / filename
+    if path.is_file():
+        return path
+    default = AGENTBOX_HOME / "presets" / "default" / filename
+    if default.is_file():
+        return default
+    return None
+
+
 def save_mounts(agentbox_dir: Path, mounts: list[tuple[str, str, bool]]) -> None:
     data = [{"src": s, "dst": d, "writable": w} for s, d, w in mounts]
     (agentbox_dir / "mounts.yaml").write_text(
@@ -156,7 +173,7 @@ def write_override(session_dir: Path) -> None:
     output_dir = (session_dir / "output.git")
 
     dotfiles_dir = session_dir / "dotfiles"
-    agent_volumes = ["proxy-ca:/proxy-ca:ro,Z"]
+    agent_volumes = ["proxy-ca:/proxy-ca:ro,z"]
     if dotfiles_dir.is_dir():
         agent_volumes.append(f"{dotfiles_dir}:/agentbox-dotfiles:ro,Z")
     if has_bundle:
@@ -184,6 +201,13 @@ def write_override(session_dir: Path) -> None:
         gcloud = Path.home() / ".config" / "gcloud"
         if gcloud.is_dir():
             proxy_volumes.append(f"{gcloud}:/root/.config/gcloud:ro,Z")
+    for cert_name in proxy_cfg.get("trusted_certificates", []):
+        cert_path = AGENTBOX_HOME / "custom" / "certs" / cert_name
+        if cert_path.is_file():
+            proxy_volumes.append(f"{cert_path}:/custom-certs/{cert_name}:ro,Z")
+        else:
+            print(f"Warning: trusted certificate not found: {cert_path}")
+
     for p in proxy_cfg.get("providers", []):
         if not p.get("enabled"):
             continue
@@ -310,14 +334,18 @@ def cmd_init(args) -> None:
 
     config_file = session_dir / "config" / "proxy.yaml"
     agent_config_file = session_dir / "config" / "agent.yaml"
-    preset_dir = AGENTBOX_HOME / "presets" / args.preset
-    if not (preset_dir / "proxy.yaml").is_file():
-        die(f"preset '{args.preset}' not found at {preset_dir}")
+    preset_dir = resolve_preset(args.preset)
+    if not preset_dir.is_dir():
+        die(f"preset '{args.preset}' not found")
+    proxy_src = resolve_preset_file(preset_dir, "proxy.yaml")
+    if not proxy_src:
+        die(f"preset '{args.preset}' has no proxy.yaml (and no default fallback)")
     if not config_file.is_file():
-        shutil.copy(preset_dir / "proxy.yaml", config_file)
+        shutil.copy(proxy_src, config_file)
         print(f"    Copied preset '{args.preset}' — edit .agentbox/sessions/{name}/config/proxy.yaml to enable providers.")
-    if not agent_config_file.is_file() and (preset_dir / "agent.yaml").is_file():
-        shutil.copy(preset_dir / "agent.yaml", agent_config_file)
+    agent_src = resolve_preset_file(preset_dir, "agent.yaml")
+    if not agent_config_file.is_file() and agent_src:
+        shutil.copy(agent_src, agent_config_file)
 
     # Write dotfiles from agent config into session dotfiles directory
     dotfiles = load_yaml(agent_config_file).get("dotfiles", {}) if agent_config_file.is_file() else {}
@@ -576,28 +604,33 @@ def cmd_preset(args) -> None:
     sub = args.subcmd or "list"
 
     if sub == "list":
-        for p in sorted((AGENTBOX_HOME / "presets").iterdir()):
-            if p.is_dir():
-                print(p.name)
+        names = set()
+        for d in [AGENTBOX_HOME / "custom" / "presets", AGENTBOX_HOME / "presets"]:
+            if d.is_dir():
+                names.update(p.name for p in d.iterdir() if p.is_dir())
+        for n in sorted(names):
+            print(n)
 
     elif sub == "edit":
         filename = f"{args.file}.yaml"
-        target = AGENTBOX_HOME / "presets" / args.name / filename
+        preset_dir = resolve_preset(args.name)
+        target = preset_dir / filename
         if not target.is_file():
             die(f"preset '{args.name}' {filename} not found at {target}")
         subprocess.run([os.environ.get("EDITOR", "vi"), str(target)], check=True)
         print(f"Preset saved ({filename}).")
 
     elif sub == "copy":
-        src_dir = AGENTBOX_HOME / "presets" / args.src
-        if not (src_dir / "proxy.yaml").is_file():
+        src_dir = resolve_preset(args.src)
+        if not src_dir.is_dir():
             die(f"source preset '{args.src}' not found")
-        dst_dir = AGENTBOX_HOME / "presets" / args.dst
+        dst_dir = AGENTBOX_HOME / "custom" / "presets" / args.dst
         dst_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy(src_dir / "proxy.yaml", dst_dir / "proxy.yaml")
-        if (src_dir / "agent.yaml").is_file():
-            shutil.copy(src_dir / "agent.yaml", dst_dir / "agent.yaml")
-        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit <proxy|agent>{args.dst}")
+        for filename in ["proxy.yaml", "agent.yaml"]:
+            src_file = resolve_preset_file(src_dir, filename)
+            if src_file:
+                shutil.copy(src_file, dst_dir / filename)
+        print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit <proxy|agent> {args.dst}")
 
 
 def main() -> None:

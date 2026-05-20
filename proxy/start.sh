@@ -12,11 +12,17 @@ sys.exit(0 if v.get('enabled') and v.get('metadata_server') else 1)
     META_PID=$!
 fi
 
+if [ -d /custom-certs ] && [ "$(ls -A /custom-certs/ 2>/dev/null)" ]; then
+    cp -t /usr/local/share/ca-certificates/ /custom-certs/*
+    update-ca-certificates
+fi
+
 mitmweb --listen-host 0.0.0.0 --listen-port 8080 \
         --web-host 0.0.0.0 --web-port 8081 \
         --scripts /addons/addon.py \
         --set block_global=false \
         --set web_password= \
+        --set ssl_verify_upstream_trusted_ca=/etc/ssl/certs/ca-certificates.crt \
         --no-web-open-browser &
 MITM_PID=$!
 

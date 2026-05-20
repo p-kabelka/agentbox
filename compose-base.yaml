@@ -19,7 +19,7 @@ services:
       - proxy-net
     volumes:
       - ${AGENTBOX_HOME}/secrets:/run/secrets:ro,Z
-      - proxy-ca:/root/.mitmproxy:Z
+      - proxy-ca:/root/.mitmproxy:z
     environment:
       AGENTBOX_NAME:                   ${AGENTBOX_NAME:-}
       ANTHROPIC_API_KEY:              ${ANTHROPIC_API_KEY:-}
@@ -67,6 +67,6 @@ services:
       NO_PROXY:    proxy,localhost,127.0.0.1
       no_proxy:    proxy,localhost,127.0.0.1
     volumes:
-      - proxy-ca:/proxy-ca:ro,Z
+      - proxy-ca:/proxy-ca:ro,z
     stdin_open: true
     tty: true

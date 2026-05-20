@@ -56,6 +56,13 @@ providers:
   #   path_prefixes:
   #     - /openai/deployments/
 
+# Custom trusted CA certificates (filenames from custom/certs/). Installed into
+# the proxy's system trust store at startup so mitmproxy trusts upstream servers
+# that use these CAs. The certs are installed in /usr/local/share/ca-certificates
+# and they must have .crt extension for update-ca-certificates to find them.
+# trusted_certificates:
+#   - my-internal-ca.pem
+
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts: []
 
