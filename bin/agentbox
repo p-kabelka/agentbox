@@ -334,9 +334,8 @@ def cmd_init(args) -> None:
         proxy_cfg.pop("environment", None)
         save_yaml(proxy_file, proxy_cfg)
         print(f"    Copied preset '{args.preset}' — edit .agentbox/sessions/{name}/proxy.yaml to enable providers.")
-    else:
-        proxy_cfg = load_yaml(proxy_file)
 
+    proxy_cfg = load_yaml(proxy_src)
     agent_src = resolve_preset_file(preset_dir, "agent.yaml")
     agent_cfg = load_yaml(agent_src) if agent_src else {}
 
