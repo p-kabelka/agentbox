@@ -81,18 +81,14 @@ def require_session(project_dir: Path, name: str | None) -> Path:
 def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
     name = session_dir.name
     project_dir = session_dir.parent.parent.parent
-    agentbox_dir = project_dir / ".agentbox"
     env = {
         **os.environ,
         "AGENTBOX_HOME": str(AGENTBOX_HOME),
-        "AGENTBOX_DIR":  str(agentbox_dir.resolve()),
     }
     cmd = [
         "podman", "compose",
         "--project-name", f"agentbox-{project_name(project_dir)}-{name}",
-        "-f", str(AGENTBOX_HOME / "compose-base.yaml"),
-        "-f", str((session_dir / "compose.override.yaml").resolve()),
-        "--env-file", str((session_dir / ".env").resolve()),
+        "-f", str((session_dir / "compose.yaml").resolve()),
         *args,
     ]
     return subprocess.run(cmd, env=env, **kwargs)
@@ -113,16 +109,13 @@ def wait_healthy(session_dir: Path) -> None:
     sys.exit(1)
 
 
-def read_env(session_dir: Path) -> dict[str, str]:
-    env_file = session_dir / ".env"
-    if not env_file.is_file():
-        return {}
-    return dict(line.split("=", 1) for line in env_file.read_text().splitlines() if "=" in line)
-
-
 def read_port(session_dir: Path) -> int | None:
-    val = read_env(session_dir).get("AGENTBOX_WEB_PORT")
-    return int(val) if val else None
+    compose_cfg = load_yaml(session_dir / "compose.yaml") if (session_dir / "compose.yaml").is_file() else {}
+    ports = compose_cfg.get("services", {}).get("proxy", {}).get("ports", [])
+    if ports:
+        # "127.0.0.1:<port>:8081"
+        return int(str(ports[0]).split(":")[1])
+    return None
 
 
 def load_yaml(path: Path) -> dict:
@@ -133,13 +126,6 @@ def load_yaml(path: Path) -> dict:
 def save_yaml(path: Path, cfg: dict) -> None:
     with path.open("w") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
-
-
-def read_mounts(agentbox_dir: Path) -> list[tuple[str, str, bool]]:
-    p = agentbox_dir / "mounts.yaml"
-    if not p.is_file():
-        return []
-    return [(m["src"], m["dst"], m["writable"]) for m in (yaml.safe_load(p.read_text()) or [])]
 
 
 def resolve_preset(name: str) -> Path:
@@ -159,48 +145,35 @@ def resolve_preset_file(preset_dir: Path, filename: str) -> Path | None:
     return None
 
 
-def save_mounts(agentbox_dir: Path, mounts: list[tuple[str, str, bool]]) -> None:
-    data = [{"src": s, "dst": d, "writable": w} for s, d, w in mounts]
-    (agentbox_dir / "mounts.yaml").write_text(
-        yaml.dump(data, default_flow_style=False, allow_unicode=True)
-    )
+def generate_compose(
+    session_dir: Path,
+    project_dir: Path,
+    name: str,
+    port: int,
+    harness: str,
+    proxy_cfg: dict,
+    agent_cfg: dict,
+    context_mounts: list[tuple[str, str, bool]],
+) -> None:
+    """Build a unified compose.yaml from compose-base.yaml and preset config."""
+    base = load_yaml(AGENTBOX_HOME / "compose-base.yaml")
 
+    # --- Proxy service ---
+    proxy = base["services"]["proxy"]
+    proxy["ports"] = [f"127.0.0.1:{port}:8081"]
 
-def write_override(session_dir: Path) -> None:
-    project_dir = session_dir.parent.parent.parent
-    web_port = read_port(session_dir) or 8081
-    has_bundle = (session_dir / "source.bundle").is_file()
-    output_dir = (session_dir / "output.git")
+    proxy_volumes: list = proxy.get("volumes", [])
+    proxy_volumes.append("./proxy.yaml:/config/proxy.yaml:ro,Z")
 
-    dotfiles_dir = session_dir / "dotfiles"
-    agent_volumes = ["proxy-ca:/proxy-ca:ro,z"]
-    if dotfiles_dir.is_dir():
-        agent_volumes.append(f"{dotfiles_dir}:/agentbox-dotfiles:ro,Z")
-    if has_bundle:
-        agent_volumes.append(f"{session_dir}/source.bundle:/source/project.bundle:ro,Z")
-    if output_dir.is_dir():
-        agent_volumes.append(f"{output_dir.resolve()}:/output/repo.git:Z")
-        # Read-only bind mount over hooks and git config — kernel-enforced, not just chmod.
-        # Without this the agent can chmod 755 the dir and write executable
-        # hooks or custom scripts in git config.
-        agent_volumes.append(f"{output_dir.resolve()}/hooks:/output/repo.git/hooks:ro")
-        agent_volumes.append(f"{output_dir.resolve()}/config:/output/repo.git/config:ro")
-    if not has_bundle and not output_dir.is_dir():
-        agent_volumes.append(f"{project_dir}:/workspace:Z")
-    for src, dst, writable in read_mounts(session_dir):
-        opts = "Z" if writable else "ro,Z"
-        agent_volumes.append(f"{src}:/context/{dst}:{opts}")
-
-    proxy_cfg = load_yaml(session_dir / "config" / "proxy.yaml")
     vertex_enabled = any(
         p.get("name") == "vertex" and p.get("enabled")
         for p in proxy_cfg.get("providers", [])
     )
-    proxy_volumes = [f"{session_dir}/config/proxy.yaml:/config/proxy.yaml:ro,Z"]
     if vertex_enabled:
         gcloud = Path.home() / ".config" / "gcloud"
         if gcloud.is_dir():
             proxy_volumes.append(f"{gcloud}:/root/.config/gcloud:ro,Z")
+
     for cert_name in proxy_cfg.get("trusted_certificates", []):
         cert_path = AGENTBOX_HOME / "custom" / "certs" / cert_name
         if cert_path.is_file():
@@ -217,32 +190,49 @@ def write_override(session_dir: Path) -> None:
             if host_path.is_file():
                 proxy_volumes.append(f"{host_path}:/run/secrets/{host_path.name}:ro,Z")
             else:
-                print(f"Provider {p.get("name", "?")}: api_key_file not found: {host_path}")
+                print(f"Provider {p.get('name', '?')}: api_key_file not found: {host_path}")
 
-    agent_cfg = load_yaml(session_dir / "config" / "agent.yaml") if (session_dir / "config" / "agent.yaml").is_file() else {}
+    proxy["volumes"] = proxy_volumes
 
-    agent: dict = {"runtime": "krun", "volumes": agent_volumes}
-    if env := agent_cfg.get("environment"):
-        agent["environment"] = env
+    proxy_env: dict = proxy.get("environment", {})
+    proxy_env.update(proxy_cfg.get("environment") or {})
+    proxy_env["AGENTBOX_NAME"] = name
+    proxy["environment"] = proxy_env
 
-    proxy: dict = {
-        "ports": [f"127.0.0.1:{web_port}:8081"],
-        "volumes": proxy_volumes,
-    }
-    if proxy_env := proxy_cfg.get("environment"):
-        proxy["environment"] = proxy_env
+    # --- Agent service ---
+    agent = base["services"]["agent"]
+    agent["runtime"] = "krun"
 
-    override = {
-        "services": {
-            "proxy": proxy,
-            "agent": agent,
-        }
-    }
+    agent_volumes: list = agent.get("volumes", [])
+    if (session_dir / "dotfiles").is_dir():
+        agent_volumes.append("./dotfiles:/agentbox-dotfiles:ro,Z")
+    has_bundle = (session_dir / "source.bundle").is_file()
+    output_dir = session_dir / "output.git"
+    if has_bundle:
+        agent_volumes.append("./source.bundle:/source/project.bundle:ro,Z")
+    if output_dir.is_dir():
+        agent_volumes.append("./output.git:/output/repo.git:Z")
+        # Read-only bind mount over hooks and git config — kernel-enforced, not just chmod.
+        # Without this the agent can chmod 755 the dir and write executable
+        # hooks or custom scripts in git config.
+        agent_volumes.append("./output.git/hooks:/output/repo.git/hooks:ro")
+        agent_volumes.append("./output.git/config:/output/repo.git/config:ro")
+    if not has_bundle and not output_dir.is_dir():
+        agent_volumes.append(f"{project_dir}:/workspace:Z")
+    for src, dst, writable in context_mounts:
+        opts = "Z" if writable else "ro,Z"
+        agent_volumes.append(f"{src}:/context/{dst}:{opts}")
+    agent["volumes"] = agent_volumes
 
-    (session_dir / "compose.override.yaml").write_text(
-        "# Generated by agentbox — re-run 'agentbox init' to regenerate.\n"
-        + yaml.dump(override, default_flow_style=False, allow_unicode=True, sort_keys=False)
-    )
+    agent_preset_env = agent_cfg.get("environment") or {}
+    agent_env: dict = agent.get("environment", {})
+    agent_env.update(agent_preset_env)
+    agent_env["AGENTBOX_NAME"] = name
+    if "AGENT_HARNESS" not in agent_preset_env:
+        agent_env["AGENT_HARNESS"] = harness
+    agent["environment"] = agent_env
+
+    save_yaml(session_dir / "compose.yaml", base)
 
 
 # ── Commands ──────────────────────────────────────────────────────────────────
@@ -330,25 +320,28 @@ def cmd_init(args) -> None:
     print(f"==> Initializing agentbox '{name}': {project_dir}")
     agentbox_dir.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
-    (session_dir / "config").mkdir(exist_ok=True)
 
-    config_file = session_dir / "config" / "proxy.yaml"
-    agent_config_file = session_dir / "config" / "agent.yaml"
+    proxy_file = session_dir / "proxy.yaml"
     preset_dir = resolve_preset(args.preset)
     if not preset_dir.is_dir():
         die(f"preset '{args.preset}' not found")
     proxy_src = resolve_preset_file(preset_dir, "proxy.yaml")
     if not proxy_src:
         die(f"preset '{args.preset}' has no proxy.yaml (and no default fallback)")
-    if not config_file.is_file():
-        shutil.copy(proxy_src, config_file)
-        print(f"    Copied preset '{args.preset}' — edit .agentbox/sessions/{name}/config/proxy.yaml to enable providers.")
+    if not proxy_file.is_file():
+        # Copy proxy config without the environment field (environment goes into compose.yaml)
+        proxy_cfg = load_yaml(proxy_src)
+        proxy_cfg.pop("environment", None)
+        save_yaml(proxy_file, proxy_cfg)
+        print(f"    Copied preset '{args.preset}' — edit .agentbox/sessions/{name}/proxy.yaml to enable providers.")
+    else:
+        proxy_cfg = load_yaml(proxy_file)
+
     agent_src = resolve_preset_file(preset_dir, "agent.yaml")
-    if not agent_config_file.is_file() and agent_src:
-        shutil.copy(agent_src, agent_config_file)
+    agent_cfg = load_yaml(agent_src) if agent_src else {}
 
     # Write dotfiles from agent config into session dotfiles directory
-    dotfiles = load_yaml(agent_config_file).get("dotfiles", {}) if agent_config_file.is_file() else {}
+    dotfiles = agent_cfg.get("dotfiles", {})
     if dotfiles:
         dotfiles_dir = session_dir / "dotfiles"
         for rel_path, content in dotfiles.items():
@@ -406,35 +399,41 @@ def cmd_init(args) -> None:
             print("    No git repo found; falling back to --no-git mode.")
             use_git = False
 
+    # Preserve existing context mounts from compose.yaml, then add any new ones from args
+    context_mounts: list[tuple[str, str, bool]] = _read_context_mounts(session_dir)
+    seen_dsts: set[str] = {d for _, d, _ in context_mounts}
+    for spec in args.ro_mounts:
+        src_str, _, dst = spec.partition(":")
+        src = str(Path(src_str).resolve())
+        dst = dst or Path(src_str).name
+        if not Path(src).exists():
+            die(f"mount source does not exist: {src}")
+        if dst not in seen_dsts:
+            context_mounts.append((src, dst, False))
+            seen_dsts.add(dst)
+    for spec in args.rw_mounts:
+        src_str, _, dst = spec.partition(":")
+        src = str(Path(src_str).resolve())
+        dst = dst or Path(src_str).name
+        if not Path(src).exists():
+            die(f"mount source does not exist: {src}")
+        if dst not in seen_dsts:
+            context_mounts.append((src, dst, True))
+            seen_dsts.add(dst)
+
+    # Read existing port from compose.yaml if re-initializing, otherwise pick a free port
     web_port = read_port(session_dir) or free_port()
-    (session_dir / ".env").write_text(
-        f"AGENTBOX_WEB_PORT={web_port}\nAGENT_HARNESS={args.harness}\nAGENTBOX_NAME={name}\n"
+
+    generate_compose(
+        session_dir=session_dir,
+        project_dir=project_dir,
+        name=name,
+        port=web_port,
+        harness=args.harness,
+        proxy_cfg=proxy_cfg,
+        agent_cfg=agent_cfg,
+        context_mounts=context_mounts,
     )
-
-    if args.ro_mounts or args.rw_mounts:
-        existing = read_mounts(session_dir)
-        existing_dsts = {d for _, d, _ in existing}
-        for spec in args.ro_mounts:
-            src_str, _, dst = spec.partition(":")
-            src = str(Path(src_str).resolve())
-            dst = dst or Path(src_str).name
-            if not Path(src).exists():
-                die(f"mount source does not exist: {src}")
-            if dst not in existing_dsts:
-                existing.append((src, dst, False))
-                existing_dsts.add(dst)
-        for spec in args.rw_mounts:
-            src_str, _, dst = spec.partition(":")
-            src = str(Path(src_str).resolve())
-            dst = dst or Path(src_str).name
-            if not Path(src).exists():
-                die(f"mount source does not exist: {src}")
-            if dst not in existing_dsts:
-                existing.append((src, dst, True))
-                existing_dsts.add(dst)
-        save_mounts(session_dir, existing)
-
-    write_override(session_dir)
 
     if git_available:
         gitignore = project_dir / ".gitignore"
@@ -452,7 +451,6 @@ def cmd_init(args) -> None:
 def cmd_start(args) -> None:
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
-    write_override(session_dir)
     cmd = [a for a in (args.exec_cmd or [])] or None
     _launch(session_dir, cmd)
 
@@ -475,14 +473,14 @@ def cmd_web(args) -> None:
     session_dir = require_session(project_dir, args.name)
     web_port = read_port(session_dir)
     if not web_port:
-        die("AGENTBOX_WEB_PORT not found in session .env")
+        die("proxy port not found in session compose.yaml")
     print(f"http://localhost:{web_port}")
 
 
 def _update_allowlist(host: str, add: bool, name: str | None) -> None:
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, name)
-    config_path = session_dir / "config" / "proxy.yaml"
+    config_path = session_dir / "proxy.yaml"
     cfg = load_yaml(config_path)
     hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
     session_name = session_dir.name
@@ -529,13 +527,27 @@ def cmd_remove(args) -> None:
     print(f"Removed session '{name}'.")
 
 
+def _read_context_mounts(session_dir: Path) -> list[tuple[str, str, bool]]:
+    compose_cfg = load_yaml(session_dir / "compose.yaml") if (session_dir / "compose.yaml").is_file() else {}
+    volumes = compose_cfg.get("services", {}).get("agent", {}).get("volumes", [])
+    mounts = []
+    for vol in volumes:
+        if isinstance(vol, str) and ":/context/" in vol:
+            parts = vol.split(":")
+            src, dst_path = parts[0], parts[1]
+            dst = dst_path[len("/context/"):]
+            writable = len(parts) < 3 or not parts[2].startswith("ro")
+            mounts.append((src, dst, writable))
+    return mounts
+
+
 def cmd_mount(args) -> None:
     sub = args.subcmd or "list"
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
 
     if sub == "list":
-        mounts = read_mounts(session_dir)
+        mounts = _read_context_mounts(session_dir)
         if not mounts:
             print("No extra reference mounts. Add one: agentbox mount add /path/to/project[:name]")
         else:
@@ -550,22 +562,24 @@ def cmd_mount(args) -> None:
         dst = dst or Path(src_str).name
         if not Path(src).exists():
             die(f"source path does not exist: {src}")
-        mounts = read_mounts(session_dir)
+        mounts = _read_context_mounts(session_dir)
         if any(d == dst for _, d, _ in mounts):
             die(f"/context/{dst} already mounted. Remove first: agentbox mount remove {dst}")
-        mounts.append((src, dst, args.writable))
-        save_mounts(session_dir, mounts)
-        write_override(session_dir)
+        compose_cfg = load_yaml(session_dir / "compose.yaml")
+        opts = "Z" if args.writable else "ro,Z"
+        compose_cfg["services"]["agent"]["volumes"].append(f"{src}:/context/{dst}:{opts}")
+        save_yaml(session_dir / "compose.yaml", compose_cfg)
         mode = "[rw]" if args.writable else "[ro]"
         print(f"Added {src} → /context/{dst} {mode}. Start the session to apply.")
 
     elif sub == "remove":
-        mounts = read_mounts(session_dir)
-        filtered = [(s, d, w) for s, d, w in mounts if d != args.dst]
-        if len(filtered) == len(mounts):
+        compose_cfg = load_yaml(session_dir / "compose.yaml")
+        volumes = compose_cfg["services"]["agent"]["volumes"]
+        new_volumes = [v for v in volumes if not (isinstance(v, str) and v.split(":")[1] == f"/context/{args.dst}")]
+        if len(new_volumes) == len(volumes):
             die(f"no mount '{args.dst}' found. List: agentbox mount list")
-        save_mounts(session_dir, filtered)
-        write_override(session_dir)
+        compose_cfg["services"]["agent"]["volumes"] = new_volumes
+        save_yaml(session_dir / "compose.yaml", compose_cfg)
         print(f"Removed /context/{args.dst}. Start the session to apply.")
 
 
@@ -581,8 +595,7 @@ def cmd_list(args) -> None:
     ).stdout.lower()
     pname_prefix = f"agentbox-{project_name(project_dir)}"
     for s in sessions:
-        env = read_env(project_dir / ".agentbox" / "sessions" / s)
-        port = env.get("AGENTBOX_WEB_PORT", "")
+        port = read_port(project_dir / ".agentbox" / "sessions" / s)
         active = f"{pname_prefix}-{s}_" in running
         status = "running" if active else "stopped"
         port_info = f"  http://localhost:{port}" if port and active else ""

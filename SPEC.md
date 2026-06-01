@@ -44,7 +44,7 @@ A developer creates a agentbox for a feature branch, provides the agent with a t
 
 ### Use Case 2: Multi-Repo Context
 
-The agent needs read access to a shared internal library while implementing changes to the main project. The developer adds the library path with `agentbox mount add ~/libs/shared-lib`. The library is mounted read-only into the agent container as an additional reference directory. The agent can read its source but cannot modify it or push to it. The mount configuration is stored in `mounts.yaml` and persists across agentbox restarts.
+The agent needs read access to a shared internal library while implementing changes to the main project. The developer adds the library path with `agentbox mount add ~/libs/shared-lib`. The library is mounted read-only into the agent container as an additional reference directory. The agent can read its source but cannot modify it or push to it. The mount is recorded in the session's `compose.yaml` and persists across agentbox restarts.
 
 ### Use Case 3: Restricted Provider Switching
 
@@ -103,7 +103,7 @@ Runs the configured agent harness (e.g., `claude`, `opencode`, `codex`). Contain
 
 **Direct API providers (Anthropic, OpenAI, etc.)**
 
-The agent container receives a dummy placeholder value for the relevant API key environment variable (e.g., `ANTHROPIC_API_KEY=dummy`). When the agent makes an HTTPS call to the provider's API, the connection is intercepted by mitmproxy. The `addon.py` module reads the allowlist from `config/proxy.yaml`, verifies the destination host is permitted, strips the dummy key from the request headers, and injects the real key from the proxy container's environment. The real key never enters the agent container's memory or filesystem.
+The agent container receives a dummy placeholder value for the relevant API key environment variable (e.g., `ANTHROPIC_API_KEY=dummy`). When the agent makes an HTTPS call to the provider's API, the connection is intercepted by mitmproxy. The `addon.py` module reads the allowlist from `proxy.yaml` (mounted into the container at `/config/proxy.yaml`), verifies the destination host is permitted, strips the dummy key from the request headers, and injects the real key from the proxy container's environment. The real key never enters the agent container's memory or filesystem.
 
 **GCP Vertex AI**
 
@@ -162,7 +162,7 @@ Full TLS MITM proxy. Loads one Python addon at startup.
 
 A single mitmproxy addon module implementing allowlist enforcement, credential injection, and structured access logging via the `AgentboxAddon` class.
 
-Reads `config/proxy.yaml` at startup and builds:
+Reads `proxy.yaml` (mounted at `/config/proxy.yaml`) at startup and builds:
 - An allowlist of hostname patterns (from `allowed_hosts` across all enabled providers plus `extra_allowed_hosts`).
 - Injection rules: for each non-Vertex provider, a `(host_patterns, header, value)` tuple constructed from the provider's `inject_header`, `inject_prefix`, and the real API key read from the proxy container's environment.
 - Vertex state: the Google credentials object loaded via `google.auth.default()`, a threading lock for safe token refresh, and the project/region configuration.
@@ -174,7 +174,7 @@ Reads `config/proxy.yaml` at startup and builds:
 
 **`response()` hook** — logs all non-blocked responses to stdout as structured JSON. Each entry includes timestamp, method, URL, status code, and round-trip duration. Request headers, response headers, and bodies can be included via `logging` settings in `proxy.yaml` (all off by default except request headers).
 
-Additional hosts are added and removed via `agentbox allow` and `agentbox deny`, which update `config/proxy.yaml` and restart the proxy container so the addon reloads the configuration.
+Additional hosts are added and removed via `agentbox allow` and `agentbox deny`, which update the session's `proxy.yaml` and restart the proxy container so the addon reloads the configuration.
 
 **`metadata_server.py`**
 
@@ -213,11 +213,11 @@ A Python script in `bin/agentbox`, added to `PATH` as part of initial setup. Com
 | Reference mounts | `mount list`, `mount add <path>`, `mount remove <path>` |
 | Observation | `status`, `list` / `ls` |
 
-`agentbox init` is the primary entry point. It creates a timestamped (or named) session directory under `.agentbox/sessions/`, copies the chosen preset's `proxy.yaml` and `agent.yaml`, extracts any inline dotfiles from `agent.yaml`, creates a git bundle of the current branch, initialises the bare output repository (with its `hooks/` directory `chmod 555`), registers the `agentbox-<name>` git remote, assigns a web UI port, writes `.env`, generates `compose.override.yaml`, and optionally launches the session immediately if `--start` is passed.
+`agentbox init` is the primary entry point. It creates a timestamped (or named) session directory under `.agentbox/sessions/`, copies the chosen preset's `proxy.yaml` (without its `environment` field) to the session directory, extracts any inline dotfiles from the preset's `agent.yaml`, creates a git bundle of the current branch, initialises the bare output repository (with its `hooks/` directory `chmod 555`), registers the `agentbox-<name>` git remote, and generates a unified `compose.yaml` (merging `compose-base.yaml` with preset config, volumes, ports, and environment). The session is optionally launched immediately if `--start` is passed.
 
-`agentbox start` re-generates `compose.override.yaml`, starts the proxy in the background (waiting for its health check), then runs a new agent container interactively via `compose run --rm agent`. Any arguments after `--` are forwarded to `start.sh` and override what gets exec'd (e.g. `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently. Because each agent runs in a krun microVM, `podman exec` cannot reach a running container.
+`agentbox start` starts the proxy in the background (waiting for its health check), then runs a new agent container interactively via `compose run --rm agent`. The `compose.yaml` is persistent — edits made directly to it are preserved across restarts. Any arguments after `--` are forwarded to `start.sh` and override what gets exec'd (e.g. `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently. Because each agent runs in a krun microVM, `podman exec` cannot reach a running container.
 
-`agentbox allow` and `agentbox deny` append or remove entries from `extra_allowed_hosts` in the session's `config/proxy.yaml`, then restart the proxy container so the addon reloads the configuration. They wait for the proxy health check to pass before returning.
+`agentbox allow` and `agentbox deny` append or remove entries from `extra_allowed_hosts` in the session's `proxy.yaml`, then restart the proxy container so the addon reloads the configuration. They wait for the proxy health check to pass before returning.
 
 All commands that operate on a specific session accept `--name <name>`. If the project has exactly one session, `--name` is optional and the session is auto-detected.
 
@@ -229,12 +229,9 @@ Each session is fully self-contained under `.agentbox/sessions/<name>/`.
 |------|----------|---------|-------------------------------|
 | `proxy.yaml` (preset) | `$AGENTBOX_HOME/presets/<name>/` | Global default provider config | N/A — global |
 | `agent.yaml` (preset) | `$AGENTBOX_HOME/presets/<name>/` | Global default agent env and dotfiles | N/A — global |
-| `config/proxy.yaml` | `.agentbox/sessions/<name>/config/` | Per-session provider config, allowlist | No — user-owned after init |
-| `config/agent.yaml` | `.agentbox/sessions/<name>/config/` | Per-session agent env overrides, dotfiles | No — user-owned after init |
-| `dotfiles/` | `.agentbox/sessions/<name>/dotfiles/` | Extracted dotfiles from `agent.yaml` | Only on first init |
-| `mounts.yaml` | `.agentbox/` | Persistent extra reference mounts (shared across sessions) | No — user-owned |
-| `compose.override.yaml` | `.agentbox/sessions/<name>/` | Generated Compose overrides (port, volumes, runtime) | Yes — regenerated on each `agentbox start` |
-| `.env` | `.agentbox/sessions/<name>/` | `AGENTBOX_WEB_PORT`, `AGENT_HARNESS`, `AGENTBOX_NAME` | Created on init; port preserved on subsequent starts |
+| `compose.yaml` | `.agentbox/sessions/<name>/` | Unified Compose file (volumes, ports, env, runtime) — user-editable | Yes — regenerated on `agentbox init` |
+| `proxy.yaml` | `.agentbox/sessions/<name>/` | Per-session provider config, allowlist (no `environment` field) | No — user-owned after init |
+| `dotfiles/` | `.agentbox/sessions/<name>/dotfiles/` | Extracted dotfiles from preset `agent.yaml` | Only on first init |
 | `source.bundle` | `.agentbox/sessions/<name>/` | Read-only git snapshot of the source branch | Created once on `agentbox init` |
 | `output.git/` | `.agentbox/sessions/<name>/` | Bare repo output barrier | Created once; agent pushes here |
 
@@ -331,7 +328,7 @@ agentbox remove                          # stop, delete session dir, output repo
 
 **New LLM provider**
 
-Add a stanza to `config/proxy.yaml` specifying `name`, `enabled`, `api_key_env`, `inject_header`, `inject_prefix`, and `allowed_hosts`. The injector addon reads this configuration at startup and on reload. No code changes are required.
+Add a stanza to the session's `proxy.yaml` specifying `name`, `enabled`, `api_key_env`, `inject_header`, `inject_prefix`, and `allowed_hosts`. The injector addon reads this configuration at startup and on reload. No code changes are required.
 
 **New agent harness**
 
@@ -342,11 +339,11 @@ FROM localhost/agentbox-agent:latest
 RUN npm install -g opencode   # or pip install codex, etc.
 ```
 
-Then rebuild with `agentbox build`. Set `AGENT_HARNESS=<binary>` via `--harness <binary>` on `agentbox init`, or by setting it in `config/agent.yaml` under `environment`. `start.sh` execs the specified binary as the final step, passing `AGENT_HARNESS_ARGS` and any additional arguments.
+Then rebuild with `agentbox build`. Set `AGENT_HARNESS=<binary>` via `--harness <binary>` on `agentbox init`, or by editing `AGENT_HARNESS` in the session's `compose.yaml` under `services.agent.environment`. `start.sh` execs the specified binary as the final step, passing `AGENT_HARNESS_ARGS` and any additional arguments.
 
 **VM-level isolation**
 
-Install `crun-vm` / `krun` on the host. `agentbox start` always generates `compose.override.yaml` with `runtime: krun` for the agent container; if `krun` is present, each agent runs in its own KVM microVM. The two-network topology and credential flow are unchanged; the isolation boundary moves from Linux namespaces to a hypervisor boundary.
+Install `crun-vm` / `krun` on the host. `agentbox init` always sets `runtime: krun` for the agent service in `compose.yaml`; if `krun` is present, each agent runs in its own KVM microVM. The two-network topology and credential flow are unchanged; the isolation boundary moves from Linux namespaces to a hypervisor boundary.
 
 **Custom preset**
 

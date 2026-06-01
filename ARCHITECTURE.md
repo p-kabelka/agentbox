@@ -218,13 +218,13 @@ A git bundle is a single portable file containing the complete history of a bran
 
 The output bare repository provides the reverse channel. It accepts pushes from the agent but cannot be used to inject code that runs on the host: the `hooks/` directory is bind-mounted read-only into the agent container (kernel-enforced, not just `chmod`), and the developer retrieves commits with hook execution explicitly disabled.
 
-### 6.5 Two compose files over a generated monolith
+### 6.5 Unified compose.yaml per session
 
-The base compose file defines services, networks, volumes, and all configuration that is identical across every project. Per-project concerns (mitmweb port, git mounts, reference mounts) live in a generated override file in the project's `.agentbox/` directory.
+At `agentbox init` time, `compose-base.yaml` (the shared template defining images, networks, and base environment) is merged with the preset configuration (provider volumes, environment variables, runtime) to produce a single `compose.yaml` in the session directory.
 
-`podman compose -f base.yaml -f override.yaml` merges these at runtime. This means images are defined once and reused across all projects. A change to the proxy's Python addons requires rebuilding one image, not regenerating every project's configuration.
+`podman compose -f compose.yaml` uses this self-contained file at runtime. Images are defined once in `compose-base.yaml` and reused across all projects — a change to the proxy's Python addons requires rebuilding one image, not regenerating every session's configuration.
 
-The override file is regenerated from persistent state files (`mounts.yaml`, `.env`, presence of `source.bundle`/`output.git`) rather than being hand-maintained, so it can be safely overwritten without losing user configuration.
+The `compose.yaml` is generated once at init and then user-owned: edits persist across `agentbox start` calls. Running `agentbox init` again regenerates it, preserving the session's web port and any context mounts already registered via `agentbox mount add`.
 
 ---
 

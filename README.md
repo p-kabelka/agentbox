@@ -102,7 +102,7 @@ agentbox deny  pypi.org [--name NAME]   # remove host from allowlist
 Mount additional projects read-only at `/context/<name>` inside the agent:
 
 ```bash
-agentbox mount add ~/libs/shared-lib [--name NAME]   # persists in mounts.yaml
+agentbox mount add ~/libs/shared-lib [--name NAME]   # recorded in compose.yaml
 agentbox mount remove shared-lib     [--name NAME]
 agentbox mount list                  [--name NAME]
 agentbox start                                        # restart to apply
@@ -125,7 +125,7 @@ git merge agentbox-<name>/my-feature
 
 ### Providers
 
-Each session has its own `config/proxy.yaml` at `.agentbox/sessions/<name>/config/proxy.yaml`, copied from the preset on `agentbox init`. Edit it to enable providers:
+Each session has its own `proxy.yaml` at `.agentbox/sessions/<name>/proxy.yaml`, copied from the preset on `agentbox init`. Edit it to enable providers:
 
 ```yaml
 providers:
