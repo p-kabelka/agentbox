@@ -21,14 +21,14 @@ services:
       - ${AGENTBOX_HOME}/secrets:/run/secrets:ro,Z
       - proxy-ca:/root/.mitmproxy:z
     environment:
-      AGENTBOX_NAME:                   ${AGENTBOX_NAME:-}
-      ANTHROPIC_API_KEY:              ${ANTHROPIC_API_KEY:-}
-      OPENAI_API_KEY:                 ${OPENAI_API_KEY:-}
-      AZURE_OPENAI_API_KEY:           ${AZURE_OPENAI_API_KEY:-}
+      AGENTBOX_NAME: ${AGENTBOX_NAME:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
       GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/credentials.json
-      GOOGLE_CLOUD_PROJECT:           ${VERTEX_PROJECT_ID:-}
-      VERTEX_PROJECT_ID:              ${VERTEX_PROJECT_ID:-}
-      VERTEX_REGION:                  ${VERTEX_REGION:-}
+      GOOGLE_CLOUD_PROJECT: ${VERTEX_PROJECT_ID:-}
+      VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
+      VERTEX_REGION: ${VERTEX_REGION:-}
     # ports: defined per-project in compose.override.yaml
     restart: unless-stopped
     healthcheck:
@@ -46,26 +46,26 @@ services:
       proxy:
         condition: service_healthy
     environment:
-      AGENT_HARNESS:      ${AGENT_HARNESS:-}
+      AGENT_HARNESS: ${AGENT_HARNESS:-}
       AGENT_HARNESS_ARGS: ${AGENT_HARNESS_ARGS:-}
-      AGENTBOX_NAME:       ${AGENTBOX_NAME:-}
+      AGENTBOX_NAME: ${AGENTBOX_NAME:-}
 
       # Dummy credentials — proxy injects real values via mitmproxy
-      # ANTHROPIC_API_KEY:    dummy
-      # OPENAI_API_KEY:       dummy
+      # ANTHROPIC_API_KEY: dummy
+      # OPENAI_API_KEY: dummy
       # AZURE_OPENAI_API_KEY: dummy
 
       # Vertex: OAuth tokens served by fake GCE metadata server on proxy
-      GCE_METADATA_HOST:           proxy:9090
+      GCE_METADATA_HOST: proxy:9090
       ANTHROPIC_VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
-      CLOUD_ML_REGION:             ${VERTEX_REGION:-}
+      CLOUD_ML_REGION: ${VERTEX_REGION:-}
 
       HTTPS_PROXY: http://proxy:8080
       https_proxy: http://proxy:8080
-      HTTP_PROXY:  http://proxy:8080
-      http_proxy:  http://proxy:8080
-      NO_PROXY:    proxy,localhost,127.0.0.1
-      no_proxy:    proxy,localhost,127.0.0.1
+      HTTP_PROXY: http://proxy:8080
+      http_proxy: http://proxy:8080
+      NO_PROXY: proxy,localhost,127.0.0.1
+      no_proxy: proxy,localhost,127.0.0.1
     volumes:
       - proxy-ca:/proxy-ca:ro,z
     stdin_open: true
