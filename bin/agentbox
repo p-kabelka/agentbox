@@ -124,10 +124,8 @@ def load_yaml(path: Path) -> dict:
 
 
 def save_yaml(path: Path, cfg: dict) -> None:
-    tmp = path.with_suffix(".yaml.tmp")
-    with tmp.open("w") as f:
+    with path.open("w") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
-    tmp.rename(path)
 
 
 def resolve_preset(name: str) -> Path:
