@@ -1,13 +1,15 @@
 #!/bin/bash
 set -euo pipefail
 
-# Install mitmproxy CA cert into system trust store
+# Trust only the mitmproxy CA — the agent has no direct internet access,
+# all TLS is terminated at the proxy which re-signs with this CA.
 CA=/proxy-ca/mitmproxy-ca-cert.pem
-until [ -f "$CA" ]; do sleep 1; done
-cp "$CA" /etc/pki/ca-trust/source/anchors/proxy-ca.crt
-update-ca-trust extract >/dev/null 2>&1
-export NODE_EXTRA_CA_CERTS="$CA"
+until [ -f "$CA" ]; do sleep 0.2; done
+export SSL_CERT_FILE="$CA"
+export CURL_CA_BUNDLE="$CA"
+export GIT_SSL_CAINFO="$CA"
 export REQUESTS_CA_BUNDLE="$CA"
+export NODE_EXTRA_CA_CERTS="$CA"
 
 # Clone source bundle and wire up read-only source + writable output remotes
 if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
