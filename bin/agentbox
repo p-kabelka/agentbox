@@ -283,7 +283,6 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     name = session_dir.name
     project_dir = session_dir.parent.parent.parent
     compose(session_dir, "up", "-d", "proxy", check=True)
-    wait_healthy(session_dir)
     web_port = read_port(session_dir)
     if web_port:
         print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
