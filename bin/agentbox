@@ -433,13 +433,6 @@ def cmd_init(args) -> None:
         context_mounts=context_mounts,
     )
 
-    if git_available:
-        gitignore = project_dir / ".gitignore"
-        existing = gitignore.read_text() if gitignore.is_file() else ""
-        if ".agentbox/" not in existing.splitlines():
-            with gitignore.open("a") as f:
-                f.write(".agentbox/\n")
-
     if args.start:
         _launch(session_dir)
     else:
