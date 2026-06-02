@@ -16,8 +16,10 @@ if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     echo "[agent] Cloning workspace..."
     git clone -q /source/project.bundle /workspace
     git -C /workspace remote rename origin source
-    git -C /workspace remote add output /output/repo.git
-    echo "[agent] When done: git push output HEAD"
+    if [ -d /output/repo.git ]; then
+        git -C /workspace remote add output /output/repo.git
+        echo "[agent] When done: git push output HEAD"
+    fi
 fi
 
 # Apply preset dotfiles to home directory

@@ -208,6 +208,7 @@ def generate_compose(
         agent_volumes.append("./dotfiles:/agentbox-dotfiles:ro,Z")
     has_bundle = (session_dir / "source.bundle").is_file()
     output_dir = session_dir / "output.git"
+    output_bundle = session_dir / "output.bundle"
     if has_bundle:
         agent_volumes.append("./source.bundle:/source/project.bundle:ro,Z")
     if output_dir.is_dir():
@@ -217,7 +218,9 @@ def generate_compose(
         # hooks or custom scripts in git config.
         agent_volumes.append("./output.git/hooks:/output/repo.git/hooks:ro")
         agent_volumes.append("./output.git/config:/output/repo.git/config:ro")
-    if not has_bundle and not output_dir.is_dir():
+    elif output_bundle.is_file():
+        agent_volumes.append("./output.bundle:/output/bundle.git:Z")
+    if not has_bundle and not output_dir.is_dir() and not output_bundle.is_file():
         agent_volumes.append(f"{project_dir}:/workspace:Z")
     for src, dst, writable in context_mounts:
         opts = "Z" if writable else "ro,Z"
@@ -284,11 +287,15 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     project_dir = session_dir.parent.parent.parent
     compose(session_dir, "up", "-d", "proxy", check=True)
     web_port = read_port(session_dir)
+    output_git = session_dir / "output.git"
+    output_bundle = session_dir / "output.bundle"
     if web_port:
-        print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
+        if output_git.is_dir():
+            print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
+        else:
+            print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs")
     result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
     # Auto-fetch when the session ends
-    output_git = session_dir / "output.git"
     if output_git.is_dir():
         print(f"\n==> Fetching agent output (agentbox-{name})...")
         r = subprocess.run(
@@ -305,6 +312,12 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
                 print(f"  {b}")
             if branches:
                 print(f"  To apply: git merge {branches[0]}")
+    elif output_bundle.is_file() and output_bundle.stat().st_size > 0:
+        print(f"\n==> Output bundle: {output_bundle}")
+        print(f"    Inspect: git bundle list-heads {output_bundle}")
+        print(f"    Apply:   git fetch {output_bundle} HEAD")
+    elif output_bundle.is_file():
+        print(f"\n==> Output bundle is empty — agent did not write a bundle.")
     sys.exit(result.returncode)
 
 
@@ -378,21 +391,27 @@ def cmd_init(args) -> None:
                 check=True,
             )
 
-            output_git = session_dir / "output.git"
-            subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
-            (output_git / "hooks").mkdir(exist_ok=True)
-            (output_git / "config").touch(exist_ok=True)
-
-            remote = f"agentbox-{name}"
-            has_remote = subprocess.run(
-                ["git", "-C", str(project_dir), "remote", "get-url", remote],
-                capture_output=True,
-            ).returncode == 0
-            if has_remote:
-                subprocess.run(["git", "-C", str(project_dir), "remote", "set-url", remote, str(output_git.resolve())], check=True)
+            if args.output_bundle:
+                output_bundle = session_dir / "output.bundle"
+                output_bundle.touch()
+                print(f"    Output bundle: .agentbox/sessions/{name}/output.bundle")
+                print(f"    When done: git bundle create - source/main..HEAD > /output/bundle.git")
             else:
-                subprocess.run(["git", "-C", str(project_dir), "remote", "add", remote, str(output_git.resolve())], check=True)
-            print(f"    Git remote '{remote}' registered — 'git fetch {remote}' to review output mid-session.")
+                output_git = session_dir / "output.git"
+                subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
+                (output_git / "hooks").mkdir(exist_ok=True)
+                (output_git / "config").touch(exist_ok=True)
+
+                remote = f"agentbox-{name}"
+                has_remote = subprocess.run(
+                    ["git", "-C", str(project_dir), "remote", "get-url", remote],
+                    capture_output=True,
+                ).returncode == 0
+                if has_remote:
+                    subprocess.run(["git", "-C", str(project_dir), "remote", "set-url", remote, str(output_git.resolve())], check=True)
+                else:
+                    subprocess.run(["git", "-C", str(project_dir), "remote", "add", remote, str(output_git.resolve())], check=True)
+                print(f"    Git remote '{remote}' registered — 'git fetch {remote}' to review output mid-session.")
         else:
             print("    No git repo found; falling back to --no-git mode.")
             use_git = False
@@ -713,7 +732,9 @@ def main() -> None:
     init_subcommand.add_argument("--preset", default=AGENTBOX_PRESET)
     init_subcommand.add_argument("--branch", default="")
     init_subcommand.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
-    init_subcommand.add_argument("--no-git", action="store_true")
+    init_git_mode = init_subcommand.add_mutually_exclusive_group()
+    init_git_mode.add_argument("--no-git", action="store_true")
+    init_git_mode.add_argument("--output-bundle", action="store_true", help="Use a bundle file for output instead of a bare git repo")
     init_subcommand.add_argument("--ro-mount", action="append", default=[], dest="ro_mounts", metavar="SRC[:DST]", help="Mount read-only reference directory")
     init_subcommand.add_argument("--rw-mount", action="append", default=[], dest="rw_mounts", metavar="SRC[:DST]", help="Mount writable reference directory")
     init_subcommand.add_argument("--start", action="store_true", help="Also start the session after initializing")
