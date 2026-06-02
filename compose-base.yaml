@@ -31,20 +31,13 @@ services:
     #   VERTEX_REGION: ${VERTEX_REGION:-}
     # ports: defined per-project in compose.override.yaml
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-so", "/dev/null", "http://localhost:8081/"]
-      interval: 5s
-      timeout: 3s
-      retries: 12
-      start_period: 25s
 
   agent:
     image: localhost/agentbox-agent:latest
     networks:
       - agent-net          # internal only — no direct internet access
     depends_on:
-      proxy:
-        condition: service_healthy
+      - proxy
     environment:
       AGENT_HARNESS: ${AGENT_HARNESS:-}
       AGENT_HARNESS_ARGS: ${AGENT_HARNESS_ARGS:-}
