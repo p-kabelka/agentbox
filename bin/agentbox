@@ -509,6 +509,20 @@ def cmd_deny(args) -> None:
     _update_allowlist(args.host, add=False, name=args.name)
 
 
+def cmd_proxy_reload(args) -> None:
+    project_dir = require_agentbox()
+    session_dir = require_session(project_dir, args.name)
+    compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "http://localhost:8082/reload", check=True)
+    print("Proxy config reloaded.")
+
+
+def cmd_proxy_restart(args) -> None:
+    project_dir = require_agentbox()
+    session_dir = require_session(project_dir, args.name)
+    compose(session_dir, "restart", "proxy", check=True)
+    wait_healthy(session_dir)
+
+
 def cmd_remove(args) -> None:
     project_dir = require_agentbox()
     session_dir = require_session(project_dir, args.name)
@@ -680,6 +694,8 @@ def main() -> None:
     allow_subcommand.add_argument("host")
     deny_subcommand = subparser_with_name(subcommand.add_parser("deny", help="Remove a host from the egress allowlist"))
     deny_subcommand.add_argument("host")
+    subparser_with_name(subcommand.add_parser("proxy-reload", help="Reload the proxy config without restarting"))
+    subparser_with_name(subcommand.add_parser("proxy-restart", help="Restart the proxy container"))
 
     mount_subcommand = subparser_with_name(subcommand.add_parser("mount", help="Manage read-only reference mounts for a session"))
 
@@ -718,6 +734,8 @@ def main() -> None:
         "web": cmd_web,
         "allow": cmd_allow,
         "deny": cmd_deny,
+        "proxy-reload": cmd_proxy_reload,
+        "proxy-restart": cmd_proxy_restart,
         "mount": cmd_mount,
         "status": cmd_status,
         "list": cmd_list,
