@@ -63,7 +63,7 @@ providers:
 # trusted_certificates:
 #   - my-internal-ca.pem
 
-# Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
+# Additional egress hosts (exact or *.wildcard). Changes take effect automatically.
 extra_allowed_hosts: []
 
 # Extra environment variables for the proxy container. Merged with compose-base.yaml.

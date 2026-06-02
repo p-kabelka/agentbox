@@ -124,8 +124,10 @@ def load_yaml(path: Path) -> dict:
 
 
 def save_yaml(path: Path, cfg: dict) -> None:
-    with path.open("w") as f:
+    tmp = path.with_suffix(".yaml.tmp")
+    with tmp.open("w") as f:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
+    tmp.rename(path)
 
 
 def resolve_preset(name: str) -> Path:
@@ -498,8 +500,7 @@ def _update_allowlist(host: str, add: bool, name: str | None) -> None:
             print(f"Removed '{host}' from allowlist for session '{session_name}'.")
         else:
             print(f"'{host}' not in allowlist for session '{session_name}'.")
-    compose(session_dir, "restart", "proxy", check=True)
-    wait_healthy(session_dir)
+    compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "http://localhost:8082/reload", check=True)
 
 
 def cmd_allow(args) -> None:
