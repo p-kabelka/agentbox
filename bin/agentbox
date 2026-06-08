@@ -348,7 +348,6 @@ def cmd_init(args) -> None:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content or "")
 
-    git_available = False
     use_git = not args.no_git
     if use_git:
         in_repo = subprocess.run(
@@ -357,7 +356,6 @@ def cmd_init(args) -> None:
         ).returncode == 0
 
         if in_repo:
-            git_available = True
             branch = args.branch
             if not branch:
                 branch = subprocess.run(
