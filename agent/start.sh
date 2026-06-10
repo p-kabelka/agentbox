@@ -4,7 +4,13 @@ set -euo pipefail
 # Trust only the mitmproxy CA — the agent has no direct internet access,
 # all TLS is terminated at the proxy which re-signs with this CA.
 CA=/proxy-ca/mitmproxy-ca-cert.pem
+# wait until the proxy certificate is created by proxy container
 until [ -f "$CA" ]; do sleep 0.2; done
+# append it to system cert store (faster than update-ca-trust)
+cat "$CA" >> /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+# copy it to system cert sources in case update-ca-trust runs
+cp "$CA" /etc/pki/ca-trust/source/anchors/proxy-ca.crt
+# make libraries trust the cert directly
 export SSL_CERT_FILE="$CA"
 export CURL_CA_BUNDLE="$CA"
 export GIT_SSL_CAINFO="$CA"
