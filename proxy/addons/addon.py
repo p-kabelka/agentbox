@@ -122,7 +122,7 @@ class AgentboxAddon:
         host = flow.request.pretty_host
         if not any(fnmatch.fnmatch(host, p) for p in cfg.allowed):
             flow.response = http.Response.make(
-                403, f"Host '{host}' not allowed.\nAdd it: agentbox allow{_name_flag} {host}\n",
+                403, f"Host '{host}' not allowed.\nTo allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {host}\n",
                 {"Content-Type": "text/plain"},
             )
             flow.metadata["agentbox_blocked"] = True
