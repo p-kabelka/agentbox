@@ -21,8 +21,11 @@ export NODE_EXTRA_CA_CERTS="$CA"
 if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     echo "[agent] Cloning workspace..."
     git clone -q --no-local /source/project.bundle /workspace
-    git -C /workspace remote remove origin
+    git -C /workspace branch --unset-upstream
+    git -C /workspace remote rename origin source
     git -C /workspace remote add origin /output/repo.git
+    # let git create and track the remote branch automatically when it does not exist
+    git -C /workspace config push.autoSetupRemote true
     echo "[agent] When done: git push origin HEAD"
 fi
 
