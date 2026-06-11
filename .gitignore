@@ -3,3 +3,4 @@ secrets/
 agent/harnesses/
 custom/
 .agentbox/
+.venv/

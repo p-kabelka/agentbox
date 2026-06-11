@@ -4,7 +4,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends curl ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir mitmproxy google-auth pyyaml requests
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
 
 COPY addons/ /addons/
 COPY metadata_server.py /app/metadata_server.py
