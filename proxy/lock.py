@@ -5,10 +5,9 @@
 # Platform note: pip resolves platform-specific wheels, so this script must
 # run on the same OS/arch as the container target (Linux x86_64).
 # On a non-Linux host, run via the container base image instead:
-#   podman run --rm -v "$(pwd):/work" -w /work python:3.12-slim python3 lock.py
+#   podman run --rm -v "$(pwd):/work:Z" -w /work python:3.12-slim python3 lock.py
 import json
 import subprocess
-import sys
 import tempfile
 import venv
 from pathlib import Path
@@ -22,12 +21,7 @@ with tempfile.TemporaryDirectory() as tmpdir:
     report_path = Path(tmpdir) / "report.json"
 
     print("Resolving dependencies from requirements.in...")
-    subprocess.run(
-        [pip, "install", "--quiet", "--dry-run",
-         "--report", report_path,
-         "-r", SCRIPT_DIR / "requirements.in"],
-        check=True,
-    )
+    subprocess.run([pip, "install", "--quiet", "--dry-run", "--report", report_path, "-r", SCRIPT_DIR / "requirements.in"], check=True)
 
     with open(report_path) as f:
         report = json.load(f)
@@ -38,9 +32,7 @@ for pkg in report["install"]:
     name = pkg["metadata"]["name"]
     version = pkg["metadata"]["version"]
     hashes = pkg["download_info"]["archive_info"]["hashes"]
-    hash_args = " \\\n".join(
-        f"    --hash={algo}:{digest}" for algo, digest in sorted(hashes.items())
-    )
+    hash_args = " \\\n".join(f"    --hash={algo}:{digest}" for algo, digest in sorted(hashes.items()))
     lines.append(f"{name}=={version} \\\n{hash_args}")
 
 lines.sort(key=str.lower)
