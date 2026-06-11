@@ -17,13 +17,13 @@ export GIT_SSL_CAINFO="$CA"
 export REQUESTS_CA_BUNDLE="$CA"
 export NODE_EXTRA_CA_CERTS="$CA"
 
-# Clone source bundle and wire up read-only source + writable output remotes
+# Clone source bundle and wire up writable output remote
 if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     echo "[agent] Cloning workspace..."
-    git clone -q /source/project.bundle /workspace
-    git -C /workspace remote rename origin source
-    git -C /workspace remote add output /output/repo.git
-    echo "[agent] When done: git push output HEAD"
+    git clone -q --no-local /source/project.bundle /workspace
+    git -C /workspace remote remove origin
+    git -C /workspace remote add origin /output/repo.git
+    echo "[agent] When done: git push origin HEAD"
 fi
 
 # Apply preset dotfiles to home directory
