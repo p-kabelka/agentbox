@@ -20,9 +20,9 @@ AGENTBOX_HOME   = Path(os.environ.get("AGENTBOX_HOME", Path.home() / ".local" / 
 AGENTBOX_PRESET = os.environ.get("AGENTBOX_PRESET", "default")
 
 HARNESS_CONTAINERFILES = {
-    "claude":  "Containerfile.claude",
-    "opencode": "Containerfile.opencode",
-    "cursor":  "Containerfile.cursor",
+    p.name.split(".", 1)[1]: p.name
+    for p in sorted((AGENTBOX_HOME / "agent").glob("Containerfile.*"))
+    if p.name != "Containerfile.base"
 }
 
 
