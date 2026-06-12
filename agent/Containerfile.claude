@@ -1,0 +1,15 @@
+FROM localhost/agentbox-agent-base:latest
+
+COPY keys/claude-code.asc /tmp/claude-code.asc
+RUN rpm --import /tmp/claude-code.asc && rm -f /tmp/claude-code.asc
+
+RUN cat > /etc/yum.repos.d/claude-code.repo <<'EOF'
+[claude-code]
+name=Claude Code
+baseurl=https://downloads.claude.ai/claude-code/rpm/stable
+enabled=1
+gpgcheck=1
+gpgkey=file:///etc/pki/rpm-gpg/claude-code.asc
+EOF
+
+RUN dnf install -y claude-code && dnf clean all

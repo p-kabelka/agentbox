@@ -33,14 +33,12 @@ services:
     restart: unless-stopped
 
   agent:
-    image: localhost/agentbox-agent:latest
+    image: localhost/agentbox-agent-base:latest
     networks:
       - agent-net          # internal only — no direct internet access
     depends_on:
       - proxy
     environment:
-      AGENT_HARNESS: ${AGENT_HARNESS:-}
-      AGENT_HARNESS_ARGS: ${AGENT_HARNESS_ARGS:-}
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}
 
       # Dummy credentials — proxy injects real values via mitmproxy

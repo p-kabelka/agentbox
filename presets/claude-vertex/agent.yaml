@@ -1,5 +1,7 @@
 # Agent preset — copied to .agentbox/sessions/<name>/config/agent.yaml on 'agentbox init --name <name>'.
 
+agent_image: localhost/agentbox-agent-claude:latest
+
 # Extra environment variables injected into the agent container.
 # These are merged with (and can override) the base env in compose-base.yaml.
 environment:

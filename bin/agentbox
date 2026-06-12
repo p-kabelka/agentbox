@@ -19,6 +19,12 @@ import yaml
 AGENTBOX_HOME   = Path(os.environ.get("AGENTBOX_HOME", Path.home() / ".local" / "share" / "agentbox"))
 AGENTBOX_PRESET = os.environ.get("AGENTBOX_PRESET", "default")
 
+HARNESS_CONTAINERFILES = {
+    "claude":  "Containerfile.claude",
+    "opencode": "Containerfile.opencode",
+    "cursor":  "Containerfile.cursor",
+}
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -150,7 +156,6 @@ def generate_compose(
     project_dir: Path,
     name: str,
     port: int,
-    harness: str,
     proxy_cfg: dict,
     agent_cfg: dict,
     context_mounts: list[tuple[str, str, bool]],
@@ -224,12 +229,13 @@ def generate_compose(
         agent_volumes.append(f"{src}:/context/{dst}:{opts}")
     agent["volumes"] = agent_volumes
 
+    agent_image = agent_cfg.get("agent_image", "localhost/agentbox-agent-base:latest")
+    agent["image"] = agent_image
+
     agent_preset_env = agent_cfg.get("environment") or {}
     agent_env: dict = agent.get("environment", {})
     agent_env.update(agent_preset_env)
     agent_env["AGENTBOX_NAME"] = name
-    if "AGENT_HARNESS" not in agent_preset_env:
-        agent_env["AGENT_HARNESS"] = harness
     agent["environment"] = agent_env
 
     save_yaml(session_dir / "compose.yaml", base)
@@ -237,45 +243,60 @@ def generate_compose(
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
-def _build_images(no_cache: bool = False) -> None:
+def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) -> None:
     extra = ["--no-cache"] if no_cache else []
+    agent_ctx = AGENTBOX_HOME / "agent"
 
     (AGENTBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
 
-    harness_dir = AGENTBOX_HOME / "agent" / "harnesses"
-    harness_dir.mkdir(exist_ok=True)
-    (harness_dir / ".placeholder").touch()
-    known_harnesses = ["claude", "opencode"]
-    found = []
-    for name in known_harnesses:
-        path = shutil.which(name)
-        if path:
-            shutil.copy2(path, harness_dir / name)
-            found.append(name)
-    if found:
-        print(f"Staged harness binaries: {", ".join(found)}")
-    else:
-        print(f"No harness binaries found on PATH ({", ".join(known_harnesses)})")
+    for tag, ctx, containerfile in [
+        ("localhost/agentbox-proxy:latest", AGENTBOX_HOME / "proxy", "Containerfile"),
+        ("localhost/agentbox-agent-base:latest", agent_ctx, "Containerfile.base"),
+    ]:
+        subprocess.run(
+            ["podman", "build", *extra, "-f", str(ctx / containerfile), "-t", tag, str(ctx)],
+            check=True,
+        )
 
-    try:
-        for tag, ctx in [
-            ("localhost/agentbox-proxy:latest", AGENTBOX_HOME / "proxy"),
-            ("localhost/agentbox-agent:latest", AGENTBOX_HOME / "agent"),
-        ]:
-            subprocess.run(["podman", "build", *extra, "-t", tag, str(ctx)], check=True)
-    finally:
-        shutil.rmtree(harness_dir, ignore_errors=True)
+    targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
+    for name in targets:
+        containerfile = HARNESS_CONTAINERFILES[name]
+        cf_path = agent_ctx / containerfile
+        if not cf_path.is_file():
+            print(f"Warning: {cf_path} not found, skipping {name} image build")
+            continue
+        if name == "claude" and not (agent_ctx / "keys" / "claude-code.asc").is_file():
+            die(f"Claude Code GPG key not found at {agent_ctx / 'keys' / 'claude-code.asc'}\n"
+                f"       Download it and verify its fingerprint:\n"
+                f"         curl -fsSLo {agent_ctx / 'keys' / 'claude-code.asc'} https://downloads.claude.ai/keys/claude-code.asc\n"
+                f"         gpg --show-keys --fingerprint {agent_ctx / 'keys' / 'claude-code.asc'}")
+        tag = f"localhost/agentbox-agent-{name}:latest"
+        print(f"==> Building {name} agent image...")
+        subprocess.run(
+            ["podman", "build", *extra, "-f", str(cf_path), "-t", tag, str(agent_ctx)],
+            check=True,
+        )
+
+
+def _validate_harnesses(names: list[str]) -> None:
+    for name in names:
+        if name not in HARNESS_CONTAINERFILES:
+            die(f"unknown harness '{name}'. Choices: {', '.join(HARNESS_CONTAINERFILES)}")
 
 
 def cmd_build(args) -> None:
+    if args.harnesses:
+        _validate_harnesses(args.harnesses)
     print("==> Building images...")
-    _build_images()
+    _build_images(harnesses=args.harnesses or None)
     print("==> Done. Run 'agentbox update' after pulling a new version.")
 
 
 def cmd_update(args) -> None:
+    if args.harnesses:
+        _validate_harnesses(args.harnesses)
     print("==> Rebuilding images without cache...")
-    _build_images(no_cache=True)
+    _build_images(no_cache=True, harnesses=args.harnesses or None)
     print("==> Done.")
 
 
@@ -425,7 +446,6 @@ def cmd_init(args) -> None:
         project_dir=project_dir,
         name=name,
         port=web_port,
-        harness=args.harness,
         proxy_cfg=proxy_cfg,
         agent_cfg=agent_cfg,
         context_mounts=context_mounts,
@@ -700,8 +720,10 @@ def main() -> None:
     parser = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
     subcommand = parser.add_subparsers(dest="cmd")
 
-    subcommand.add_parser("build", help="Build proxy + agent images")
-    subcommand.add_parser("update", help="Rebuild images without cache")
+    build_subcommand = subcommand.add_parser("build", help="Build proxy + agent images")
+    build_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to build (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
+    update_subcommand = subcommand.add_parser("update", help="Rebuild images without cache")
+    update_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to rebuild (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
     subcommand.add_parser("list", help="List sessions for the current project")
     subcommand.add_parser("ls", help="Alias for list")
     subcommand.add_parser("status", help="List running agentbox containers")
@@ -711,7 +733,6 @@ def main() -> None:
     init_subcommand.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
     init_subcommand.add_argument("--preset", default=AGENTBOX_PRESET)
     init_subcommand.add_argument("--branch", default="")
-    init_subcommand.add_argument("--harness", default=os.environ.get("AGENT_HARNESS", "claude"))
     init_subcommand.add_argument("--no-git", action="store_true")
     init_subcommand.add_argument("--ro-mount", action="append", default=[], dest="ro_mounts", metavar="SRC[:DST]", help="Mount read-only reference directory")
     init_subcommand.add_argument("--rw-mount", action="append", default=[], dest="rw_mounts", metavar="SRC[:DST]", help="Mount writable reference directory")

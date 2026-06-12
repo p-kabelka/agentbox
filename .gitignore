@@ -1,6 +1,5 @@
 secrets/
 .env
-agent/harnesses/
 custom/
 .agentbox/
 .venv/

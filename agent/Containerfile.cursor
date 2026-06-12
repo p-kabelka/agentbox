@@ -1,0 +1,3 @@
+FROM localhost/agentbox-agent-base:latest
+
+RUN curl -fsS https://cursor.com/install | bash
