@@ -11,7 +11,6 @@ RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt && \
 COPY addons/ /addons/
 COPY metadata_server.py /app/metadata_server.py
 COPY start.sh /start.sh
-RUN chmod +x /start.sh
 
 EXPOSE 8080 8081 9090
 CMD ["/start.sh"]

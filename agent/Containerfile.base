@@ -10,11 +10,10 @@ RUN dnf install -y \
         jq \
     && dnf clean all
 
-COPY start.sh /start.sh
-RUN chmod +x /start.sh
-
 RUN git config --global user.email "agent@agentbox" && \
     git config --global user.name "Agent"
+
+COPY start.sh /start.sh
 
 WORKDIR /workspace
 ENTRYPOINT ["/start.sh"]
