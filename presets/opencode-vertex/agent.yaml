@@ -1,0 +1,61 @@
+# Agent preset — copied to .agentbox/sessions/<name>/config/agent.yaml on 'agentbox init --name <name>'.
+
+agent_image: localhost/agentbox-agent-claude:latest
+
+# Extra environment variables injected into the agent container.
+# These are merged with (and can override) the base env in compose-base.yaml.
+environment:
+  AGENT_HARNESS: opencode
+  AGENT_HARNESS_ARGS:
+  GOOGLE_CLOUD_PROJECT: itpc-gcp-pnd-pe-eng-claude
+  VERTEX_LOCATION: global
+
+# Dotfiles placed in the agent's $HOME at session start.
+# Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
+dotfiles:
+  .bashrc: |
+    # .bashrc
+
+    # Source global definitions
+    if [ -f /etc/bashrc ]; then
+        . /etc/bashrc
+    fi
+
+    # User specific environment
+    if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]; then
+        PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+    fi
+    export PATH
+
+    # Uncomment the following line if you don't like systemctl's auto-paging feature:
+    # export SYSTEMD_PAGER=
+
+    # User specific aliases and functions
+    if [ -d ~/.bashrc.d ]; then
+        for rc in ~/.bashrc.d/*; do
+            if [ -f "$rc" ]; then
+                . "$rc"
+            fi
+        done
+    fi
+    unset rc
+
+    # CUSTOM
+    export EDITOR=vim
+    alias agent="$AGENT_HARNESS $AGENT_HARNESS_ARGS"
+    alias ll="ls -lasp"
+    alias g="git"
+
+    if ! jq -e '.permission["*"]["*"] == "allow" and .agent.plan.model == "google-vertex-anthropic/claude-opus-4-6@default" and .agent.build.model == "google-vertex-anthropic/claude-sonnet-4-6@default" and .agent["build-opus"].model == "google-vertex-anthropic/claude-opus-4-6@default"' "$HOME/.config/opencode/opencode.json" &>/dev/null; then
+      _settings_json="$HOME/.config/opencode/opencode.json"
+      mkdir -p "$HOME/.claude" 2>/dev/null || true
+      if [ -f "$_settings_json" ]; then
+        jq '. * {"$schema": "https://opencode.ai/config.json", "theme": "dark-ansi", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' "$_settings_json" > "${_settings_json}.tmp" && cp -f "${_settings_json}.tmp" "$_settings_json" && rm -f "${_settings_json}.tmp"
+      else
+        echo '{"$schema": "https://opencode.ai/config.json", "theme": "dark-ansi", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' > "$_settings_json"
+      fi
+    fi
+  .gitconfig: |
+    [user]
+        name = Agent
+        email = agent@agentbox

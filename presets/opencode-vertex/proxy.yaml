@@ -1,0 +1,80 @@
+# Default provider preset. Copied to .agentbox/sessions/<name>/config/proxy.yaml on 'agentbox run --name <name>'.
+
+providers:
+  - name: vertex
+    enabled: true
+    credential_type: oauth
+    metadata_server: true
+    inject_header: Authorization
+    inject_prefix: "Bearer "
+    replace_token: "dummy-replaced-by-proxy"
+    allowed_hosts:
+      - "aiplatform.googleapis.com"
+      - "*-aiplatform.googleapis.com"
+    path_prefixes:
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/"
+
+# Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
+extra_allowed_hosts:
+  - "fedora.mirror-services.net"
+  - "mirrors.fedoraproject.org"
+  - "mirror.slu.cz"
+  - "mirror.karneval.cz"
+  - "codecs.fedoraproject.org"
+  - "ftp.sh.cvut.cz"
+  - "mirror.nl.leaseweb.net"
+  - "mirrors.nxthost.com"
+  - "fr2.rpmfind.net"
+  - "mirror.dogado.de"
+  - "mirror.plusline.net"
+  - "mirror.telepoint.bg"
+  - "mirror.netsite.dk"
+  - "mirror.yandex.ru"
+  - "mirrors.xtom.ee"
+  - "ftp-stud.hs-esslingen.de"
+  - "mirrors.xtom.de"
+  - "fedora.mirror.liteserver.nl"
+  - "mirror.imt-systems.com"
+  - "eu.edge.kernel.org"
+  - "www.nic.funet.fi"
+  - "ftp.uni-stuttgart.de"
+  - "fedora.ipacct.com"
+  - "mirror.i3d.net"
+  - "fedora.ip-connect.info"
+  - "mirror.bahnhof.net"
+  - "mirror.accum.se"
+  - "mirror.23m.com"
+  - "ask4.mm.fcix.net"
+  - "ftp.uni-bayreuth.de"
+  - "distrib-coffee.ipsl.jussieu.fr"
+  - "repo.hyron.dev"
+  - "fedora.mirrorservice.org"
+  - "ftp.fau.de"
+  - "mirror.init7.net"
+  - "mirror.netzwerge.de"
+  - "mirror.in2p3.fr"
+  - "ftp.cica.es"
+  - "fedora.ip-connect.vn.ua"
+  - "www.fedora.is"
+  - "b4sh.mm.fcix.net"
+  - "mirror.etf.bg.ac.rs"
+  - "fedora.mirror.root.lu"
+  - "mirrors.n-ix.net"
+  - "fedora.tu-chemnitz.de"
+  - "divergentnetworks.mm.fcix.net"
+  - "mirrors.chroot.ro"
+  - "mirror.maeen.sa"
+  - "mirrors.ircam.fr"
+  - "distrohub.kyiv.ua"
+  - "ftp.otenet.gr"
+
+# Extra environment variables for the proxy container. Merged with compose-base.yaml.
+environment:
+  GOOGLE_CLOUD_PROJECT: itpc-gcp-pnd-pe-eng-claude
+  VERTEX_PROJECT_ID: itpc-gcp-pnd-pe-eng-claude
+  VERTEX_REGION: global
+
+logging:
+  log_request_headers: false
+  log_response_headers: false
+  log_bodies: false  # WARNING: may log sensitive prompt content if enabled

@@ -45,6 +45,28 @@ dotfiles:
     # CUSTOM
     export EDITOR=vim
     alias agent="$AGENT_HARNESS $AGENT_HARNESS_ARGS"
+    alias ll="ls -lasp"
+    alias g="git"
+
+    _claude_ws="$(pwd)"
+    if ! jq -e --arg workspace "$_claude_ws" '.hasCompletedOnboarding == true and .projects[$workspace].hasTrustDialogAccepted == true' "$HOME/.claude.json" &>/dev/null; then
+      _claude_json="$HOME/.claude.json"
+      if [ -f "$_claude_json" ]; then
+        jq --arg workspace "$_claude_ws" '.hasCompletedOnboarding = true | .projects = {($workspace): {hasTrustDialogAccepted: true}}' "$_claude_json" > "${_claude_json}.tmp" && cp -f "${_claude_json}.tmp" "$_claude_json" && rm -f "${_claude_json}.tmp"
+      else
+        jq -n --arg workspace "$_claude_ws" '{hasCompletedOnboarding: true, projects: {($workspace): {hasTrustDialogAccepted: true}}}' > "$_claude_json"
+      fi
+    fi
+
+    if ! jq -e '.skipDangerousModePermissionPrompt == true and .env.DISABLE_TELEMETRY == "1" and .env.ANTHROPIC_DEFAULT_SONNET_MODEL == "claude-sonnet-4-6"' "$HOME/.claude/settings.json" &>/dev/null; then
+      _settings_json="$HOME/.claude/settings.json"
+      mkdir -p "$HOME/.claude" 2>/dev/null || true
+      if [ -f "$_settings_json" ]; then
+        jq '. * {skipDangerousModePermissionPrompt: true, env: {DISABLE_TELEMETRY: "1", ANTHROPIC_DEFAULT_SONNET_MODEL: "claude-sonnet-4-6"}, "model": "opusplan", "theme": "dark-ansi"}' "$_settings_json" > "${_settings_json}.tmp" && cp -f "${_settings_json}.tmp" "$_settings_json" && rm -f "${_settings_json}.tmp"
+      else
+        echo '{"skipDangerousModePermissionPrompt": true, "env": {"DISABLE_TELEMETRY": "1", "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-sonnet-4-6"}, "model": "opusplan", "theme": "dark-ansi"}' > "$_settings_json"
+      fi
+    fi
   .gitconfig: |
     [user]
         name = Agent
