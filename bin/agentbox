@@ -242,11 +242,37 @@ def generate_compose(
 
 # ── Commands ──────────────────────────────────────────────────────────────────
 
+def _resolve_gh_token() -> str | None:
+    token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
+    if token:
+        return token
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) -> None:
     extra = ["--no-cache"] if no_cache else []
     agent_ctx = AGENTBOX_HOME / "agent"
 
     (AGENTBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
+
+    skip_opencode_verify = os.environ.get("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION", "")
+    gh_token = None if skip_opencode_verify else _resolve_gh_token()
+    secret_args: list[str] = []
+    if skip_opencode_verify:
+        extra += ["--build-arg", "AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1"]
+    elif gh_token:
+        secret_args = ["--secret", f"id=gh_token,env=_AGENTBOX_GH_TOKEN"]
+    else:
+        print("Warning: no GH_TOKEN found, opencode build will fail without attestation verification\n"
+              "         Set AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1 to skip verification")
 
     for tag, ctx, containerfile in [
         ("localhost/agentbox-proxy:latest", AGENTBOX_HOME / "proxy", "Containerfile"),
@@ -258,6 +284,10 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
         )
 
     targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
+    build_env = dict(os.environ)
+    if gh_token:
+        build_env["_AGENTBOX_GH_TOKEN"] = gh_token
+
     for name in targets:
         containerfile = HARNESS_CONTAINERFILES[name]
         cf_path = agent_ctx / containerfile
@@ -272,8 +302,9 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
         tag = f"localhost/agentbox-agent-{name}:latest"
         print(f"==> Building {name} agent image...")
         subprocess.run(
-            ["podman", "build", *extra, "-f", str(cf_path), "-t", tag, str(agent_ctx)],
+            ["podman", "build", *extra, *secret_args, "-f", str(cf_path), "-t", tag, str(agent_ctx)],
             check=True,
+            env=build_env,
         )
 
 

@@ -1,22 +1,20 @@
 FROM fedora:44 AS verifier
 
-RUN dnf install -y curl jq && dnf clean all
+ARG AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=0
+RUN dnf install -y curl $([ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ] && echo gh) && dnf clean all
 
-RUN curl -fsSLo /usr/local/bin/cosign \
-        https://github.com/sigstore/cosign/releases/latest/download/cosign-linux-amd64 && \
-    chmod +x /usr/local/bin/cosign && \
-    curl -fsSLo /tmp/opencode \
-        https://github.com/sst/opencode/releases/latest/download/opencode-linux-x64 && \
-    chmod +x /tmp/opencode && \
-    DIGEST=$(sha256sum /tmp/opencode | cut -d' ' -f1) && \
-    curl -fsSL \
-        -H "Accept: application/vnd.github+json" \
-        "https://api.github.com/repos/sst/opencode/attestations/sha256:${DIGEST}" \
-        | jq '.attestations[0].bundle' > /tmp/bundle.json && \
-    cosign verify-blob /tmp/opencode \
-        --bundle /tmp/bundle.json \
-        --certificate-identity-regexp 'https://github.com/sst/opencode/' \
-        --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+RUN --mount=type=secret,id=gh_token \
+    curl -fsSLo /tmp/opencode.tar.gz \
+        https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-x64.tar.gz && \
+    if [ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ]; then \
+        GH_TOKEN=$(cat /run/secrets/gh_token) \
+        gh release verify-asset /tmp/opencode.tar.gz \
+            --repo anomalyco/opencode; \
+    else \
+        echo "Warning: skipping opencode attestation verification"; \
+    fi && \
+    tar -xzf /tmp/opencode.tar.gz -C /tmp && \
+    chmod +x /tmp/opencode
 
 FROM localhost/agentbox-agent-base:latest
 COPY --from=verifier /tmp/opencode /usr/local/bin/opencode
