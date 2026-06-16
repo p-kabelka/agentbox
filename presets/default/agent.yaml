@@ -12,11 +12,11 @@ environment:
 
 # Dotfiles placed in the agent's $HOME at session start.
 # Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
-dotfiles: {}
+dotfiles:
   # .bashrc: |
   #   export PS1="\u@agentbox:\w\$ "
   #   alias ll='ls -la'
-  # .gitconfig: |
-  #   [user]
-  #       name = Agent
-  #       email = agent@agentbox
+  .gitconfig: |
+    [user]
+        name = Agent
+        email = agent@agentbox
