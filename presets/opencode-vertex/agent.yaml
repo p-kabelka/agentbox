@@ -5,7 +5,7 @@ agent_image: localhost/agentbox-agent-opencode:latest
 environment:
   AGENT_HARNESS: opencode
   AGENT_HARNESS_ARGS:
-  GOOGLE_CLOUD_PROJECT: itpc-gcp-pnd-pe-eng-claude
+  GOOGLE_CLOUD_PROJECT: your-gcp-project
   VERTEX_LOCATION: global
 
 # Dotfiles placed in the agent's $HOME at session start.
