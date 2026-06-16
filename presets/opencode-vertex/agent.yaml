@@ -1,4 +1,4 @@
-agent_image: localhost/agentbox-agent-claude:latest
+agent_image: localhost/agentbox-agent-opencode:latest
 
 # Extra environment variables injected into the agent container.
 # These are merged with (and can override) the base env in compose-base.yaml.
@@ -44,9 +44,9 @@ dotfiles:
     alias ll="ls -lasp"
     alias g="git"
 
-    if ! jq -e '.permission["*"]["*"] == "allow" and .agent.plan.model == "google-vertex-anthropic/claude-opus-4-6@default" and .agent.build.model == "google-vertex-anthropic/claude-sonnet-4-6@default" and .agent["build-opus"].model == "google-vertex-anthropic/claude-opus-4-6@default"' "$HOME/.config/opencode/opencode.json" &>/dev/null; then
-      _settings_json="$HOME/.config/opencode/opencode.json"
-      mkdir -p "$HOME/.claude" 2>/dev/null || true
+    if ! jq -e '.permission["*"]["*"] == "allow" and .agent.plan.model == "google-vertex-anthropic/claude-opus-4-6@default" and .agent.build.model == "google-vertex-anthropic/claude-sonnet-4-6@default" and .agent["build-opus"].model == "google-vertex-anthropic/claude-opus-4-6@default"' "$HOME/.config/opencode/opencode.jsonc" &>/dev/null; then
+      _settings_json="$HOME/.config/opencode/opencode.jsonc"
+      mkdir -p "$HOME/.config/opencode" 2>/dev/null || true
       if [ -f "$_settings_json" ]; then
         jq '. * {"$schema": "https://opencode.ai/config.json", "theme": "dark-ansi", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' "$_settings_json" > "${_settings_json}.tmp" && cp -f "${_settings_json}.tmp" "$_settings_json" && rm -f "${_settings_json}.tmp"
       else
