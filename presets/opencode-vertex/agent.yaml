@@ -48,9 +48,19 @@ dotfiles:
       _settings_json="$HOME/.config/opencode/opencode.jsonc"
       mkdir -p "$HOME/.config/opencode" 2>/dev/null || true
       if [ -f "$_settings_json" ]; then
-        jq '. * {"$schema": "https://opencode.ai/config.json", "theme": "dark-ansi", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' "$_settings_json" > "${_settings_json}.tmp" && cp -f "${_settings_json}.tmp" "$_settings_json" && rm -f "${_settings_json}.tmp"
+        jq '. * {"$schema": "https://opencode.ai/config.json", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' "$_settings_json" > "${_settings_json}.tmp" && cp -f "${_settings_json}.tmp" "$_settings_json" && rm -f "${_settings_json}.tmp"
       else
-        echo '{"$schema": "https://opencode.ai/config.json", "theme": "dark-ansi", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' > "$_settings_json"
+        echo '{"$schema": "https://opencode.ai/config.json", "permission": {"*": {"*": "allow"}}, "agent": {"plan": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}, "build": {"model": "google-vertex-anthropic/claude-sonnet-4-6@default"}, "build-opus": {"model": "google-vertex-anthropic/claude-opus-4-6@default"}}}' > "$_settings_json"
+      fi
+    fi
+
+    if ! jq -e '."$schema" == "https://opencode.ai/tui.json" and .theme == "system"' "$HOME/.config/opencode/tui.json" &>/dev/null; then
+      _tui_json="$HOME/.config/opencode/tui.json"
+      mkdir -p "$HOME/.config/opencode" 2>/dev/null || true
+      if [ -f "$_tui_json" ]; then
+        jq '. * {"$schema": "https://opencode.ai/tui.json", "theme": "system"}' "$_tui_json" > "${_tui_json}.tmp" && cp -f "${_tui_json}.tmp" "$_tui_json" && rm -f "${_tui_json}.tmp"
+      else
+        echo '{"$schema": "https://opencode.ai/tui.json", "theme": "system"}' > "$_tui_json"
       fi
     fi
   .gitconfig: |
