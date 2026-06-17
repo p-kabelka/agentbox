@@ -38,6 +38,7 @@ services:
       - agent-net          # internal only — no direct internet access
     depends_on:
       - proxy
+    runtime: krun
     environment:
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}
 

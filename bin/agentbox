@@ -205,7 +205,6 @@ def generate_compose(
 
     # --- Agent service ---
     agent = base["services"]["agent"]
-    agent["runtime"] = "krun"
 
     agent_volumes: list = agent.get("volumes", [])
     if (session_dir / "dotfiles").is_dir():
