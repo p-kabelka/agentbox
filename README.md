@@ -17,7 +17,6 @@ Two containers run per session: a **proxy** (holds real credentials, enforces an
 - Podman with `podman compose`
 - Python 3 with PyYAML (`pip install pyyaml`, `dnf install python3-pyyaml`)
 - `krun` / `crun-vm` for VM-level isolation (recommended; agent container uses `runtime: krun`)
-- Claude Code installed at `~/.local/bin/claude`
 
 ---
 
@@ -32,8 +31,10 @@ source ~/.bashrc
 # or symlink the binary
 ln -s -r ~/.local/share/agentbox/bin/agentbox ~/.local/bin
 
-# Build container images
+# Build container images (builds proxy, base agent, and all harness images)
 agentbox build
+# Or build specific harness images only:
+agentbox build claude opencode
 ```
 
 Create a configuration preset for an agentbox:
@@ -59,7 +60,7 @@ agentbox init --start
 
 # The agent has access to your current branch (read-only bundle).
 # When it's done, push its work:
-#   git push output HEAD:my-feature
+#   git push
 
 # When the agent container exits, output is fetched automatically:
 #   git fetch agentbox-<name>
@@ -73,7 +74,8 @@ agentbox init --start
 ### Session lifecycle
 
 ```bash
-agentbox init [--name NAME] [--preset NAME] [--harness BINARY] [--branch BRANCH] [--start]
+agentbox init [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] \
+              [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]
 agentbox start [--name NAME] [-- CMD]        # launch agent harness (or CMD, e.g. -- bash, -- tmux)
 agentbox stop  [--name NAME]                 # stop containers
 agentbox remove [--name NAME]                # stop, delete session, output repo, and git remote
@@ -93,19 +95,27 @@ agentbox status                # list all running agentbox containers
 ### Egress control
 
 ```bash
-agentbox allow pypi.org [--name NAME]   # add host to allowlist (restarts proxy)
+agentbox allow pypi.org [--name NAME]   # add host to allowlist (hot-reloads proxy config)
 agentbox deny  pypi.org [--name NAME]   # remove host from allowlist
+```
+
+### Proxy management
+
+```bash
+agentbox proxy-reload  [--name NAME]    # reload proxy config without restarting
+agentbox proxy-restart [--name NAME]    # restart proxy container (waits for health check)
 ```
 
 ### Reference mounts
 
-Mount additional projects read-only at `/context/<name>` inside the agent:
+Mount additional projects at `/context/<name>` inside the agent:
 
 ```bash
-agentbox mount add ~/libs/shared-lib [--name NAME]   # recorded in compose.yaml
+agentbox mount add ~/libs/shared-lib [--name NAME]        # read-only (default)
+agentbox mount add -w ~/data/scratch [--name NAME]        # writable
 agentbox mount remove shared-lib     [--name NAME]
 agentbox mount list                  [--name NAME]
-agentbox start                                        # restart to apply
+agentbox start                                             # restart to apply
 ```
 
 ### Retrieving output
@@ -119,6 +129,12 @@ git diff HEAD agentbox-<name>/my-feature
 git merge agentbox-<name>/my-feature
 ```
 
+### Maintenance
+
+```bash
+agentbox remote-cleanup              # remove stale agentbox-* git remotes with no matching session
+```
+
 ---
 
 ## Configuration
@@ -130,15 +146,21 @@ Each session has its own `proxy.yaml` at `.agentbox/sessions/<name>/proxy.yaml`,
 ```yaml
 providers:
   - name: anthropic
-    enabled: true          # flip this
-    api_key_env: ANTHROPIC_API_KEY
+    enabled: true
+    credential_type: static        # "static" (API key) or "oauth" (Google OAuth)
+    api_key_env: ANTHROPIC_API_KEY # env var on the proxy side
+    # api_key_file: ~/secrets/key  # alternative: read key from file (takes precedence)
     inject_header: x-api-key
     inject_prefix: ""
     allowed_hosts:
       - api.anthropic.com
+    path_prefixes:                 # only inject credentials on matching paths
+      - /v1/messages
+      - /v1/complete
+      - /v1/models
 ```
 
-The real API key is read from the proxy container's environment - never from the agent.
+The real API key is read from the proxy container's environment or a mounted secret file — never from the agent.
 
 ### Vertex AI
 
@@ -146,10 +168,16 @@ The real API key is read from the proxy container's environment - never from the
 providers:
   - name: vertex
     enabled: true
+    credential_type: oauth
     metadata_server: true
+    inject_header: Authorization
+    inject_prefix: "Bearer "
+    replace_token: "dummy-replaced-by-proxy"
     allowed_hosts:
       - "aiplatform.googleapis.com"
       - "*-aiplatform.googleapis.com"
+    path_prefixes:
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/"
 
 environment:
   GOOGLE_CLOUD_PROJECT: my-gcp-project
@@ -161,7 +189,7 @@ Place GCP credentials at `$AGENTBOX_HOME/secrets/credentials.json`, or let the p
 
 ### Presets
 
-Presets live at `$AGENTBOX_HOME/presets/<name>/` and contain `proxy.yaml` (provider config) and optionally `agent.yaml` (environment overrides and dotfiles).
+Presets live at `$AGENTBOX_HOME/presets/<name>/` (built-in) or `$AGENTBOX_HOME/custom/presets/<name>/` (user-defined, takes precedence). Each contains `proxy.yaml` (provider config) and optionally `agent.yaml` (agent image, environment overrides, and dotfiles).
 
 ```bash
 agentbox preset list
@@ -173,28 +201,26 @@ agentbox init --preset mypreset --start
 
 ### Agent harness
 
-The default harness is `claude`. Override per session:
+The agent harness is configured via the preset's `agent.yaml`. Each harness has a dedicated container image with the harness binary installed. Built-in presets are available for `claude-vertex`, `opencode-vertex`, and the `default` (base image, no harness).
 
-```bash
-agentbox init --harness opencode --start
-```
-
-Or set it in the preset's `agent.yaml`:
+Set the harness in `agent.yaml`:
 
 ```yaml
+agent_image: localhost/agentbox-agent-claude:latest
+
 environment:
-  AGENT_HARNESS: opencode
-  AGENT_HARNESS_ARGS: --some-flag
+  AGENT_HARNESS: claude
+  AGENT_HARNESS_ARGS: --dangerously-skip-permissions
 ```
 
-To install a harness not in the base image, derive from it:
+To add a harness not already supported, create a `Containerfile.<name>` in the `agent/` directory:
 
 ```dockerfile
-FROM localhost/agentbox-agent:latest
-RUN npm install -g opencode
+FROM localhost/agentbox-agent-base:latest
+RUN npm install -g my-agent
 ```
 
-Then `agentbox build`.
+Then `agentbox build <name>` or `agentbox build` to build all images.
 
 ---
 
@@ -202,5 +228,6 @@ Then `agentbox build`.
 
 ```bash
 git -C ~/.local/share/agentbox pull
-agentbox update    # rebuild images without cache
+agentbox update              # rebuild all images without cache
+agentbox update claude       # rebuild only the claude harness image
 ```
