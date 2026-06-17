@@ -115,7 +115,7 @@ agentbox mount add ~/libs/shared-lib [--name NAME]        # read-only (default)
 agentbox mount add -w ~/data/scratch [--name NAME]        # writable
 agentbox mount remove shared-lib     [--name NAME]
 agentbox mount list                  [--name NAME]
-agentbox start                                             # restart to apply
+agentbox start                                            # restart to apply
 ```
 
 ### Retrieving output
