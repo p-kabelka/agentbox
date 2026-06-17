@@ -2,6 +2,12 @@
 
 agent_image: localhost/agentbox-agent-claude:latest
 
+# OCI annotations applied to the agent container.
+# Useful for setting krun resource limits (memory, CPUs).
+# annotations:
+#   krun.ram_mib: "2048"
+#   krun.cpus: "2"
+
 # Extra environment variables injected into the agent container.
 # These are merged with (and can override) the base env in compose-base.yaml.
 environment:

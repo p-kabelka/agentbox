@@ -236,6 +236,10 @@ def generate_compose(
     agent_env["AGENTBOX_NAME"] = name
     agent["environment"] = agent_env
 
+    agent_annotations = agent_cfg.get("annotations") or {}
+    if agent_annotations:
+        agent["annotations"] = agent_annotations
+
     save_yaml(session_dir / "compose.yaml", base)
 
 
