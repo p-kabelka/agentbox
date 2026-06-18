@@ -49,6 +49,27 @@ dotfiles:
     alias agent="$AGENT_HARNESS $AGENT_HARNESS_ARGS"
     alias ll="ls -lasp"
     alias g="git"
+
+    # Cursor CLI settings: ~/.cursor/cli-config.json
+    _cursor_cli_config="$HOME/.cursor/cli-config.json"
+    if ! jq -e '.rewind == true and .approvalMode == "unrestricted"' "$_cursor_cli_config" &>/dev/null; then
+      mkdir -p "$HOME/.cursor" 2>/dev/null || true
+      if [ -f "$_cursor_cli_config" ]; then
+        jq '. * {rewind: true, approvalMode: "unrestricted"}' "$_cursor_cli_config" > "${_cursor_cli_config}.tmp" && cp -f "${_cursor_cli_config}.tmp" "$_cursor_cli_config" && rm -f "${_cursor_cli_config}.tmp"
+      else
+        echo '{"rewind": true, "approvalMode": "unrestricted"}' > "$_cursor_cli_config"
+      fi
+    fi
+
+    # Pre-trust the workspace: ~/.cursor/projects/<project_name>/.workspace-trusted
+    _cursor_ws="$(pwd)"
+    _cursor_project_name="$(basename "$(realpath "$_cursor_ws")")"
+    _cursor_trust_dir="$HOME/.cursor/projects/$_cursor_project_name"
+    _cursor_trust_file="$_cursor_trust_dir/.workspace-trusted"
+    if ! jq -e --arg workspace "$_cursor_ws" '.workspacePath == $workspace' "$_cursor_trust_file" &>/dev/null; then
+      mkdir -p "$_cursor_trust_dir" 2>/dev/null || true
+      jq -n --arg workspace "$_cursor_ws" '{workspacePath: $workspace}' > "$_cursor_trust_file"
+    fi
   .gitconfig: |
     [user]
         name = Agent
