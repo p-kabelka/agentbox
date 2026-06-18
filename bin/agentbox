@@ -274,7 +274,7 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
     elif gh_token:
         secret_args = ["--secret", f"id=gh_token,env=_AGENTBOX_GH_TOKEN"]
     else:
-        print("Warning: no GH_TOKEN found, opencode build will fail without attestation verification\n"
+        die("Error: no GH_TOKEN found, opencode build will fail without attestation verification\n"
               "         Set AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1 to skip verification")
 
     for tag, ctx, containerfile in [
