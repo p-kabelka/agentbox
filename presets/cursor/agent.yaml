@@ -1,0 +1,55 @@
+# Agent preset — copied to .agentbox/sessions/<name>/config/agent.yaml on 'agentbox init --name <name>'.
+
+agent_image: localhost/agentbox-agent-cursor:latest
+
+# OCI annotations applied to the agent container.
+# Useful for setting krun resource limits (memory, CPUs).
+# annotations:
+#   krun.ram_mib: "2048"
+#   krun.cpus: "2"
+
+# Extra environment variables injected into the agent container.
+# These are merged with (and can override) the base env in compose-base.yaml.
+environment:
+  AGENT_HARNESS: agent
+  AGENT_HARNESS_ARGS:
+
+# Dotfiles placed in the agent's $HOME at session start.
+# Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
+dotfiles:
+  .bashrc: |
+    # .bashrc
+
+    # Source global definitions
+    if [ -f /etc/bashrc ]; then
+        . /etc/bashrc
+    fi
+
+    # User specific environment
+    if ! [[ "$PATH" =~ "$HOME/.local/bin:$HOME/bin:" ]]; then
+        PATH="$HOME/.local/bin:$HOME/bin:$PATH"
+    fi
+    export PATH
+
+    # Uncomment the following line if you don't like systemctl's auto-paging feature:
+    # export SYSTEMD_PAGER=
+
+    # User specific aliases and functions
+    if [ -d ~/.bashrc.d ]; then
+        for rc in ~/.bashrc.d/*; do
+            if [ -f "$rc" ]; then
+                . "$rc"
+            fi
+        done
+    fi
+    unset rc
+
+    # CUSTOM
+    export EDITOR=vim
+    alias agent="$AGENT_HARNESS $AGENT_HARNESS_ARGS"
+    alias ll="ls -lasp"
+    alias g="git"
+  .gitconfig: |
+    [user]
+        name = Agent
+        email = agent@agentbox
