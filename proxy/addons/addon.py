@@ -117,7 +117,7 @@ class AgentboxAddon:
         await writer.drain()
         writer.close()
 
-    def request(self, flow: http.HTTPFlow) -> None:
+    def requestheaders(self, flow: http.HTTPFlow) -> None:
         cfg = self._cfg
         host = flow.request.pretty_host
         if not any(fnmatch.fnmatch(host, p) for p in cfg.allowed):
@@ -135,7 +135,14 @@ class AgentboxAddon:
         for provider in cfg.providers:
             if provider.matches(flow):
                 provider.inject(flow)
-                return
+                break
+
+        if flow.request.headers.get("content-type", "").startswith("application/proto"):
+            flow.request.stream = True
+
+    def responseheaders(self, flow: http.HTTPFlow) -> None:
+        if not flow.metadata.get("agentbox_blocked") and flow.request.headers.get("content-type", "").startswith("application/proto"):
+            flow.response.stream = True
 
     def response(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("agentbox_blocked"):
