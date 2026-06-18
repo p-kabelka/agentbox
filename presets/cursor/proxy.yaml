@@ -1,5 +1,20 @@
 # Default provider preset. Copied to .agentbox/sessions/<name>/config/proxy.yaml on 'agentbox run --name <name>'.
 
+providers:
+  - name: cursor
+    enabled: true
+    credential_type: oauth
+    metadata_server: false
+    inject_header: Authorization
+    inject_prefix: "Bearer "
+    replace_token: "dummy-replaced-by-proxy"
+    allowed_hosts:
+      - "api2.cursor.sh"
+      - "agentn.us.api5.cursor.sh"
+      - "repo42.cursor.sh"
+    path_prefixes:
+      - "/aiserver.v1.*"
+
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts:
   - "fedora.mirror-services.net"
@@ -53,9 +68,6 @@ extra_allowed_hosts:
   - "mirrors.ircam.fr"
   - "distrohub.kyiv.ua"
   - "ftp.otenet.gr"
-  - "api2.cursor.sh"
-  - "agentn.us.api5.cursor.sh"
-  - "repo42.cursor.sh"
 
 # Extra environment variables for the proxy container. Merged with compose-base.yaml.
 # environment:
