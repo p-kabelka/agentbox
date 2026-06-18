@@ -137,11 +137,11 @@ class AgentboxAddon:
                 provider.inject(flow)
                 break
 
-        if flow.request.headers.get("content-type", "").startswith("application/proto"):
+        if any(flow.request.headers.get("content-type", "").startswith(content_type) for content_type in ["application/proto", "application/x-protobuf"]):
             flow.request.stream = True
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
-        if not flow.metadata.get("agentbox_blocked") and flow.request.headers.get("content-type", "").startswith("application/proto"):
+        if not flow.metadata.get("agentbox_blocked") and any(flow.request.headers.get("content-type", "").startswith(content_type) for content_type in ["application/proto", "application/x-protobuf"]):
             flow.response.stream = True
 
     def response(self, flow: http.HTTPFlow) -> None:

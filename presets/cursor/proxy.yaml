@@ -3,17 +3,19 @@
 providers:
   - name: cursor
     enabled: true
-    credential_type: oauth
-    metadata_server: false
+    credential_type: static
+    api_key_file: ~/.keys/cursor-token
     inject_header: Authorization
     inject_prefix: "Bearer "
-    replace_token: "dummy-replaced-by-proxy"
+    replace_token: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJhdXRoMHx1c2VyX1hYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYIiwidGltZSI6IjE3ODE3ODY1NDkiLCJyYW5kb21uZXNzIjoiWFhYWFhYWFhYWFhYWFhYWFhYIiwiZXhwIjozMjUwMzY3NjQwMCwiaXNzIjoiaHR0cHM6Ly9hdXRoZW50aWNhdGlvbi5jdXJzb3Iuc2giLCJzY29wZSI6Im9wZW5pZCBwcm9maWxlIGVtYWlsIG9mZmxpbmVfYWNjZXNzIiwiYXVkIjoiaHR0cHM6Ly9jdXJzb3IuY29tIiwidHlwZSI6InNlc3Npb24ifQ==.Bgb2AAp6RYS/oJdGtYNgsuodUB5Wd69UqUPurQobzoM="
     allowed_hosts:
       - "api2.cursor.sh"
       - "agentn.us.api5.cursor.sh"
       - "repo42.cursor.sh"
     path_prefixes:
       - "/aiserver.v1.*"
+      - "/agent.v1.*"
+      - "/v1/traces"
 
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts:
