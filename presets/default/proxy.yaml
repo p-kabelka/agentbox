@@ -13,8 +13,10 @@ providers:
       - api.anthropic.com
     path_prefixes:
       - /v1/messages
+      - /v1/messages/*
       - /v1/complete
       - /v1/models
+      - /v1/models/*
 
   - name: openai
     enabled: false
@@ -29,6 +31,7 @@ providers:
       - /v1/completions
       - /v1/embeddings
       - /v1/responses
+      - /v1/responses/*
 
   # Requires credentials at ~/.agentbox/secrets/credentials.json
   - name: vertex
@@ -42,7 +45,7 @@ providers:
       - "aiplatform.googleapis.com"
       - "*-aiplatform.googleapis.com"
     path_prefixes:
-      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/"
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/*"
 
   # Azure: uncomment and set api_key_env + allowed_hosts to add Azure OpenAI
   # - name: azure-openai
@@ -54,7 +57,7 @@ providers:
   #   allowed_hosts:
   #     - "*.openai.azure.com"
   #   path_prefixes:
-  #     - /openai/deployments/
+  #     - /openai/deployments/*
 
 # Custom trusted CA certificates (filenames from custom/certs/). Installed into
 # the proxy's system trust store at startup so mitmproxy trusts upstream servers
@@ -62,6 +65,13 @@ providers:
 # and they must have .crt extension for update-ca-certificates to find them.
 # trusted_certificates:
 #   - my-internal-ca.pem
+
+# Volumes to mount into the proxy container for credentials.
+# Each entry has 'src' (host path, ~ expanded) and 'dst' (container path).
+# All mounts are read-only.
+# proxy_volumes:
+#   - src: "~/.config/gcloud"
+#     dst: "/root/.config/gcloud"
 
 # Additional egress hosts (exact or *.wildcard). Changes take effect automatically.
 extra_allowed_hosts: []

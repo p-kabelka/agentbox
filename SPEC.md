@@ -86,7 +86,7 @@ The agent container has `GCE_METADATA_HOST` pointed at the proxy's metadata serv
 
 2. When the agent sends a request to the Vertex inference endpoint carrying the dummy token in its `Authorization` header, the proxy intercepts it. The proxy obtains a real OAuth 2.0 access token using credentials available only on the proxy side (via `GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials), and replaces the dummy token before forwarding the request upstream.
 
-The long-lived credential (service account key or refresh token) never enters the agent container.
+The long-lived credential (service account key or refresh token) never enters the agent container. The credential directory (e.g., `~/.config/gcloud`) is mounted into the proxy container via the preset's `proxy_volumes` configuration, keeping provider-specific mount logic out of the agentbox manager.
 
 ### 4.3 Traffic Mediation
 
@@ -94,7 +94,7 @@ All agent traffic passes through a TLS-intercepting proxy. The proxy terminates 
 
 **Allowlist enforcement:** Each request's destination hostname is checked against a configurable allowlist built from enabled provider hosts and extra allowed hosts. Non-listed hosts receive an HTTP 403 response; the upstream connection is never opened. The 403 response includes the blocked hostname and a suggested `agentbox allow` command.
 
-**Credential injection:** For requests to allowed provider endpoints, the proxy injects real credentials into the appropriate request header. Injection is scoped by host pattern, path prefix, and optionally a token-replacement check, ensuring credentials are only injected on actual API calls — not on arbitrary requests to the same host.
+**Credential injection:** For requests to allowed provider endpoints, the proxy injects real credentials into the appropriate request header. Injection is scoped by host pattern (fnmatch), path pattern (fnmatch), and optionally a token-replacement check, ensuring credentials are only injected on actual API calls — not on arbitrary requests to the same host.
 
 **Allowlist updates:** The allowlist can be modified at runtime via `agentbox allow` and `agentbox deny` without restarting the proxy or dropping active connections. This is important because interrupting an LLM inference request mid-stream may not be recoverable.
 
@@ -185,10 +185,12 @@ providers:
     inject_prefix: ""              # prefix before the credential value (e.g., "Bearer ")
     allowed_hosts:                 # hosts this provider's requests may reach
       - api.anthropic.com
-    path_prefixes:                 # only inject credentials on requests matching these paths
+    path_prefixes:                 # only inject credentials on requests matching these paths (fnmatch patterns)
       - /v1/messages
+      - /v1/messages/*
       - /v1/complete
       - /v1/models
+      - /v1/models/*
 
   - name: vertex
     enabled: true
@@ -201,7 +203,12 @@ providers:
       - "aiplatform.googleapis.com"
       - "*-aiplatform.googleapis.com"
     path_prefixes:
-      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/"
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/*"
+
+# Volumes to mount into the proxy container for credentials.
+# proxy_volumes:
+#   - src: "~/.config/gcloud"
+#     dst: "/root/.config/gcloud"
 
 # Custom CA certificates (filenames from custom/certs/)
 # trusted_certificates:
@@ -235,7 +242,15 @@ logging:
 | `replace_token` | No | If set, only inject when this token value is found in the header (oauth type) |
 | `metadata_server` | No | Start fake GCE metadata server for this provider (oauth type) |
 | `allowed_hosts` | Yes | Hostname patterns (fnmatch) that this provider's requests may reach |
-| `path_prefixes` | No | Only inject credentials on requests whose path starts with one of these prefixes |
+| `path_prefixes` | No | Only inject credentials on requests whose path matches one of these fnmatch patterns |
+
+**Top-level proxy.yaml fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `proxy_volumes` | No | List of `{src, dst}` volume mounts for the proxy container (e.g., credential directories). All mounts are read-only. `src` supports `~` expansion. |
+| `extra_allowed_hosts` | No | Additional egress hostnames (exact or fnmatch wildcard patterns) |
+| `trusted_certificates` | No | Filenames from `custom/certs/` to install into the proxy's system trust store |
 
 ### 6.4 Agent Configuration (`agent.yaml`)
 

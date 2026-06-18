@@ -12,7 +12,14 @@ providers:
       - "aiplatform.googleapis.com"
       - "*-aiplatform.googleapis.com"
     path_prefixes:
-      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/"
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/*"
+
+# Volumes to mount into the proxy container for credentials.
+# Each entry has 'src' (host path, ~ expanded) and 'dst' (container path).
+# All mounts are read-only.
+proxy_volumes:
+  - src: "~/.config/gcloud"
+    dst: "/root/.config/gcloud"
 
 # Additional egress hosts (exact or *.wildcard). Restart proxy after changes.
 extra_allowed_hosts:

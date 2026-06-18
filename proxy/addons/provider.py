@@ -22,7 +22,7 @@ class Provider:
         if not any(fnmatch.fnmatch(host, p) for p in self.allowed_hosts):
             return False
         if self.path_prefixes and not any(
-            flow.request.path.startswith(p) for p in self.path_prefixes
+            fnmatch.fnmatch(flow.request.path, p) for p in self.path_prefixes
         ):
             return False
         if self._replace_token:

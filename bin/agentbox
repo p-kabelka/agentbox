@@ -169,14 +169,13 @@ def generate_compose(
     proxy_volumes: list = proxy.get("volumes", [])
     proxy_volumes.append("./proxy.yaml:/config/proxy.yaml:ro,Z")
 
-    vertex_enabled = any(
-        p.get("name") == "vertex" and p.get("enabled")
-        for p in proxy_cfg.get("providers", [])
-    )
-    if vertex_enabled:
-        gcloud = Path.home() / ".config" / "gcloud"
-        if gcloud.is_dir():
-            proxy_volumes.append(f"{gcloud}:/root/.config/gcloud:ro,Z")
+    for vol in proxy_cfg.get("proxy_volumes", []):
+        src = Path(vol["src"]).expanduser().resolve()
+        dst = vol["dst"]
+        if src.exists():
+            proxy_volumes.append(f"{src}:{dst}:ro,Z")
+        else:
+            print(f"Warning: proxy_volumes source not found: {src}")
 
     for cert_name in proxy_cfg.get("trusted_certificates", []):
         cert_path = AGENTBOX_HOME / "custom" / "certs" / cert_name
