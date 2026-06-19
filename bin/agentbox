@@ -434,7 +434,6 @@ def cmd_init(args) -> None:
         proxy_cfg = load_yaml(proxy_src)
         proxy_cfg.pop("environment", None)
         save_yaml(proxy_file, proxy_cfg)
-        print(f"    Copied preset '{args.preset}' — edit proxy.yaml in session directory to enable providers.")
 
     proxy_cfg = load_yaml(proxy_src)
     agent_src = resolve_preset_file(preset_dir, "agent.yaml")
@@ -492,9 +491,9 @@ def cmd_init(args) -> None:
                 subprocess.run(["git", "-C", str(project_dir), "remote", "set-url", remote, str(output_git.resolve())], check=True)
             else:
                 subprocess.run(["git", "-C", str(project_dir), "remote", "add", remote, str(output_git.resolve())], check=True)
-            print(f"    Git remote '{remote}' registered — 'git fetch {remote}' to review output mid-session.")
+            print(f"==> Git remote '{remote}' registered — 'git fetch {remote}' to review output mid-session.")
         else:
-            print("    No git repo found; falling back to --no-git mode.")
+            print("==> No git repo found; falling back to --no-git mode.")
             use_git = False
 
     # Preserve existing context mounts from compose.yaml, then add any new ones from args
@@ -535,9 +534,9 @@ def cmd_init(args) -> None:
     if args.start:
         _launch(session_dir)
     else:
-        print(f"  Initialized. Run 'agentbox start --name {name}' to start")
-        print(f"  or start a tmux session:")
-        print(f"  agentbox start --name {name} -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 'agent' Enter")
+        print(f"==> Initialized. Run 'agentbox start --name {name}' to start")
+        print(f"==> or start a tmux session:")
+        print(f"agentbox start --name {name} -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 'agent' Enter")
 
 
 def cmd_start(args) -> None:
