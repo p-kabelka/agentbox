@@ -56,10 +56,7 @@ def _session_id(name: str, project_dir: Path) -> str:
 
 def find_project_dir() -> Path:
     """Find the project root by walking up from cwd to the git root, or cwd itself."""
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True, text=True,
-    )
+    result = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     if result.returncode == 0 and result.stdout.strip():
         return Path(result.stdout.strip())
     return Path.cwd()
@@ -298,9 +295,7 @@ def _resolve_gh_token() -> str | None:
     if token:
         return token
     try:
-        result = subprocess.run(
-            ["gh", "auth", "token"], capture_output=True, text=True, timeout=5,
-        )
+        result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True, timeout=5)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
     except (FileNotFoundError, subprocess.TimeoutExpired):
@@ -323,16 +318,13 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
         secret_args = ["--secret", f"id=gh_token,env=_AGENTBOX_GH_TOKEN"]
     else:
         die("Error: no GH_TOKEN found, opencode build will fail without attestation verification\n"
-              "         Set AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1 to skip verification")
+            "       Set AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1 to skip verification")
 
     for tag, ctx, containerfile in [
         ("localhost/agentbox-proxy:latest", AGENTBOX_HOME / "proxy", "Containerfile"),
         ("localhost/agentbox-agent-base:latest", agent_ctx, "Containerfile.base"),
     ]:
-        subprocess.run(
-            ["podman", "build", *extra, "-f", str(ctx / containerfile), "-t", tag, str(ctx)],
-            check=True,
-        )
+        subprocess.run(["podman", "build", *extra, "-f", str(ctx / containerfile), "-t", tag, str(ctx)], check=True)
 
     targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
     build_env = dict(os.environ)
@@ -391,15 +383,9 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     output_git = session_dir / "output.git"
     if output_git.is_dir():
         print(f"\n==> Fetching agent output (agentbox-{name})...")
-        r = subprocess.run(
-            ["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null",
-             "fetch", f"agentbox-{name}"],
-        )
+        r = subprocess.run(["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null", "fetch", f"agentbox-{name}"])
         if r.returncode == 0:
-            ls = subprocess.run(
-                ["git", "-C", str(project_dir), "branch", "-r", "--list", f"agentbox-{name}/*"],
-                capture_output=True, text=True,
-            )
+            ls = subprocess.run(["git", "-C", str(project_dir), "branch", "-r", "--list", f"agentbox-{name}/*"], capture_output=True, text=True)
             branches = [b.strip() for b in ls.stdout.splitlines() if b.strip()]
             for b in branches:
                 print(f"  {b}")
@@ -448,23 +434,14 @@ def cmd_init(args) -> None:
 
     use_git = not args.no_git
     if use_git:
-        in_repo = subprocess.run(
-            ["git", "-C", str(project_dir), "rev-parse", "--git-dir"],
-            capture_output=True,
-        ).returncode == 0
+        in_repo = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "--git-dir"], capture_output=True).returncode == 0
 
         if in_repo:
             branch = args.branch
             if not branch:
-                branch = subprocess.run(
-                    ["git", "-C", str(project_dir), "branch", "--show-current"],
-                    capture_output=True, text=True,
-                ).stdout.strip()
+                branch = subprocess.run(["git", "-C", str(project_dir), "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
             if not branch:  # detached HEAD
-                branch = subprocess.run(
-                    ["git", "-C", str(project_dir), "rev-parse", "--short", "HEAD"],
-                    capture_output=True, text=True, check=True,
-                ).stdout.strip()
+                branch = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
                 print(f"    Detached HEAD — snapshotting commit {branch}")
 
             print(f"==> Creating source bundle (branch: {branch})...")
@@ -614,8 +591,7 @@ def cmd_remove(args) -> None:
     compose(session_dir, "down", "-v", check=True)
 
     remote = f"agentbox-{name}"
-    subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote],
-                   capture_output=True)  # best-effort; may not be a git repo
+    subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote], capture_output=True)  # best-effort; may not be a git repo
 
     shutil.rmtree(session_dir, ignore_errors=True)
 
@@ -652,10 +628,7 @@ def cmd_remote_cleanup(args) -> None:
     removed = 0
     for remote in stale:
         print(f"Removing stale remote '{remote}'...")
-        if subprocess.run(
-            ["git", "-C", str(project_dir), "remote", "remove", remote],
-            capture_output=True,
-        ).returncode == 0:
+        if subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote], capture_output=True).returncode == 0:
             removed += 1
         else:
             print(f"  Warning: failed to remove remote '{remote}'")
@@ -720,10 +693,7 @@ def cmd_mount(args) -> None:
 
 def _list_sessions(show_all: bool) -> list[dict]:
     """Collect session info dicts for listing."""
-    running = subprocess.run(
-        ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
-    ).stdout.lower()
+    running = subprocess.run(["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"], capture_output=True, text=True).stdout.lower()
 
     entries: list[dict] = []
 
@@ -793,7 +763,7 @@ def cmd_list(args) -> None:
 
     if not entries:
         if not show_all:
-            print("No sessions. Run: agentbox init --name <name>")
+            print("No sessions in current project. Run: agentbox init --name <name>")
         else:
             print("No sessions.")
         return
@@ -810,9 +780,7 @@ def cmd_list(args) -> None:
 
 def cmd_status(args) -> None:
     result = subprocess.run(
-        ["podman", "ps",
-         "--filter", "label=com.docker.compose.project",
-         "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"],
+        ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"],
         capture_output=True, text=True,
     )
     lines = [ln for ln in result.stdout.splitlines() if "agentbox" in ln.lower()]
@@ -901,13 +869,13 @@ def main() -> None:
     mount_subcommand = subparser_with_name(subcommand.add_parser("mount", help="Manage read-only reference mounts for a session"))
 
     mount_subparser = mount_subcommand.add_subparsers(dest="subcmd")
-    subparser_with_name(mount_subparser.add_parser("list"))
+    mount_subparser.add_parser("list")
 
-    mount_add = subparser_with_name(mount_subparser.add_parser("add"))
+    mount_add = mount_subparser.add_parser("add")
     mount_add.add_argument("spec", metavar="SRC[:DST]")
     mount_add.add_argument("-w", "--writable", action="store_true", help="Mount read-write instead of read-only")
 
-    mount_remove = subparser_with_name(mount_subparser.add_parser("remove"))
+    mount_remove = mount_subparser.add_parser("remove")
     mount_remove.add_argument("dst", metavar="DST")
 
     preset_subcommand = subcommand.add_parser("preset", help="Manage presets")
