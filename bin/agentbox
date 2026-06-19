@@ -386,9 +386,6 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     name = meta["name"]
     project_dir = Path(meta["project-dir"])
     compose(session_dir, "up", "-d", "proxy", check=True)
-    web_port = read_port(session_dir)
-    if web_port:
-        print(f"  Traffic monitor: http://localhost:{web_port} | agentbox logs | git fetch agentbox-{name}")
     result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
     # Auto-fetch when the session ends
     output_git = session_dir / "output.git"
