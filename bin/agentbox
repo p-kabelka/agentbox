@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import re
 import shutil
@@ -98,6 +99,24 @@ def require_session(project_dir: Path, name: str | None) -> Path:
     else:
         die(f"Multiple sessions ({', '.join(sessions)}) — specify: --name <name>")
     raise AssertionError  # unreachable
+
+
+def resolve_session(args) -> tuple[Path, Path]:
+    """Resolve session_dir and project_dir from --session or --name flag."""
+    session_id = getattr(args, "session", None)
+    name = getattr(args, "name", None)
+    if session_id and name:
+        die("--session and --name are mutually exclusive")
+    if session_id:
+        d = AGENTBOX_STATE / "sessions" / session_id
+        if not d.is_dir():
+            die(f"session '{session_id}' not found — run: agentbox list --all")
+        meta = read_compose_metadata(d)
+        if not meta:
+            die(f"session '{session_id}' has no valid compose.yaml metadata")
+        return d, Path(meta["project-dir"])
+    project_dir = find_project_dir()
+    return require_session(project_dir, name), project_dir
 
 
 def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
@@ -522,37 +541,32 @@ def cmd_init(args) -> None:
 
 
 def cmd_start(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
     cmd = [a for a in (args.exec_cmd or [])] or None
     _launch(session_dir, cmd)
 
 
 def cmd_stop(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
     compose(session_dir, "down", check=True)
 
 
 def cmd_logs(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
     result = compose(session_dir, "logs", "--follow", "--tail=100", "proxy")
     sys.exit(result.returncode)
 
 
 def cmd_web(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
     web_port = read_port(session_dir)
     if not web_port:
         die("proxy port not found in session compose.yaml")
     print(f"http://localhost:{web_port}")
 
 
-def _update_allowlist(host: str, add: bool, name: str | None) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, name)
+def _update_allowlist(host: str, add: bool, args) -> None:
+    session_dir, _ = resolve_session(args)
     config_path = session_dir / "proxy.yaml"
     cfg = load_yaml(config_path)
     hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
@@ -577,33 +591,29 @@ def _update_allowlist(host: str, add: bool, name: str | None) -> None:
 
 
 def cmd_allow(args) -> None:
-    _update_allowlist(args.host, add=True, name=args.name)
+    _update_allowlist(args.host, add=True, args=args)
 
 
 def cmd_deny(args) -> None:
-    _update_allowlist(args.host, add=False, name=args.name)
+    _update_allowlist(args.host, add=False, args=args)
 
 
 def cmd_proxy_reload(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
     compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "http://localhost:8082/reload", check=True)
     print("Proxy config reloaded.")
 
 
 def cmd_proxy_restart(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
     compose(session_dir, "restart", "proxy", check=True)
     wait_healthy(session_dir)
 
 
 def cmd_remove(args) -> None:
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, project_dir = resolve_session(args)
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
-    project_dir = Path(meta["project-dir"])
 
     compose(session_dir, "down", "-v", check=True)
 
@@ -673,8 +683,7 @@ def _read_context_mounts(session_dir: Path) -> list[tuple[str, str, bool]]:
 
 def cmd_mount(args) -> None:
     sub = args.subcmd or "list"
-    project_dir = find_project_dir()
-    session_dir = require_session(project_dir, args.name)
+    session_dir, _ = resolve_session(args)
 
     if sub == "list":
         mounts = _read_context_mounts(session_dir)
@@ -713,55 +722,94 @@ def cmd_mount(args) -> None:
         print(f"Removed /context/{args.dst}. Start the session to apply.")
 
 
-def cmd_list(args) -> None:
-    show_all = getattr(args, "all", False)
+def _list_sessions(show_all: bool) -> list[dict]:
+    """Collect session info dicts for listing."""
+    running = subprocess.run(
+        ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
+        capture_output=True, text=True,
+    ).stdout.lower()
+
+    entries: list[dict] = []
 
     if show_all:
-        # List all sessions across all projects
         sessions_dir = AGENTBOX_STATE / "sessions"
         if not sessions_dir.is_dir():
-            print("No sessions.")
-            return
-        entries = []
+            return []
         for d in sorted(sessions_dir.iterdir()):
             if not d.is_dir():
                 continue
             meta = read_compose_metadata(d)
             if not meta:
                 continue
-            entries.append((meta["name"], Path(meta["project-dir"]), d))
-        if not entries:
-            print("No sessions.")
-            return
-        running = subprocess.run(
-            ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
-            capture_output=True, text=True,
-        ).stdout.lower()
-        for name, proj_dir, session_dir in entries:
+            name = meta["name"]
+            proj_dir = Path(meta["project-dir"])
             pname_prefix = f"agentbox-{project_name(proj_dir)}"
-            port = read_port(session_dir)
+            port = read_port(d)
             active = f"{pname_prefix}-{name}_" in running
-            status = "running" if active else "stopped"
-            port_info = f"  http://localhost:{port}" if port and active else ""
-            print(f"  {name}  [{status}]{port_info}  ({proj_dir})")
+            url = f"http://localhost:{port}" if port and active else ""
+            entries.append({
+                "name": name,
+                "status": "running" if active else "stopped",
+                "url": url,
+                "project": str(proj_dir),
+                "session_id": d.name,
+            })
     else:
         project_dir = find_project_dir()
         sessions = get_sessions(project_dir)
-        if not sessions:
-            print("No sessions. Run: agentbox init --name <name>")
-            return
-        running = subprocess.run(
-            ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
-            capture_output=True, text=True,
-        ).stdout.lower()
         pname_prefix = f"agentbox-{project_name(project_dir)}"
         for s in sessions:
-            session_dir = AGENTBOX_STATE / "sessions" / _session_id(s, project_dir)
+            sid = _session_id(s, project_dir)
+            session_dir = AGENTBOX_STATE / "sessions" / sid
             port = read_port(session_dir)
             active = f"{pname_prefix}-{s}_" in running
-            status = "running" if active else "stopped"
-            port_info = f"  http://localhost:{port}" if port and active else ""
-            print(f"  {s}  [{status}]{port_info}")
+            url = f"http://localhost:{port}" if port and active else ""
+            entries.append({
+                "name": s,
+                "status": "running" if active else "stopped",
+                "url": url,
+                "session_id": sid,
+            })
+
+    return entries
+
+
+def _print_table(rows: list[list[str]], headers: list[str]) -> None:
+    """Print a formatted table with column-aligned output."""
+    widths = [len(h) for h in headers]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*headers))
+    for row in rows:
+        print(fmt.format(*row))
+
+
+def cmd_list(args) -> None:
+    show_all = getattr(args, "all", False)
+    as_json = getattr(args, "json", False)
+    entries = _list_sessions(show_all)
+
+    if as_json:
+        print(json.dumps(entries, indent=2))
+        return
+
+    if not entries:
+        if not show_all:
+            print("No sessions. Run: agentbox init --name <name>")
+        else:
+            print("No sessions.")
+        return
+
+    if show_all:
+        headers = ["NAME", "STATUS", "URL", "PROJECT", "SESSION ID"]
+        rows = [[e["name"], e["status"], e["url"], e["project"], e["session_id"]] for e in entries]
+    else:
+        headers = ["NAME", "STATUS", "URL", "SESSION ID"]
+        rows = [[e["name"], e["status"], e["url"], e["session_id"]] for e in entries]
+
+    _print_table(rows, headers)
 
 
 def cmd_status(args) -> None:
@@ -811,6 +859,7 @@ def cmd_preset(args) -> None:
 def main() -> None:
     def subparser_with_name(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         p.add_argument("--name", "-n", metavar="NAME", help="Session name (auto-detected if only one session exists)")
+        p.add_argument("--session", "-s", metavar="SESSION_ID", help="Full session ID (from 'agentbox list --all'); works from any directory")
         return p
 
     parser = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
@@ -822,8 +871,10 @@ def main() -> None:
     update_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to rebuild (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
     list_subcommand = subcommand.add_parser("list", help="List sessions for the current project")
     list_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
+    list_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
     ls_subcommand = subcommand.add_parser("ls", help="Alias for list")
     ls_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
+    ls_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
     subcommand.add_parser("status", help="List running agentbox containers")
 
     init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")

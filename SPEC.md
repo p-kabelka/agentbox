@@ -123,12 +123,12 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 | Group | Commands |
 |-------|----------|
 | Setup | `build [HARNESS...]`, `update [HARNESS...]`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
-| Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [--name NAME] [-- CMD]`, `stop [--name NAME]`, `remove [--name NAME]` |
-| Monitoring | `logs [--name NAME]`, `web [--name NAME]` |
-| Egress control | `allow <host> [--name NAME]`, `deny <host> [--name NAME]` |
-| Proxy management | `proxy-reload [--name NAME]`, `proxy-restart [--name NAME]` |
-| Reference mounts | `mount list [--name NAME]`, `mount add [-w] <SRC[:DST]> [--name NAME]`, `mount remove <DST> [--name NAME]` |
-| Observation | `status`, `list [--all]` / `ls [--all]` |
+| Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
+| Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
+| Egress control | `allow <host> [-n NAME \| -s ID]`, `deny <host> [-n NAME \| -s ID]` |
+| Proxy management | `proxy-reload [-n NAME \| -s ID]`, `proxy-restart [-n NAME \| -s ID]` |
+| Reference mounts | `mount list [-n NAME \| -s ID]`, `mount add [-w] <SRC[:DST]> [-n NAME \| -s ID]`, `mount remove <DST> [-n NAME \| -s ID]` |
+| Observation | `status`, `list [--all] [--json]` / `ls [--all] [--json]` |
 | Maintenance | `remote-cleanup` |
 
 ### 5.2 Key Command Behaviors
@@ -143,7 +143,9 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 
 `agentbox remote-cleanup` removes stale `agentbox-*` git remotes that no longer have a corresponding session directory.
 
-All commands that operate on a specific session accept `--name <name>`. If the project has exactly one session, `--name` is optional and the session is auto-detected.
+All commands that operate on a specific session accept `--name <name>` (project-relative lookup) or `--session <session_id>` (global lookup by full session ID, works from any directory). The two flags are mutually exclusive. If the project has exactly one session, both are optional and the session is auto-detected. Session IDs are shown in the `list` output and can be used to manage sessions from any working directory.
+
+`agentbox list` and `agentbox ls` output a formatted table. With `--all`, sessions from all projects are shown with their project directory. With `--json`, the output is a JSON array for machine parsing.
 
 ---
 
