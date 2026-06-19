@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import shutil
@@ -18,6 +19,9 @@ import yaml
 
 AGENTBOX_HOME   = Path(os.environ.get("AGENTBOX_HOME", Path.home() / ".local" / "share" / "agentbox"))
 AGENTBOX_PRESET = os.environ.get("AGENTBOX_PRESET", "default")
+
+_state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
+AGENTBOX_STATE = Path(os.environ.get("AGENTBOX_STATE", _state_home / "agentbox"))
 
 HARNESS_CONTAINERFILES = {
     p.name.split(".", 1)[1]: p.name
@@ -43,39 +47,52 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def find_agentbox_dir() -> Path | None:
-    d = Path.cwd()
-    while d != d.parent:
-        if (d / ".agentbox" / "sessions").is_dir():
-            return d
-        d = d.parent
-    return None
+def _session_id(name: str, project_dir: Path) -> str:
+    """Deterministic session directory name: <name>-<sha256(project_dir)>."""
+    h = hashlib.sha256(str(project_dir.resolve()).encode()).hexdigest()
+    return f"{name}-{h}"
 
 
-def require_agentbox() -> Path:
-    p = find_agentbox_dir()
-    if p is None:
-        die("no .agentbox/ found in this directory or any parent.\n"
-            "       Run 'agentbox run --name <name>' to create one.")
-    return p  # type: ignore[return-value]
+def find_project_dir() -> Path:
+    """Find the project root by walking up from cwd to the git root, or cwd itself."""
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+    )
+    if result.returncode == 0 and result.stdout.strip():
+        return Path(result.stdout.strip())
+    return Path.cwd()
 
 
 def get_sessions(project_dir: Path) -> list[str]:
-    sessions_dir = project_dir / ".agentbox" / "sessions"
-    return sorted(d.name for d in sessions_dir.iterdir() if d.is_dir()) if sessions_dir.is_dir() else []
+    """Return sorted session names for a given project directory."""
+    sessions_dir = AGENTBOX_STATE / "sessions"
+    if not sessions_dir.is_dir():
+        return []
+    resolved = str(project_dir.resolve())
+    names = []
+    for d in sessions_dir.iterdir():
+        if not d.is_dir():
+            continue
+        meta = read_compose_metadata(d)
+        if not meta:
+            continue
+        if meta.get("project-dir") == resolved:
+            names.append(meta["name"])
+    return sorted(names)
 
 
 def require_session(project_dir: Path, name: str | None) -> Path:
     """Return session_dir, auto-detecting if exactly one session exists."""
-    sessions_dir = project_dir / ".agentbox" / "sessions"
     if name:
-        d = sessions_dir / name
+        session_id = _session_id(name, project_dir)
+        d = AGENTBOX_STATE / "sessions" / session_id
         if not d.is_dir():
             die(f"session '{name}' not found — run: agentbox list")
         return d
     sessions = get_sessions(project_dir)
     if len(sessions) == 1:
-        return sessions_dir / sessions[0]
+        return AGENTBOX_STATE / "sessions" / _session_id(sessions[0], project_dir)
     elif not sessions:
         die("No sessions. Run: agentbox init --name <name>")
     else:
@@ -84,8 +101,9 @@ def require_session(project_dir: Path, name: str | None) -> Path:
 
 
 def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
-    name = session_dir.name
-    project_dir = session_dir.parent.parent.parent
+    meta = read_compose_metadata(session_dir)
+    name = meta["name"]
+    project_dir = Path(meta["project-dir"])
     env = {
         **os.environ,
         "AGENTBOX_HOME": str(AGENTBOX_HOME),
@@ -112,6 +130,12 @@ def wait_healthy(session_dir: Path) -> None:
     print(" timed out!")
     compose(session_dir, "logs", "--tail=40", "proxy")
     sys.exit(1)
+
+
+def read_compose_metadata(session_dir: Path) -> dict:
+    """Read x-metadata from the session's compose.yaml."""
+    compose_cfg = load_yaml(session_dir / "compose.yaml") if (session_dir / "compose.yaml").is_file() else {}
+    return compose_cfg.get("x-metadata", {})
 
 
 def read_port(session_dir: Path) -> int | None:
@@ -161,6 +185,12 @@ def generate_compose(
 ) -> None:
     """Build a unified compose.yaml from compose-base.yaml and preset config."""
     base = load_yaml(AGENTBOX_HOME / "compose-base.yaml")
+
+    # --- Session metadata (Compose extension field) ---
+    base["x-metadata"] = {
+        "project-dir": str(project_dir.resolve()),
+        "name": name,
+    }
 
     # --- Proxy service ---
     proxy = base["services"]["proxy"]
@@ -333,8 +363,9 @@ def cmd_update(args) -> None:
 
 
 def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
-    name = session_dir.name
-    project_dir = session_dir.parent.parent.parent
+    meta = read_compose_metadata(session_dir)
+    name = meta["name"]
+    project_dir = Path(meta["project-dir"])
     compose(session_dir, "up", "-d", "proxy", check=True)
     web_port = read_port(session_dir)
     if web_port:
@@ -363,14 +394,13 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
 
 def cmd_init(args) -> None:
     project_dir = Path(args.dir).resolve() if args.dir else Path.cwd()
-    agentbox_dir = project_dir / ".agentbox"
     name = args.name or time.strftime("%Y%m%d-%H%M%S")
     if not re.match(r"^[a-z0-9][a-z0-9._-]*$", name):
         die(f"invalid session name '{name}' — use lowercase letters, digits, hyphens, dots")
-    session_dir = agentbox_dir / "sessions" / name
+    session_id = _session_id(name, project_dir)
+    session_dir = AGENTBOX_STATE / "sessions" / session_id
 
     print(f"==> Initializing agentbox '{name}': {project_dir}")
-    agentbox_dir.mkdir(parents=True, exist_ok=True)
     session_dir.mkdir(parents=True, exist_ok=True)
 
     proxy_file = session_dir / "proxy.yaml"
@@ -385,7 +415,7 @@ def cmd_init(args) -> None:
         proxy_cfg = load_yaml(proxy_src)
         proxy_cfg.pop("environment", None)
         save_yaml(proxy_file, proxy_cfg)
-        print(f"    Copied preset '{args.preset}' — edit .agentbox/sessions/{name}/proxy.yaml to enable providers.")
+        print(f"    Copied preset '{args.preset}' — edit proxy.yaml in session directory to enable providers.")
 
     proxy_cfg = load_yaml(proxy_src)
     agent_src = resolve_preset_file(preset_dir, "agent.yaml")
@@ -492,27 +522,27 @@ def cmd_init(args) -> None:
 
 
 def cmd_start(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
     cmd = [a for a in (args.exec_cmd or [])] or None
     _launch(session_dir, cmd)
 
 
 def cmd_stop(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
     compose(session_dir, "down", check=True)
 
 
 def cmd_logs(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
     result = compose(session_dir, "logs", "--follow", "--tail=100", "proxy")
     sys.exit(result.returncode)
 
 
 def cmd_web(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
     web_port = read_port(session_dir)
     if not web_port:
@@ -521,12 +551,13 @@ def cmd_web(args) -> None:
 
 
 def _update_allowlist(host: str, add: bool, name: str | None) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, name)
     config_path = session_dir / "proxy.yaml"
     cfg = load_yaml(config_path)
     hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
-    session_name = session_dir.name
+    meta = read_compose_metadata(session_dir)
+    session_name = meta["name"]
     if add:
         if host not in hosts:
             hosts.append(host)
@@ -554,23 +585,25 @@ def cmd_deny(args) -> None:
 
 
 def cmd_proxy_reload(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
     compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "http://localhost:8082/reload", check=True)
     print("Proxy config reloaded.")
 
 
 def cmd_proxy_restart(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
     compose(session_dir, "restart", "proxy", check=True)
     wait_healthy(session_dir)
 
 
 def cmd_remove(args) -> None:
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
-    name = session_dir.name
+    meta = read_compose_metadata(session_dir)
+    name = meta["name"]
+    project_dir = Path(meta["project-dir"])
 
     compose(session_dir, "down", "-v", check=True)
 
@@ -584,9 +617,7 @@ def cmd_remove(args) -> None:
 
 
 def cmd_remote_cleanup(args) -> None:
-    project_dir = find_agentbox_dir()
-    if project_dir is None:
-        project_dir = Path.cwd()
+    project_dir = find_project_dir()
 
     if subprocess.run(
         ["git", "-C", str(project_dir), "rev-parse", "--git-dir"],
@@ -642,7 +673,7 @@ def _read_context_mounts(session_dir: Path) -> list[tuple[str, str, bool]]:
 
 def cmd_mount(args) -> None:
     sub = args.subcmd or "list"
-    project_dir = require_agentbox()
+    project_dir = find_project_dir()
     session_dir = require_session(project_dir, args.name)
 
     if sub == "list":
@@ -683,22 +714,54 @@ def cmd_mount(args) -> None:
 
 
 def cmd_list(args) -> None:
-    project_dir = require_agentbox()
-    sessions = get_sessions(project_dir)
-    if not sessions:
-        print("No sessions. Run: agentbox init --name <name>")
-        return
-    running = subprocess.run(
-        ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
-        capture_output=True, text=True,
-    ).stdout.lower()
-    pname_prefix = f"agentbox-{project_name(project_dir)}"
-    for s in sessions:
-        port = read_port(project_dir / ".agentbox" / "sessions" / s)
-        active = f"{pname_prefix}-{s}_" in running
-        status = "running" if active else "stopped"
-        port_info = f"  http://localhost:{port}" if port and active else ""
-        print(f"  {s}  [{status}]{port_info}")
+    show_all = getattr(args, "all", False)
+
+    if show_all:
+        # List all sessions across all projects
+        sessions_dir = AGENTBOX_STATE / "sessions"
+        if not sessions_dir.is_dir():
+            print("No sessions.")
+            return
+        entries = []
+        for d in sorted(sessions_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            meta = read_compose_metadata(d)
+            if not meta:
+                continue
+            entries.append((meta["name"], Path(meta["project-dir"]), d))
+        if not entries:
+            print("No sessions.")
+            return
+        running = subprocess.run(
+            ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
+            capture_output=True, text=True,
+        ).stdout.lower()
+        for name, proj_dir, session_dir in entries:
+            pname_prefix = f"agentbox-{project_name(proj_dir)}"
+            port = read_port(session_dir)
+            active = f"{pname_prefix}-{name}_" in running
+            status = "running" if active else "stopped"
+            port_info = f"  http://localhost:{port}" if port and active else ""
+            print(f"  {name}  [{status}]{port_info}  ({proj_dir})")
+    else:
+        project_dir = find_project_dir()
+        sessions = get_sessions(project_dir)
+        if not sessions:
+            print("No sessions. Run: agentbox init --name <name>")
+            return
+        running = subprocess.run(
+            ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"],
+            capture_output=True, text=True,
+        ).stdout.lower()
+        pname_prefix = f"agentbox-{project_name(project_dir)}"
+        for s in sessions:
+            session_dir = AGENTBOX_STATE / "sessions" / _session_id(s, project_dir)
+            port = read_port(session_dir)
+            active = f"{pname_prefix}-{s}_" in running
+            status = "running" if active else "stopped"
+            port_info = f"  http://localhost:{port}" if port and active else ""
+            print(f"  {s}  [{status}]{port_info}")
 
 
 def cmd_status(args) -> None:
@@ -757,8 +820,10 @@ def main() -> None:
     build_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to build (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
     update_subcommand = subcommand.add_parser("update", help="Rebuild images without cache")
     update_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to rebuild (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
-    subcommand.add_parser("list", help="List sessions for the current project")
-    subcommand.add_parser("ls", help="Alias for list")
+    list_subcommand = subcommand.add_parser("list", help="List sessions for the current project")
+    list_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
+    ls_subcommand = subcommand.add_parser("ls", help="Alias for list")
+    ls_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
     subcommand.add_parser("status", help="List running agentbox containers")
 
     init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")

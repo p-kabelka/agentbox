@@ -128,12 +128,12 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 | Egress control | `allow <host> [--name NAME]`, `deny <host> [--name NAME]` |
 | Proxy management | `proxy-reload [--name NAME]`, `proxy-restart [--name NAME]` |
 | Reference mounts | `mount list [--name NAME]`, `mount add [-w] <SRC[:DST]> [--name NAME]`, `mount remove <DST> [--name NAME]` |
-| Observation | `status`, `list` / `ls` |
+| Observation | `status`, `list [--all]` / `ls [--all]` |
 | Maintenance | `remote-cleanup` |
 
 ### 5.2 Key Command Behaviors
 
-`agentbox init` creates a timestamped (or named) session directory under `.agentbox/sessions/`, copies the chosen preset's `proxy.yaml` (without its `environment` field) to the session directory, extracts any inline dotfiles from the preset's `agent.yaml`, creates a git bundle of the current branch (unless `--no-git`), initialises the bare output repository with read-only hooks and config, registers a git remote, and generates a unified `compose.yaml`. The session is optionally launched immediately if `--start` is passed.
+`agentbox init` creates a timestamped (or named) session directory under `$AGENTBOX_STATE/sessions/`, copies the chosen preset's `proxy.yaml` (without its `environment` field) to the session directory, extracts any inline dotfiles from the preset's `agent.yaml`, creates a git bundle of the current branch (unless `--no-git`), initialises the bare output repository with read-only hooks and config, registers a git remote, and generates a unified `compose.yaml`. The session is optionally launched immediately if `--start` is passed.
 
 `agentbox start` starts the proxy in the background (waiting for its health check), then runs a new agent container interactively. The `compose.yaml` is persistent — edits made directly to it are preserved across restarts. Any arguments after `--` are forwarded to the agent entrypoint and override what gets exec'd (e.g., `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently.
 
@@ -151,11 +151,13 @@ All commands that operate on a specific session accept `--name <name>`. If the p
 
 ### 6.1 Session Directory Layout
 
-Each session is fully self-contained under `.agentbox/sessions/<name>/`.
+Sessions are stored centrally under `$AGENTBOX_STATE/sessions/<session-id>/`, where `$AGENTBOX_STATE` defaults to `$XDG_STATE_HOME/agentbox` (or `~/.local/state/agentbox` if `XDG_STATE_HOME` is not set). The session ID is `<name>-<sha256(project_dir)>`, making lookups deterministic.
+
+Each session directory is fully self-contained:
 
 | File | Purpose |
 |------|---------|
-| `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on `agentbox init` |
+| `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on `agentbox init`. Contains `x-metadata.project-dir` and `x-metadata.name` for session identification. |
 | `proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init |
 | `dotfiles/` | Extracted dotfiles from preset `agent.yaml` |
 | `source.bundle` | Read-only git snapshot of the source branch |

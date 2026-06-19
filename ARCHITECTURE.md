@@ -258,7 +258,15 @@ A git bundle is a single portable file containing the complete history of a bran
 
 The output bare repository provides the reverse channel. It accepts pushes from the agent but cannot be used to inject code that runs on the host: the `hooks/` directory and `config` file are bind-mounted read-only into the agent container (kernel-enforced, not just `chmod`), and the developer retrieves commits with hook execution explicitly disabled. The `config` bind-mount specifically prevents the agent from setting `core.hooksPath` to a writable directory to bypass the hooks protection.
 
-### 6.5 Unified compose.yaml per session
+### 6.5 Centralized session storage
+
+Sessions are stored in a central state directory (`$AGENTBOX_STATE`, defaulting to `$XDG_STATE_HOME/agentbox` or `~/.local/state/agentbox`) rather than inside each project directory. Each session directory is named `<name>-<sha256(project_dir)>`, making lookup by session name and project directory O(1).
+
+The project directory and session name are stored in the session's `compose.yaml` as `x-metadata.project-dir` and `x-metadata.name` (Compose extension fields, ignored by the container runtime). This replaces the previous approach of inferring the project directory from the filesystem path.
+
+This design keeps project directories clean (no `.agentbox/` directories), enables cross-project session management (`agentbox list --all`), and follows the XDG Base Directory Specification for state data.
+
+### 6.6 Unified compose.yaml per session
 
 At `agentbox init` time, `compose-base.yaml` (the shared template defining images, networks, and base environment) is merged with the preset configuration (provider volumes, environment variables, runtime) to produce a single `compose.yaml` in the session directory.
 
@@ -266,13 +274,13 @@ At `agentbox init` time, `compose-base.yaml` (the shared template defining image
 
 The `compose.yaml` is generated once at init and then user-owned: edits persist across `agentbox start` calls. Running `agentbox init` again regenerates it, preserving the session's web port and any context mounts already registered via `agentbox mount add`.
 
-### 6.6 Hot-reload over proxy restart for allowlist changes
+### 6.7 Hot-reload over proxy restart for allowlist changes
 
 When a developer adds or removes a host from the egress allowlist, the proxy configuration must be reloaded. Restarting the proxy container would terminate all active HTTPS tunnels, potentially interrupting LLM inference requests mid-stream — which may not be recoverable by the agent.
 
 The addon exposes an async HTTP endpoint on port 8082 that re-reads `proxy.yaml` and atomically swaps the in-memory configuration. The CLI's `allow` and `deny` commands call this endpoint via `compose exec`, achieving near-instant allowlist updates without affecting active connections.
 
-### 6.7 Resolver pattern for credential injection
+### 6.8 Resolver pattern for credential injection
 
 Credential injection uses a `CredentialResolver` abstraction with implementations registered via `__init_subclass__`. Each provider in `proxy.yaml` specifies a `credential_type` (e.g., `static`, `oauth`) that maps to a resolver class. This separates provider matching (host patterns, path prefixes) from credential acquisition (reading a file, refreshing an OAuth token), making it straightforward to add new credential protocols without modifying the matching logic.
 
@@ -308,7 +316,7 @@ The proxy's addon interface (mitmproxy's Python API) is the primary extension po
 
 **Portability.** The system requires Podman (with `podman compose`) and Python 3 with PyYAML. It runs on any Linux system without root privileges. The optional krun runtime for VM-level isolation requires KVM but is opt-in and does not change the configuration interface.
 
-**Reproducibility.** The proxy and agent images are built once and reused. A project's `.agentbox/` directory fully describes its configuration. Two developers with the same base images and the same `.agentbox/` directory get equivalent environments.
+**Reproducibility.** The proxy and agent images are built once and reused. Each session's directory under `$AGENTBOX_STATE/sessions/` fully describes its configuration. Two developers with the same base images and equivalent session directories get equivalent environments.
 
 ---
 

@@ -1,5 +1,4 @@
 secrets/
 .env
 custom/
-.agentbox/
 .venv/
