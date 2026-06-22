@@ -833,12 +833,9 @@ def main() -> None:
     build_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to build (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
     update_subcommand = subcommand.add_parser("update", help="Rebuild images without cache")
     update_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to rebuild (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
-    list_subcommand = subcommand.add_parser("list", help="List sessions for the current project")
+    list_subcommand = subcommand.add_parser("list", aliases=["ls"], help="List sessions for the current project")
     list_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
     list_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
-    ls_subcommand = subcommand.add_parser("ls", help="Alias for list")
-    ls_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
-    ls_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
     subcommand.add_parser("status", help="List running agentbox containers")
 
     init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
