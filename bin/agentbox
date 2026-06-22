@@ -373,12 +373,12 @@ def cmd_update(args) -> None:
     print("==> Done.")
 
 
-def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
+def _launch(session_dir: Path, cmd: list[str] | None = None, *podman_args) -> None:
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
     project_dir = Path(meta["project-dir"])
     compose(session_dir, "up", "-d", "proxy", check=True)
-    result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
+    result = compose(session_dir, *podman_args, "run", "--rm", "agent", *(cmd or []))
     # Auto-fetch when the session ends
     output_git = session_dir / "output.git"
     if output_git.is_dir():
@@ -516,7 +516,7 @@ def cmd_init(args) -> None:
 def cmd_start(args) -> None:
     session_dir, _ = resolve_session(args)
     cmd = [a for a in (args.exec_cmd or [])] or None
-    _launch(session_dir, cmd)
+    _launch(session_dir, cmd, *map(lambda x: f"--podman-run-args={x}", args.podman_run_args))
 
 
 def cmd_stop(args) -> None:
@@ -848,8 +848,9 @@ def main() -> None:
     init_subcommand.add_argument("--rw-mount", action="append", default=[], dest="rw_mounts", metavar="SRC[:DST]", help="Mount writable reference directory")
     init_subcommand.add_argument("--start", action="store_true", help="Also start the session after initializing")
 
-    start_subcommand = subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)")
-    subparser_with_name(start_subcommand).add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
+    start_subcommand = subparser_with_name(subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)"))
+    start_subcommand.add_argument("--podman-run-args", action="append", default=[], dest="podman_run_args", help="Specify arguments to pass to podman")
+    start_subcommand.add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
 
     subparser_with_name(subcommand.add_parser("stop", help="Stop a agentbox session"))
     subparser_with_name(subcommand.add_parser("logs", help="Tail the proxy access log"))
