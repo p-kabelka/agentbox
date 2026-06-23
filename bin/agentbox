@@ -526,7 +526,8 @@ def cmd_stop(args) -> None:
 
 def cmd_logs(args) -> None:
     session_dir, _ = resolve_session(args)
-    result = compose(session_dir, "logs", "--follow", "--tail=100", "proxy")
+    tail_args = ["--tail", str(args.tail)] if args.tail is not None else []
+    result = compose(session_dir, "logs", "--follow", *tail_args, "proxy")
     sys.exit(result.returncode)
 
 
@@ -852,7 +853,8 @@ def main() -> None:
     subparser_with_name(start_subcommand).add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
 
     subparser_with_name(subcommand.add_parser("stop", help="Stop a agentbox session"))
-    subparser_with_name(subcommand.add_parser("logs", help="Tail the proxy access log"))
+    logs_subcommand = subparser_with_name(subcommand.add_parser("logs", help="Follow the proxy log (all history by default)"))
+    logs_subcommand.add_argument("--tail", "-l", type=int, default=None, metavar="N", help="Show only the last N lines (default: all)")
     subparser_with_name(subcommand.add_parser("web", help="Print the mitmweb traffic-monitor URL"))
     subparser_with_name(subcommand.add_parser("remove", help="Stop and delete a session (containers, volumes, git remote, output repo)"))
     allow_subcommand = subparser_with_name(subcommand.add_parser("allow", help="Add a host to the egress allowlist"))
