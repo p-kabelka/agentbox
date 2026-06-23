@@ -59,23 +59,22 @@ class _Config:
 
 class AgentboxAddon:
     def __init__(self):
-        self._cfg = self._load_config()
+        self._providers = self._load_providers()
+        self._cfg = _Config(allowed=self._load_allowed_hosts(), providers=self._providers)
         log.info({"message": "Config loaded",
                   "allowed_hosts": len(self._cfg.allowed),
                   "providers": len(self._cfg.providers)})
 
     @staticmethod
-    def _load_config() -> _Config:
+    def _load_providers() -> list[Provider]:
         with open(_CONFIG_PATH) as f:
             cfg = yaml.safe_load(f)
 
-        allowed: list[str] = []
         providers: list[Provider] = []
 
         for p in cfg.get("providers", []):
             if not p.get("enabled"):
                 continue
-            allowed.extend(p.get("allowed_hosts", []))
             cred_type = p.get("credential_type")
             if cred_type:
                 resolver_cls = RESOLVER_CLASSES.get(cred_type)
@@ -86,8 +85,18 @@ class AgentboxAddon:
                     log.error("Unknown credential_type '%s' for provider '%s'",
                               cred_type, p.get("name", "?"))
 
+        return providers
+
+    @staticmethod
+    def _load_allowed_hosts() -> list[str]:
+        with open(_CONFIG_PATH) as f:
+            cfg = yaml.safe_load(f)
+        allowed: list[str] = []
+        for p in cfg.get("providers", []):
+            if p.get("enabled"):
+                allowed.extend(p.get("allowed_hosts", []))
         allowed.extend(cfg.get("extra_allowed_hosts", []))
-        return _Config(allowed=allowed, providers=providers)
+        return allowed
 
     async def running(self):
         await asyncio.start_server(self._handle_reload_conn, "127.0.0.1", _RELOAD_PORT)
@@ -96,7 +105,7 @@ class AgentboxAddon:
     async def _handle_reload_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             await reader.read(4096)
-            new_cfg = self._load_config()
+            new_cfg = _Config(allowed=self._load_allowed_hosts(), providers=self._providers)
             self._cfg = new_cfg
             log.info({"message": "Config reloaded",
                       "allowed_hosts": len(new_cfg.allowed),
