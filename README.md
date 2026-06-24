@@ -55,8 +55,9 @@ agentbox preset edit agent new-preset
 ```bash
 cd ~/projects/my-app
 
-# Initialise a session and launch immediately
-agentbox init --start
+# Initialise a session and launch tmux with the agent harness
+agentbox init --preset claude-vertex
+agentbox start -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 'agent' Enter
 
 # The agent has access to your current branch (read-only bundle).
 # When it's done, push its work:
@@ -67,6 +68,8 @@ agentbox init --start
 #   git merge agentbox-<name>/my-feature
 ```
 
+Some caveats: the start command is entirely customizable on the command line. By default if you don't provide a command to run it will launch the agent harness configured in the preset. The presets usually have some configuration in .bashrc that pre-configures the agent harness to be usable from the sandbox right way. Therefore it is almost always more preferable to use the tmux session start command echoed by the init command.
+
 ---
 
 ## Usage
@@ -74,22 +77,24 @@ agentbox init --start
 ### Session lifecycle
 
 ```bash
-agentbox init [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] \
-              [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]
-agentbox start [--name NAME] [-- CMD]        # launch agent harness (or CMD, e.g. -- bash, -- tmux)
-agentbox stop  [--name NAME]                 # stop containers
-agentbox remove [--name NAME]                # stop, delete session, output repo, and git remote
+agentbox init   [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] \
+                [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]
+agentbox start  [--name NAME] [-- CMD]   # launch agent harness (or CMD, e.g. -- bash, -- tmux)
+agentbox stop   [--name NAME]            # stop containers
+agentbox remove [--name NAME]            # stop, delete session, output repo, and git remote
 ```
 
 `--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. `agentbox start` can be called multiple times on the same session to run independent agent containers concurrently. Because agents run in krun microVMs, `podman exec` cannot reach a running container — use `agentbox start -- bash` to open a shell in a new container instead.
 
+Everywhere where `--name` can be used, the parameter `--session` can also be used when you provide the session global ID found in `agentbox list --all`.
+
 ### Monitoring
 
 ```bash
-agentbox logs [--name NAME]    # tail structured JSON access log from the proxy
-agentbox web  [--name NAME]    # print the mitmweb traffic-monitor URL
-agentbox list                  # list sessions for this project with status
-agentbox status                # list all running agentbox containers
+agentbox logs [--name NAME] [--tail LAST_N_LINES]   # tail structured JSON access log from the proxy
+agentbox web  [--name NAME]                         # print the mitmweb traffic-monitor URL
+agentbox list [--all]                               # list sessions (optionally across all projects)
+agentbox status                                     # list all running agentbox containers
 ```
 
 ### Egress control
@@ -111,11 +116,11 @@ agentbox proxy-restart [--name NAME]    # restart proxy container (waits for hea
 Mount additional projects at `/context/<name>` inside the agent:
 
 ```bash
-agentbox mount add ~/libs/shared-lib [--name NAME]        # read-only (default)
-agentbox mount add -w ~/data/scratch [--name NAME]        # writable
+agentbox mount add ~/libs/shared-lib [--name NAME]   # read-only (default)
+agentbox mount add -w ~/data/scratch [--name NAME]   # writable
 agentbox mount remove shared-lib     [--name NAME]
 agentbox mount list                  [--name NAME]
-agentbox start                                            # restart to apply
+agentbox start                                       # restart to apply
 ```
 
 ### Retrieving output
@@ -132,7 +137,7 @@ git merge agentbox-<name>/my-feature
 ### Maintenance
 
 ```bash
-agentbox remote-cleanup              # remove stale agentbox-* git remotes with no matching session
+agentbox remote-cleanup   # remove stale agentbox-* git remotes with no matching session
 ```
 
 ---
@@ -156,6 +161,7 @@ providers:
       - api.anthropic.com
     path_prefixes:                 # only inject credentials on matching paths
       - /v1/messages
+      - /v1/messages/*
       - /v1/complete
       - /v1/models
 ```
@@ -177,7 +183,7 @@ providers:
       - "aiplatform.googleapis.com"
       - "*-aiplatform.googleapis.com"
     path_prefixes:
-      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/"
+      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/*"
 
 environment:
   GOOGLE_CLOUD_PROJECT: my-gcp-project
