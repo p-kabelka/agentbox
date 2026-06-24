@@ -2,7 +2,7 @@
 
 Isolated, credential-safe workspaces for AI coding agents. Each agentbox runs the agent in a microVM container with no real API keys, no direct internet access, and no write access to your original host git repository.
 
-See [ARCHITECTURE.md](ARCHITECTURE.md) for design rationale and [SPEC.md](SPEC.md) for the full technical specification.
+See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](docs/SPEC.md) for the full technical specification.
 
 ---
 
@@ -56,7 +56,7 @@ agentbox preset edit agent new-preset
 cd ~/projects/my-app
 
 # Initialise a session and launch tmux with the agent harness
-agentbox init --preset claude-vertex
+agentbox init
 agentbox start -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 'agent' Enter
 
 # The agent has access to your current branch (read-only bundle).
@@ -69,6 +69,10 @@ agentbox start -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 
 ```
 
 Some caveats: the start command is entirely customizable on the command line. By default if you don't provide a command to run it will launch the agent harness configured in the preset. The presets usually have some configuration in .bashrc that pre-configures the agent harness to be usable from the sandbox right way. Therefore it is almost always more preferable to use the tmux session start command echoed by the init command.
+
+The default environment does not include any agent harness, so it can be used as a temporary sandbox.
+
+Currently, for all provided agents you need to create your own preset (or modify the generated compose file) to configure them. Checkout [docs](docs/) for the specific agent harness setup guide.
 
 ---
 
