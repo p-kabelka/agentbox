@@ -77,8 +77,8 @@ extra_allowed_hosts:
 
 # Extra environment variables for the proxy container. Merged with compose-base.yaml.
 environment:
-  GOOGLE_CLOUD_PROJECT: itpc-gcp-pnd-pe-eng-claude
-  VERTEX_PROJECT_ID: itpc-gcp-pnd-pe-eng-claude
+  GOOGLE_CLOUD_PROJECT: your-gcp-project
+  VERTEX_PROJECT_ID: your-gcp-project
   VERTEX_REGION: global
 
 logging:
