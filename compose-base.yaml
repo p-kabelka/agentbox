@@ -62,3 +62,5 @@ services:
       - proxy-ca:/proxy-ca:ro,z
     stdin_open: true
     tty: true
+    logging:
+      driver: none
