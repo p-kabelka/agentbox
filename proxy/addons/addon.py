@@ -13,6 +13,22 @@ from resolvers import RESOLVER_CLASSES
 _CONFIG_PATH = "/config/proxy.yaml"
 _RELOAD_PORT = 8082
 
+# Content-Types that must never be fully buffered by mitmproxy: plain proto/protobuf
+# bodies, and the Buf Connect streaming variants ("application/connect+proto",
+# "application/connect+json") used by bidirectional/server-streaming RPCs. Buffering
+# those would make mitmproxy wait for the body to end before forwarding anything -
+# which never happens for a long-lived stream, hanging the connection indefinitely.
+_STREAMABLE_CONTENT_TYPES = (
+    "application/proto",
+    "application/x-protobuf",
+    "application/connect+",
+    "application/grpc",
+)
+
+
+def _is_streamable_content_type(content_type: str) -> bool:
+    return any(content_type.startswith(ct) for ct in _STREAMABLE_CONTENT_TYPES)
+
 
 class JSONFormatter(logging.Formatter):
     def __init__(self, source: str):
@@ -146,11 +162,14 @@ class AgentboxAddon:
                 provider.inject(flow)
                 break
 
-        if any(flow.request.headers.get("content-type", "").startswith(content_type) for content_type in ["application/proto", "application/x-protobuf"]):
+        if _is_streamable_content_type(flow.request.headers.get("content-type", "")):
             flow.request.stream = True
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
-        if not flow.metadata.get("agentbox_blocked") and any(flow.request.headers.get("content-type", "").startswith(content_type) for content_type in ["application/proto", "application/x-protobuf"]):
+        if flow.metadata.get("agentbox_blocked"):
+            return
+        resp = flow.response
+        if resp is not None and _is_streamable_content_type(resp.headers.get("content-type", "")):
             flow.response.stream = True
 
     def response(self, flow: http.HTTPFlow) -> None:
