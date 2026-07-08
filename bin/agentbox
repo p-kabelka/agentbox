@@ -28,6 +28,7 @@ HARNESS_CONTAINERFILES = {
     p.name.split(".", 1)[1]: p.name
     for p in sorted((AGENTBOX_HOME / "agent").glob("Containerfile.*"))
 }
+HARNESS_CONTAINERFILES.update({"proxy": "Containerfile"})
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -309,16 +310,16 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
 
     (AGENTBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
 
-    for tag, ctx, containerfile in [
-        ("localhost/agentbox-proxy:latest", AGENTBOX_HOME / "proxy", "Containerfile"),
-        ("localhost/agentbox-agent-base:latest", agent_ctx, "Containerfile.base"),
-    ]:
-        subprocess.run(["podman", "build", *extra, "-f", str(ctx / containerfile), "-t", tag, str(ctx)], check=True)
-
     targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
     build_env = dict(os.environ)
 
     for name in targets:
+        tag = f"localhost/agentbox-agent-{name}:latest"
+
+        if name == "proxy":
+            agent_ctx = AGENTBOX_HOME / "proxy"
+            tag = "localhost/agentbox-proxy:latest"
+
         containerfile = HARNESS_CONTAINERFILES[name]
         cf_path = agent_ctx / containerfile
         if not cf_path.is_file():
@@ -344,7 +345,6 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
             if gh_token:
                 build_env["_AGENTBOX_GH_TOKEN"] = gh_token
 
-        tag = f"localhost/agentbox-agent-{name}:latest"
         print(f"==> Building {name} agent image...")
         subprocess.run(
             ["podman", "build", *extra, *secret_args, "-f", str(cf_path), "-t", tag, str(agent_ctx)],
