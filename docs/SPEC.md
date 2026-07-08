@@ -92,11 +92,11 @@ The long-lived credential (service account key or refresh token) never enters th
 
 All agent traffic passes through a TLS-intercepting proxy. The proxy terminates TLS from the agent, inspects the plaintext request, and either allows or blocks it.
 
-**Allowlist enforcement:** Each request's destination hostname is checked against a configurable allowlist built from enabled provider hosts and extra allowed hosts. Non-listed hosts receive an HTTP 403 response; the upstream connection is never opened. The 403 response includes the blocked hostname and a suggested `agentbox allow` command.
+**Request policy enforcement:** Each request is checked against a unified L7 request policy built from all enabled providers' `request_policy` rules and `extra_request_policy` rules. Each rule matches on hostname (regex, full match), port (integer or regex, default 443), path (regex, anchored at start), and HTTP method (exact match, optional). Non-matching requests receive an HTTP 403 response; the upstream connection is never opened. The 403 response includes the blocked hostname and a suggested `agentbox allow` command.
 
-**Credential injection:** For requests to allowed provider endpoints, the proxy injects real credentials into the appropriate request header. Injection is scoped by host pattern (fnmatch), path pattern (fnmatch), and optionally a token-replacement check, ensuring credentials are only injected on actual API calls — not on arbitrary requests to the same host.
+**Credential injection:** For requests matching a provider's `request_policy` rules, the proxy injects real credentials into the appropriate request header. Each rule binds its path patterns to a specific host (and optionally port), enabling different path policies per host within the same provider. Injection can be further scoped by an optional `replace_token` check, ensuring credentials are only injected on actual API calls.
 
-**Allowlist updates:** The allowlist can be modified at runtime via `agentbox allow` and `agentbox deny` without restarting the proxy or dropping active connections. This is important because interrupting an LLM inference request mid-stream may not be recoverable.
+**Policy updates:** The request policy can be modified at runtime via `agentbox allow` and `agentbox deny` without restarting the proxy or dropping active connections. This is important because interrupting an LLM inference request mid-stream may not be recoverable.
 
 **Logging:** Every request — including blocked ones — is logged as structured JSON with timestamp, method, URL, status code, and round-trip duration. Request headers, response headers, and bodies can optionally be included via configuration. A web-based traffic monitor is available for real-time inspection.
 
@@ -137,7 +137,7 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 
 `agentbox start` starts the proxy in the background (waiting for its health check), then runs a new agent container interactively. The `compose.yaml` is persistent — edits made directly to it are preserved across restarts. Any arguments after `--` are forwarded to the agent entrypoint and override what gets exec'd (e.g., `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently.
 
-`agentbox allow` and `agentbox deny` append or remove entries from `extra_allowed_hosts` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections.
+`agentbox allow` and `agentbox deny` append or remove rules in `extra_request_policy` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections. Hostnames are automatically escaped for regex safety. The `host:port` syntax is supported (e.g., `agentbox allow registry.internal.com:8443`).
 
 `agentbox build` and `agentbox update` build container images. Both accept optional harness names to build specific harness images (e.g., `agentbox build claude opencode`). `update` rebuilds without cache.
 
@@ -187,14 +187,13 @@ providers:
     # api_key_file: ~/secrets/key  # alternative: read key from file (takes precedence)
     inject_header: x-api-key       # HTTP header to inject the credential into
     inject_prefix: ""              # prefix before the credential value (e.g., "Bearer ")
-    allowed_hosts:                 # hosts this provider's requests may reach
-      - api.anthropic.com
-    path_prefixes:                 # only inject credentials on requests matching these paths (fnmatch patterns)
-      - /v1/messages
-      - /v1/messages/*
-      - /v1/complete
-      - /v1/models
-      - /v1/models/*
+    request_policy:                # L7 request rules — each binds paths to a specific host
+      - host: "api\\.anthropic\\.com"
+        paths:
+          - "/v1/messages(/.*)?$"
+          - "/v1/complete$"
+          - "/v1/models(/.*)?$"
+        methods: [POST, GET]
 
   - name: vertex
     enabled: true
@@ -203,11 +202,10 @@ providers:
     inject_header: Authorization
     inject_prefix: "Bearer "
     replace_token: "dummy-replaced-by-proxy"  # match this token value before replacing
-    allowed_hosts:
-      - "aiplatform.googleapis.com"
-      - "*-aiplatform.googleapis.com"
-    path_prefixes:
-      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/*"
+    request_policy:
+      - host: "(.*-)?aiplatform\\.googleapis\\.com"
+        paths:
+          - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/.*"
 
 # Volumes to mount into the proxy container for credentials.
 # proxy_volumes:
@@ -218,8 +216,8 @@ providers:
 # trusted_certificates:
 #   - my-internal-ca.crt
 
-# Additional egress hosts (exact or *.wildcard)
-extra_allowed_hosts: []
+# Additional egress rules (host-only). Changes take effect automatically.
+extra_request_policy: []
 
 # Proxy container environment variables
 # environment:
@@ -245,15 +243,25 @@ logging:
 | `inject_prefix` | No | String prepended to the credential value (e.g., `"Bearer "`) |
 | `replace_token` | No | If set, only inject when this token value is found in the header (oauth type) |
 | `metadata_server` | No | Start fake GCE metadata server for this provider (oauth type) |
-| `allowed_hosts` | Yes | Hostname patterns (fnmatch) that this provider's requests may reach |
-| `path_prefixes` | No | Only inject credentials on requests whose path matches one of these fnmatch patterns |
+| `request_policy` | Yes | List of L7 request rules (see below) |
+
+**Request policy rule fields:**
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `host` | `string` | Yes | — | Python regex matched against hostname (full match, implicit `^...$`) |
+| `port` | `int` or `string` | No | `443` | Port number (exact match) or regex string (full match) |
+| `paths` | `list[string]` | No | `[".*"]` | Regex patterns matched against path (anchored at start with `^`; add `$` for exact match) |
+| `methods` | `list[string]` | No | `[]` (all) | HTTP methods (uppercase, exact match). Empty means all methods allowed |
+
+All regex patterns use Python `re` syntax and support environment variable expansion via `os.path.expandvars()`.
 
 **Top-level proxy.yaml fields:**
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | `proxy_volumes` | No | List of `{src, dst}` volume mounts for the proxy container (e.g., credential directories). All mounts are read-only. `src` supports `~` expansion. |
-| `extra_allowed_hosts` | No | Additional egress hostnames (exact or fnmatch wildcard patterns) |
+| `extra_request_policy` | No | Additional egress rules using the same rule schema as provider `request_policy`. These rules control allowlisting only — they never trigger credential injection. |
 | `trusted_certificates` | No | Filenames from `custom/certs/` to install into the proxy's system trust store |
 
 ### 6.4 Agent Configuration (`agent.yaml`)

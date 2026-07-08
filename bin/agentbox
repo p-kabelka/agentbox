@@ -545,20 +545,40 @@ def _update_allowlist(host: str, add: bool, args) -> None:
     session_dir, _ = resolve_session(args)
     config_path = session_dir / "proxy.yaml"
     cfg = load_yaml(config_path)
-    hosts: list[str] = cfg.setdefault("extra_allowed_hosts", [])
+    rules: list = cfg.setdefault("extra_request_policy", [])
     meta = read_compose_metadata(session_dir)
     session_name = meta["name"]
+
+    port = None
+    if ":" in host:
+        parts = host.rsplit(":", 1)
+        if parts[1].isdigit():
+            host = parts[0]
+            port = int(parts[1])
+
+    escaped_host = re.escape(host)
+
+    def _rule_matches(r: dict) -> bool:
+        if r.get("host") != escaped_host:
+            return False
+        if port is not None:
+            return r.get("port") == port
+        return "port" not in r or r.get("port") == 443
+
     if add:
-        if host not in hosts:
-            hosts.append(host)
+        if not any(_rule_matches(r) for r in rules):
+            new_rule: dict = {"host": escaped_host}
+            if port is not None:
+                new_rule["port"] = port
+            rules.append(new_rule)
             save_yaml(config_path, cfg)
             print(f"Added '{host}' to allowlist for session '{session_name}'.")
         else:
             print(f"'{host}' already in allowlist for session '{session_name}'.")
     else:
-        if host in hosts:
-            hosts.remove(host)
-            cfg["extra_allowed_hosts"] = hosts
+        new_rules = [r for r in rules if not _rule_matches(r)]
+        if len(new_rules) < len(rules):
+            cfg["extra_request_policy"] = new_rules
             save_yaml(config_path, cfg)
             print(f"Removed '{host}' from allowlist for session '{session_name}'.")
         else:

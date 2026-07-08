@@ -58,7 +58,7 @@ Podman's container networking achieves network isolation without host-level priv
 
 ### 2.6 Configuration over code for extensibility
 
-The proxy's allowlist, credential injection rules, and provider settings are all driven by a YAML configuration file. Adding a new LLM provider requires editing a configuration file, not writing code. This makes the system usable by developers who are not contributors to the project.
+The proxy's L7 request policy, credential injection rules, and provider settings are all driven by a YAML configuration file. Adding a new LLM provider requires editing a configuration file, not writing code. This makes the system usable by developers who are not contributors to the project.
 
 ---
 
@@ -141,9 +141,9 @@ The proxy container is attached to both networks and is the sole egress point fo
 
 **Addon modules** (`addons/`):
 
-- **`addon.py`** — The `AgentboxAddon` class. Loads `proxy.yaml` at startup and on hot-reload. Builds the combined allowlist from all enabled providers' `allowed_hosts` plus `extra_allowed_hosts`. The `request()` hook enforces the allowlist (HTTP 403 for blocked hosts) and delegates credential injection to `Provider` objects. The `response()` hook logs structured JSON. Exposes an async HTTP reload endpoint on port 8082 so that `agentbox allow`/`deny` can update the allowlist without restarting the proxy or dropping active connections — this is important because interrupting an LLM inference request mid-stream may not be recoverable.
+- **`addon.py`** — The `AgentboxAddon` class. Loads `proxy.yaml` at startup and on hot-reload. Builds the combined L7 request policy from all enabled providers' `request_policy` rules plus `extra_request_policy` rules. The `requestheaders()` hook enforces the policy (HTTP 403 for non-matching requests) and delegates credential injection to `Provider` objects. The `response()` hook logs structured JSON. Exposes an async HTTP reload endpoint on port 8082 so that `agentbox allow`/`deny` can update the policy without restarting the proxy or dropping active connections — this is important because interrupting an LLM inference request mid-stream may not be recoverable. Hot-reload supports two paths: a fast path (allowlist-only, reuses existing providers) for `agentbox allow`/`deny`, and a full reload (rebuilds providers with `run_in_executor` for blocking resolver init) when provider configuration changes.
 
-- **`provider.py`** — The `Provider` class. Matches intercepted requests by hostname pattern, path prefix, and optionally a `replace_token` header check. On match, delegates to a `CredentialResolver` to obtain the credential value and injects it into the configured HTTP header.
+- **`provider.py`** — The `Provider` class and L7 request matching engine. Each provider's `request_policy` is compiled at startup into `CompiledRule` objects containing pre-compiled regex patterns for host (full match), port (integer or regex), path (start-anchored), and HTTP methods. The shared `rule_matches()` function is used by both the allowlist check and `Provider.matches()`. On match, the provider delegates to a `CredentialResolver` to obtain the credential value and injects it into the configured HTTP header.
 
 - **`resolvers.py`** — Credential resolver implementations, registered via `__init_subclass__`:
   - `StaticKeyResolver` (`credential_type: static`) — Reads the API key from a file at `/run/secrets/` (via `api_key_file`) or from an environment variable (via `api_key_env`). File takes precedence.
@@ -282,7 +282,7 @@ The addon exposes an async HTTP endpoint on port 8082 that re-reads `proxy.yaml`
 
 ### 6.8 Resolver pattern for credential injection
 
-Credential injection uses a `CredentialResolver` abstraction with implementations registered via `__init_subclass__`. Each provider in `proxy.yaml` specifies a `credential_type` (e.g., `static`, `oauth`) that maps to a resolver class. This separates provider matching (host patterns, path prefixes) from credential acquisition (reading a file, refreshing an OAuth token), making it straightforward to add new credential protocols without modifying the matching logic.
+Credential injection uses a `CredentialResolver` abstraction with implementations registered via `__init_subclass__`. Each provider in `proxy.yaml` specifies a `credential_type` (e.g., `static`, `oauth`) that maps to a resolver class. This separates provider matching (L7 request policy rules matching host, port, path, and method) from credential acquisition (reading a file, refreshing an OAuth token), making it straightforward to add new credential protocols without modifying the matching logic.
 
 ---
 

@@ -1,5 +1,5 @@
 # mitmproxy addon: allowlist enforcement, credential injection, and JSON access logging.
-import asyncio, dataclasses, fnmatch, json, logging, os, sys, time
+import asyncio, dataclasses, json, logging, os, sys, time
 import yaml
 from mitmproxy import http
 
@@ -7,7 +7,7 @@ _addon_dir = os.path.dirname(os.path.abspath(__file__))
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
 
-from provider import Provider
+from provider import Provider, CompiledRule, compile_rules, rule_matches
 from resolvers import RESOLVER_CLASSES
 
 _CONFIG_PATH = "/config/proxy.yaml"
@@ -69,23 +69,36 @@ _log_bodies   = lcfg.get("log_bodies", False)
 
 @dataclasses.dataclass(frozen=True)
 class _Config:
-    allowed: list[str]
+    allowed_rules: list[CompiledRule]
     providers: list[Provider]
+
+
+def _read_config() -> dict:
+    with open(_CONFIG_PATH) as f:
+        return yaml.safe_load(f)
+
+
+def _build_allowed_rules(providers: list[Provider], cfg: dict) -> list[CompiledRule]:
+    rules: list[CompiledRule] = []
+    for p in providers:
+        rules.extend(p._rules)
+    rules.extend(compile_rules(cfg.get("extra_request_policy", [])))
+    return rules
 
 
 class AgentboxAddon:
     def __init__(self):
-        self._providers = self._load_providers()
-        self._cfg = _Config(allowed=self._load_allowed_hosts(), providers=self._providers)
+        cfg = _read_config()
+        self._providers = self._load_providers(cfg)
+        self._raw_providers = cfg.get("providers", [])
+        allowed_rules = _build_allowed_rules(self._providers, cfg)
+        self._cfg = _Config(allowed_rules=allowed_rules, providers=self._providers)
         log.info({"message": "Config loaded",
-                  "allowed_hosts": len(self._cfg.allowed),
+                  "allowed_rules": len(self._cfg.allowed_rules),
                   "providers": len(self._cfg.providers)})
 
     @staticmethod
-    def _load_providers() -> list[Provider]:
-        with open(_CONFIG_PATH) as f:
-            cfg = yaml.safe_load(f)
-
+    def _load_providers(cfg: dict) -> list[Provider]:
         providers: list[Provider] = []
 
         for p in cfg.get("providers", []):
@@ -103,28 +116,30 @@ class AgentboxAddon:
 
         return providers
 
-    @staticmethod
-    def _load_allowed_hosts() -> list[str]:
-        with open(_CONFIG_PATH) as f:
-            cfg = yaml.safe_load(f)
-        allowed: list[str] = []
-        for p in cfg.get("providers", []):
-            if p.get("enabled"):
-                allowed.extend(p.get("allowed_hosts", []))
-        allowed.extend(cfg.get("extra_allowed_hosts", []))
-        return allowed
-
     async def running(self):
         await asyncio.start_server(self._handle_reload_conn, "127.0.0.1", _RELOAD_PORT)
         log.info({"message": f"Reload endpoint listening on port {_RELOAD_PORT}"})
 
     async def _handle_reload_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
-            await reader.read(4096)
-            new_cfg = _Config(allowed=self._load_allowed_hosts(), providers=self._providers)
+            data = await reader.read(4096)
+            cfg = _read_config()
+            new_raw_providers = cfg.get("providers", [])
+
+            if new_raw_providers != self._raw_providers:
+                loop = asyncio.get_event_loop()
+                providers = await loop.run_in_executor(None, self._load_providers, cfg)
+                self._providers = providers
+                self._raw_providers = new_raw_providers
+                log.info({"message": "Full reload: providers rebuilt"})
+            else:
+                providers = self._providers
+
+            allowed_rules = _build_allowed_rules(providers, cfg)
+            new_cfg = _Config(allowed_rules=allowed_rules, providers=providers)
             self._cfg = new_cfg
             log.info({"message": "Config reloaded",
-                      "allowed_hosts": len(new_cfg.allowed),
+                      "allowed_rules": len(new_cfg.allowed_rules),
                       "providers": len(new_cfg.providers)})
             body = b"OK"
             status = b"200 OK"
@@ -145,21 +160,31 @@ class AgentboxAddon:
     def requestheaders(self, flow: http.HTTPFlow) -> None:
         cfg = self._cfg
         host = flow.request.pretty_host
-        if not any(fnmatch.fnmatch(host, p) for p in cfg.allowed):
+        port = flow.request.port
+        path = flow.request.path.split("?", 1)[0]
+        method = flow.request.method.upper()
+
+        if not any(rule_matches(rule, host, port, path, method) for rule in cfg.allowed_rules):
             flow.response = http.Response.make(
                 403, f"Host '{host}' not allowed.\nTo allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {host}\n",
                 {"Content-Type": "text/plain"},
             )
             flow.metadata["agentbox_blocked"] = True
             log.info({
-                "method": flow.request.method,
+                "method": method,
                 "url": flow.request.pretty_url, "status": 403, "blocked": True,
+                "blocked_reason": "no matching policy rule",
+                "request_host": host,
+                "request_port": port,
+                "request_path": path,
+                "request_method": method,
             })
             return
 
         for provider in cfg.providers:
             if provider.matches(flow):
                 provider.inject(flow)
+                flow.metadata["agentbox_provider"] = provider.name
                 break
 
         if _is_streamable_content_type(flow.request.headers.get("content-type", "")):
@@ -185,6 +210,9 @@ class AgentboxAddon:
                 if resp and resp.timestamp_end else None
             ),
         }
+        provider = flow.metadata.get("agentbox_provider")
+        if provider:
+            entry["provider"] = provider
         if _log_req_hdr:
             entry["req_headers"] = dict(flow.request.headers)
         if _log_resp_hdr and resp:
