@@ -304,7 +304,7 @@ def _resolve_gh_token() -> str | None:
     return None
 
 
-def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) -> None:
+def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, tag="latest") -> None:
     extra = ["--no-cache"] if no_cache else []
     agent_ctx = AGENTBOX_HOME / "agent"
 
@@ -314,11 +314,11 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
     build_env = dict(os.environ)
 
     for name in targets:
-        tag = f"localhost/agentbox-agent-{name}:latest"
+        image_tag = f"localhost/agentbox-agent-{name}:{tag}"
 
         if name == "proxy":
             agent_ctx = AGENTBOX_HOME / "proxy"
-            tag = "localhost/agentbox-proxy:latest"
+            image_tag = f"localhost/agentbox-proxy:{tag}"
 
         containerfile = HARNESS_CONTAINERFILES[name]
         cf_path = agent_ctx / containerfile
@@ -347,7 +347,7 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None) ->
 
         print(f"==> Building {name} agent image...")
         subprocess.run(
-            ["podman", "build", *extra, *secret_args, "-f", str(cf_path), "-t", tag, str(agent_ctx)],
+            ["podman", "build", *extra, *secret_args, "-f", str(cf_path), "-t", image_tag, str(agent_ctx)],
             check=True,
             env=build_env,
         )
@@ -363,7 +363,7 @@ def cmd_build(args) -> None:
     if args.harnesses:
         _validate_harnesses(args.harnesses)
     print("==> Building images...")
-    _build_images(harnesses=args.harnesses or None)
+    _build_images(harnesses=args.harnesses or None, tag=args.tag or "latest")
     print("==> Done. Run 'agentbox update' after pulling a new version.")
 
 
@@ -371,7 +371,7 @@ def cmd_update(args) -> None:
     if args.harnesses:
         _validate_harnesses(args.harnesses)
     print("==> Rebuilding images without cache...")
-    _build_images(no_cache=True, harnesses=args.harnesses or None)
+    _build_images(no_cache=True, harnesses=args.harnesses or None, tag=args.tag or "latest")
     print("==> Done.")
 
 
@@ -834,8 +834,12 @@ def main() -> None:
 
     build_subcommand = subcommand.add_parser("build", help="Build proxy + agent images")
     build_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to build (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
+    build_subcommand.add_argument("-t", "--tag", default="latest", help="Custom image tag (default: %(default)s).")
+
     update_subcommand = subcommand.add_parser("update", help="Rebuild images without cache")
     update_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to rebuild (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
+    update_subcommand.add_argument("-t", "--tag", default="latest", help="Custom image tag (default: %(default)s).")
+
     list_subcommand = subcommand.add_parser("list", aliases=["ls"], help="List sessions for the current project")
     list_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
     list_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
