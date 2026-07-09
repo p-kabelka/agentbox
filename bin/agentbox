@@ -214,7 +214,7 @@ def generate_compose(
     proxy["ports"] = [f"127.0.0.1:{port}:8081"]
 
     proxy_volumes: list = proxy.get("volumes", [])
-    proxy_volumes.append("./proxy.yaml:/config/proxy.yaml:ro,Z")
+    proxy_volumes.append("./proxy-config:/config:ro,Z")
 
     for vol in proxy_cfg.get("proxy_volumes", []):
         src = Path(vol["src"]).expanduser().resolve()
@@ -407,7 +407,9 @@ def cmd_init(args) -> None:
     print(f"==> Initializing agentbox '{name}': {project_dir}")
     session_dir.mkdir(parents=True, exist_ok=True)
 
-    proxy_file = session_dir / "proxy.yaml"
+    proxy_config_dir = session_dir / "proxy-config"
+    proxy_config_dir.mkdir(parents=True, exist_ok=True)
+    proxy_file = proxy_config_dir / "proxy.yaml"
     preset_dir = resolve_preset(args.preset)
     if not preset_dir.is_dir():
         die(f"preset '{args.preset}' not found")
@@ -415,7 +417,6 @@ def cmd_init(args) -> None:
     if not proxy_src:
         die(f"preset '{args.preset}' has no proxy.yaml (and no default fallback)")
     if not proxy_file.is_file():
-        # Copy proxy config without the environment field (environment goes into compose.yaml)
         proxy_cfg = load_yaml(proxy_src)
         proxy_cfg.pop("environment", None)
         save_yaml(proxy_file, proxy_cfg)
@@ -543,7 +544,7 @@ def cmd_web(args) -> None:
 
 def _update_allowlist(host: str, add: bool, args) -> None:
     session_dir, _ = resolve_session(args)
-    config_path = session_dir / "proxy.yaml"
+    config_path = session_dir / "proxy-config" / "proxy.yaml"
     cfg = load_yaml(config_path)
     rules: list = cfg.setdefault("extra_request_policy", [])
     meta = read_compose_metadata(session_dir)
