@@ -117,7 +117,7 @@ class AgentboxAddon:
         return providers
 
     async def running(self):
-        await asyncio.start_server(self._handle_reload_conn, "127.0.0.1", _RELOAD_PORT)
+        self._reload_server = await asyncio.start_server(self._handle_reload_conn, "127.0.0.1", _RELOAD_PORT)
         log.info({"message": f"Reload endpoint listening on port {_RELOAD_PORT}"})
 
     async def _handle_reload_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
