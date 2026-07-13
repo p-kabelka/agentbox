@@ -71,7 +71,7 @@ providers:
 #   - src: "~/.config/gcloud"
 #     dst: "/root/.config/gcloud"
 
-# Additional egress rules (host-only). Changes take effect automatically.
+# Additional egress rules (exact or Python regex).
 extra_request_policy: []
 
 # Extra environment variables for the proxy container. Merged with compose-base.yaml.

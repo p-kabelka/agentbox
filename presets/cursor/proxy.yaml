@@ -21,7 +21,7 @@ providers:
         paths:
           - "/v1/traces$"
 
-# Additional egress rules (host-only). Changes take effect automatically.
+# Additional egress rules (exact or Python regex).
 extra_request_policy:
   - host: "fedora\\.mirror-services\\.net"
   - host: "mirrors\\.fedoraproject\\.org"
