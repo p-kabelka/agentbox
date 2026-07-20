@@ -33,8 +33,8 @@ ln -s -r ~/.local/share/agentbox/bin/agentbox ~/.local/bin
 
 # Build container images (builds proxy, base agent, and all harness images)
 agentbox build
-# Or build specific harness images only:
-agentbox build base proxy claude opencode
+# Or build specific images only:
+agentbox build base proxy claude
 ```
 
 Create a configuration preset for an agentbox:
