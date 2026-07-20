@@ -23,7 +23,7 @@ Two containers run per session: a **proxy** (holds real credentials, enforces an
 ## Setup
 
 ```bash
-git clone <this-repo> ~/.local/share/agentbox
+git clone https://github.com/p-kabelka/agentbox.git ~/.local/share/agentbox
 
 # add the project to your PATH
 echo 'export PATH="$HOME/.local/share/agentbox/bin:$PATH"' >> ~/.bashrc
@@ -34,7 +34,7 @@ ln -s -r ~/.local/share/agentbox/bin/agentbox ~/.local/bin
 # Build container images (builds proxy, base agent, and all harness images)
 agentbox build
 # Or build specific harness images only:
-agentbox build claude opencode
+agentbox build base proxy claude opencode
 ```
 
 Create a configuration preset for an agentbox:
