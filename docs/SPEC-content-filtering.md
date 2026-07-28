@@ -752,7 +752,64 @@ allow if {
 }
 ```
 
-### 7.5 Unsupported Content Type — Metadata-Only Filtering
+### 7.5 MCP JSON-RPC Filtering
+
+MCP uses JSON-RPC 2.0 over HTTP (SSE or Streamable HTTP transports). Since JSON-RPC is `application/json`, the existing JSON body parser handles it — no special detection or parsing is needed in the addon. The full JSON-RPC structure lands in `input.request.body`, and Rego policies filter on `method`, `params.name`, `params.arguments`, etc. directly:
+
+```rego
+package agentbox
+
+import rego.v1
+
+# MCP: allow tool listing and capability negotiation
+allow if {
+    _is_mcp_host
+    input.request.body.method in {"initialize", "tools/list", "notifications/initialized"}
+}
+
+# MCP: allow specific tools only
+allow if {
+    _is_mcp_host
+    input.request.body.method == "tools/call"
+    input.request.body.params.name in data.allowed_mcp_tools
+}
+
+# MCP: allow jira_update only for specific tickets (argument inspection)
+allow if {
+    _is_mcp_host
+    input.request.body.method == "tools/call"
+    input.request.body.params.name == "jira_update"
+    input.request.body.params.arguments.issue_key in data.allowed_tickets
+}
+
+# MCP: allow k8s_create only with name prefix (argument inspection)
+allow if {
+    _is_mcp_host
+    input.request.body.method == "tools/call"
+    input.request.body.params.name == "k8s_create"
+    input.request.body.params.arguments.namespace == "dev-sandbox"
+    startswith(input.request.body.params.arguments.name, "agent-")
+}
+
+_is_mcp_host if {
+    input.request.host == "mcp-gateway.internal"
+}
+```
+
+With external data (`policies/data.json`):
+
+```json
+{
+    "allowed_mcp_tools": ["jira_get_issue", "jira_update", "k8s_list", "k8s_create"],
+    "allowed_tickets": ["PROJ-123", "PROJ-456"]
+}
+```
+
+This approach gives identical filtering granularity to a dedicated MCP gateway — tool name matching, argument-level inspection, cross-field constraints — without any MCP-specific code in the addon. The addon sees JSON; Rego sees the JSON-RPC structure.
+
+For MCP servers using stdio transport (not HTTP), the traffic does not pass through the proxy. Filtering stdio-based MCP requires a dedicated MCP gateway (e.g., Agentgateway) as a separate component. This is out of scope for this spec.
+
+### 7.6 Unsupported Content Type — Metadata-Only Filtering
 
 For binary formats where the body cannot be parsed, policies filter on request metadata:
 
@@ -772,7 +829,7 @@ deny_reasons contains "gRPC write methods not allowed" if {
 }
 ```
 
-### 7.6 Managed Allowlist — `agentbox allow/deny`
+### 7.7 Managed Allowlist — `agentbox allow/deny`
 
 The `agentbox allow` / `agentbox deny` CLI writes rules to `policies/managed.rego`. This file is auto-generated and watched by OPA:
 
