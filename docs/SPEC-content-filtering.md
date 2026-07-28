@@ -136,6 +136,11 @@ Every request, regardless of content type, includes this metadata:
       "host": "api.example.com",
       "port": 443,
       "path": "/v1/resources",
+      "query_params": {
+        "action": ["create"],
+        "namespace": ["dev-sandbox"]
+      },
+      "raw_path": "/v1/resources?action=create&namespace=dev-sandbox",
       "method": "POST",
       "headers": {
         "content-type": "application/json",
@@ -154,7 +159,9 @@ Every request, regardless of content type, includes this metadata:
 |-------|------|-------------|
 | `host` | string | `flow.request.pretty_host` — hostname after SNI/Host resolution |
 | `port` | int | `flow.request.port` |
-| `path` | string | Path component only, query string stripped (`split("?", 1)[0]`) |
+| `path` | string | Path component only, query string stripped (`split("?", 1)[0]`). Used for path-based matching without query noise. |
+| `query_params` | object | Parsed query string via `urllib.parse.parse_qs(query)`. Keys map to lists of values (standard for query strings — `?a=1&a=2` → `{"a": ["1", "2"]}`). Empty object `{}` when no query string is present. |
+| `raw_path` | string | Full path as received, including query string (`flow.request.path`). Available for Rego `regex.match` when a policy needs to match across path and query together. |
 | `method` | string | Uppercase HTTP method |
 | `headers` | object | All request headers as key-value pairs (lowercased keys). The `authorization` header is **redacted** (replaced with `"[REDACTED]"`) to prevent policies from depending on credentials. |
 | `content_type` | string | Value of the `Content-Type` header, or empty string if absent |
