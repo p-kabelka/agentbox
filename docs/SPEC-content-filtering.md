@@ -68,14 +68,12 @@ Cedar was considered for its formal verification guarantees but intentionally om
        v
 [mitmproxy addon]
   1. TLS termination (existing)
-  2. Extract request metadata (host, port, path, method, headers)
-  3. Read and parse request body (if parseable content type)
-  4. Build OPA input document
+  2. Provider matching (existing, unchanged)
+  3. If provider matched: inject credentials, forward upstream (no OPA query)
+  4. If no provider matched: extract request metadata + parse body
   5. POST to OPA: /v1/data/agentbox/allow
-  6. If OPA returns allow=false: respond HTTP 403 to agent, stop
-  7. If OPA returns allow=true: proceed to credential injection
-  8. Provider matching + credential injection (existing, unchanged)
-  9. Forward request upstream
+  6. If OPA returns allow=false (or OPA unreachable): respond HTTP 403, stop
+  7. If OPA returns allow=true: forward request upstream
        |
        v
 [External API]
@@ -398,15 +396,17 @@ The addon queries `/v1/data/agentbox` (the full package) when a request is denie
 
 ### 5.6 OPA Health Check
 
-The addon checks OPA availability at startup and logs a warning if OPA is unreachable. The health check uses OPA's built-in endpoint:
+The addon checks OPA availability at startup using OPA's built-in endpoint:
 
 ```
 GET http://opa:8181/health
 ```
 
-If OPA is not reachable at startup, the proxy **refuses to start** rather than falling back to allow-all. This is a hard dependency — without OPA, no filtering is possible.
+If OPA is not reachable at startup, the proxy **starts normally** and logs a warning. The proxy continues to function for its core responsibility — credential injection for LLM providers. Requests that match a provider's `request_policy` are allowed and receive credential injection as usual. Requests that do not match any provider are denied with HTTP 403. This means that without OPA, the proxy falls back to provider-scoped allowlisting — only LLM inference endpoints configured in `proxy.yaml` are reachable.
 
-If OPA becomes unreachable after startup (container crash, network issue), all requests are **denied** (fail-closed) until OPA recovers. The addon logs an error on each failed OPA query.
+If OPA becomes reachable later (container starts after the proxy), the addon begins querying it on subsequent requests. No restart is needed — OPA availability is checked per-request.
+
+If OPA becomes unreachable after being available (container crash, network issue), requests that require OPA evaluation (those not matching any provider's `request_policy`) are **denied** (fail-closed) until OPA recovers. Provider-matched requests continue to be allowed and receive credential injection regardless of OPA state. The addon logs an error on each failed OPA query.
 
 ---
 
@@ -419,7 +419,7 @@ If OPA becomes unreachable after startup (container crash, network issue), all r
 | `proxy/addons/addon.py` | Remove `request_policy` allowlist logic; add OPA query step in `requestheaders()`; add body parsing; add OPA health check |
 | `proxy/addons/provider.py` | `Provider.matches()` simplified — no longer checks `request_policy` rules for allowlisting (OPA handles that); retains `request_policy` rules only for credential injection matching |
 | `proxy/requirements.in` | Add `requests` (already present), `xmltodict` |
-| `proxy/start.sh` | Wait for OPA health check before starting mitmproxy |
+| `proxy/start.sh` | No changes — proxy starts independently of OPA |
 | `compose-base.yaml` | Add OPA sidecar service |
 | `presets/*/proxy.yaml` | Add `opa` configuration section; provider `request_policy` retained for credential injection only |
 | `bin/agentbox` | `allow`/`deny` commands write Rego rules to managed policy file |
@@ -450,17 +450,28 @@ For requests with a parseable body (POST, PUT, PATCH with JSON/form/XML/YAML con
 4. Allow or deny.
 
 This two-hook approach ensures:
+- Provider-matched requests (LLM inference) are allowed and injected immediately, without querying OPA.
 - Streaming requests are never buffered (evaluated on metadata in `requestheaders()`).
 - Body-bearing requests are fully parsed before OPA evaluation (evaluated in `request()`).
-- Credential injection still happens after OPA allows the request.
 
 ```python
 def requestheaders(self, flow: http.HTTPFlow) -> None:
     cfg = self._cfg
 
+    # Provider matching first — LLM inference is always allowed
+    for provider in cfg.providers:
+        if provider.matches(flow):
+            provider.inject(flow)
+            flow.metadata["agentbox_provider"] = provider.name
+            break
+
     ct = flow.request.headers.get("content-type", "")
     if _is_streamable_content_type(ct):
         flow.request.stream = True
+
+    # If a provider matched, we're done — no OPA query needed
+    if flow.metadata.get("agentbox_provider"):
+        return
 
     # For bodyless requests or streaming content, evaluate OPA now
     if flow.request.method in ("GET", "HEAD", "DELETE", "OPTIONS") or flow.request.stream:
@@ -468,7 +479,6 @@ def requestheaders(self, flow: http.HTTPFlow) -> None:
         if not self._opa_allow(opa_input):
             self._block_request(flow, opa_input)
             return
-        self._inject_credentials(flow)
 
     # For body-bearing requests, defer to request() hook
 
@@ -476,14 +486,13 @@ def request(self, flow: http.HTTPFlow) -> None:
     if flow.metadata.get("agentbox_blocked"):
         return
     if flow.metadata.get("agentbox_provider"):
-        return  # Already handled in requestheaders (bodyless/streaming)
+        return  # Already handled in requestheaders (provider match)
 
     body = self._parse_body(flow)
     opa_input = self._build_opa_input(flow, body=body)
     if not self._opa_allow(opa_input):
         self._block_request(flow, opa_input)
         return
-    self._inject_credentials(flow)
 ```
 
 ### 6.4 OPA Client
@@ -556,9 +565,9 @@ def _parse_body(self, flow: http.HTTPFlow) -> dict | None:
         return None  # unsupported content type
 ```
 
-### 6.6 Provider Matching After OPA
+### 6.6 Request Evaluation Order
 
-After OPA allows a request, the addon still needs to determine **which provider** should inject credentials. The current `Provider.matches()` method uses `request_policy` rules for this. This matching logic is **retained** — `request_policy` rules on providers continue to determine credential injection scope. OPA replaces only the **allowlist enforcement** step.
+Provider matching happens **before** OPA. If a request matches a provider's `request_policy`, it is allowed and receives credential injection without querying OPA. Only requests that do not match any provider are forwarded to OPA for policy evaluation.
 
 ```
 Before:
@@ -567,12 +576,16 @@ Before:
   Both use the same CompiledRule/rule_matches() engine.
 
 After:
-  OPA → allowlist check (allow/deny)
-  request_policy rules → provider match (which credentials to inject)
-  OPA handles filtering; request_policy handles credential routing only.
+  request_policy rules → provider match → if matched: inject credentials, allow (no OPA query)
+                                        → if not matched: query OPA → allow or deny
 ```
 
-This means `request_policy` in `proxy.yaml` is no longer a security boundary — it only controls credential injection routing. A request can pass OPA but match no provider (allowed, no credentials injected — e.g., `extra_request_policy` equivalent). A request that fails OPA is blocked regardless of whether a provider would match.
+This means:
+
+- **Provider `request_policy` is the primary allowlist for LLM inference.** Requests to configured LLM endpoints are always allowed and always receive credentials, regardless of OPA state or policy. This is the proxy's core function and must not be disrupted.
+- **OPA governs everything else.** Non-provider requests (package registries, external APIs, webhooks, etc.) are allowed or denied by OPA policy. If OPA is unavailable, these requests are blocked (fail-closed).
+- **OPA cannot block provider-matched requests.** A default-deny OPA policy does not affect LLM inference. This is intentional — credential injection is the proxy's primary responsibility and must not depend on an external policy engine.
+- **OPA can grant access to additional endpoints** beyond what providers cover (e.g., Jira, Kubernetes, GitHub APIs). These endpoints get OPA's body-level inspection but no credential injection from the proxy (the agent must provide its own credentials, or a future provider can be configured).
 
 ### 6.7 Configuration Schema Addition
 
@@ -597,7 +610,7 @@ opa:
 | `full_policy_path` | string | `"/v1/data/agentbox"` | OPA REST API path for full evaluation (used to retrieve denial_reasons on deny). |
 | `timeout` | int | `5` | Timeout in seconds for OPA queries. |
 | `max_body_size` | int | `1048576` | Maximum request body size to parse and send to OPA (bytes). |
-| `fail_open` | bool | `false` | If `true`, allow requests when OPA is unreachable. **Not recommended** — defeats the purpose of policy enforcement. Provided for debugging only. |
+| `fail_open` | bool | `false` | If `true`, allow non-provider requests when OPA is unreachable. **Not recommended** — defeats the purpose of policy enforcement. Provided for debugging only. When `false` (default), only provider-matched requests are allowed when OPA is down. |
 
 ---
 
@@ -1040,7 +1053,7 @@ OPA has built-in decision logging that can be enabled independently. This is out
 
 ### 11.1 Fail-Closed
 
-The default and recommended behavior is fail-closed. If OPA is unreachable, the request is denied. The `fail_open` configuration option exists for debugging only and should never be used in production.
+The default and recommended behavior is fail-closed for non-provider requests. If OPA is unreachable, only requests matching a provider's `request_policy` are allowed (LLM inference continues working); all other external requests are blocked. This ensures the proxy's core function (credential injection for LLM providers) is never disrupted by OPA availability, while non-LLM traffic cannot bypass policy enforcement. The `fail_open` configuration option exists for debugging only and should never be used in production.
 
 ### 11.2 OPA Server Isolation
 
@@ -1098,13 +1111,13 @@ Rego policies are Turing-incomplete by design (no general loops, recursion is bo
 
 - Add `_opa_allow()` method using `urllib.request`.
 - Add `_opa_denial_reasons()` method for the secondary query on denial.
-- Add OPA health check in `running()` hook.
+- Log OPA availability at startup (warning if unreachable, not fatal).
 - Add `opa` configuration section parsing.
 
 ### Step 4: Rewire `requestheaders()` and add `request()` hook
 
 - Split the allow/deny logic: `requestheaders()` handles bodyless and streaming requests via OPA metadata-only query; `request()` handles body-bearing requests via OPA full query.
-- Remove the `rule_matches()` allowlist loop from `requestheaders()`.
+- When OPA is unreachable, fall back to allowing only provider-matched requests (LLM inference continues; all other requests blocked).
 - Retain `Provider.matches()` + `Provider.inject()` for credential injection after OPA allows.
 - Update the 403 response to include OPA denial reasons.
 - Update access logging with OPA decision metadata.
@@ -1124,25 +1137,20 @@ Rego policies are Turing-incomplete by design (no general loops, recursion is bo
 - Add `agentbox policy-reload` command for manual OPA reload.
 - Update `agentbox init` to set up the policy directory.
 
-### Step 7: Update proxy startup
-
-- Update `proxy/start.sh` to wait for OPA health check before starting mitmproxy.
-- Add retry logic with backoff for the OPA health check (OPA container may start slower than the proxy).
-
-### Step 8: Update documentation
+### Step 7: Update documentation
 
 - Update `docs/SPEC.md` sections on traffic mediation and request filtering.
 - Update `docs/ARCHITECTURE.md` with the OPA sidecar and body inspection flow.
 - Update `docs/SPEC-request-policy.md` with a deprecation note pointing to this spec.
 - Add comments in preset policy files documenting the rule format.
 
-### Step 9: Testing
+### Step 8: Testing
 
 - Test OPA query for allowed and denied requests.
 - Test body parsing for each supported content type (JSON, form, XML, YAML, text, multipart).
 - Test unsupported content types (protobuf, binary) pass metadata only.
 - Test body size limit enforcement.
-- Test fail-closed behavior when OPA is unreachable.
+- Test fallback behavior when OPA is unreachable: provider-matched requests allowed, all others blocked.
 - Test `agentbox allow` / `deny` writes correct Rego and OPA picks up changes.
 - Test hot-reload: modify policy file, verify next request uses new policy.
 - Test credential injection still works correctly after OPA allow.
