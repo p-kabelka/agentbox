@@ -616,9 +616,9 @@ opa:
 
 ## 7. Policy Examples
 
-### 7.1 Basic Allowlist (Equivalent to Current `request_policy`)
+### 7.1 Non-Provider Allowlist
 
-This policy replicates the current regex-based allowlist behavior in Rego:
+LLM provider requests are always allowed by the proxy addon (see Section 6.6) and never reach OPA. OPA policies govern non-provider traffic — package registries, documentation sites, external APIs, etc.
 
 ```rego
 # policies/main.rego
@@ -628,27 +628,29 @@ import rego.v1
 
 default allow := false
 
-# Anthropic API
+# Package registries (read-only)
 allow if {
-    input.request.host == "api.anthropic.com"
-    input.request.port == 443
-    regex.match(`^/v1/(messages(/.*)?|complete|models(/.*)?)$`, input.request.path)
-    input.request.method in {"POST", "GET"}
+    input.request.host in {"pypi.org", "files.pythonhosted.org", "registry.npmjs.org"}
+    input.request.method == "GET"
 }
 
-# OpenAI API
+# Fedora mirrors (read-only)
 allow if {
-    input.request.host == "api.openai.com"
-    input.request.port == 443
-    regex.match(`^/v1/(chat/completions|completions|embeddings|responses(/.*)?)$`, input.request.path)
-    input.request.method in {"POST", "GET"}
+    regex.match(`^.*\.fedoraproject\.org$`, input.request.host)
+    input.request.method == "GET"
 }
 
-# Vertex AI
+# Documentation sites (read-only)
 allow if {
-    regex.match(`^(.*-)?aiplatform\.googleapis\.com$`, input.request.host)
-    startswith(input.request.path, "/v1/projects/")
-    contains(input.request.path, "/publishers/anthropic/models/")
+    input.request.host in {"docs.python.org", "developer.mozilla.org", "pkg.go.dev"}
+    input.request.method == "GET"
+}
+
+# GitHub API (read-only, specific paths)
+allow if {
+    input.request.host == "api.github.com"
+    input.request.method == "GET"
+    regex.match(`^/repos/[^/]+/[^/]+/(contents|commits|pulls|issues)`, input.request.path)
 }
 ```
 
