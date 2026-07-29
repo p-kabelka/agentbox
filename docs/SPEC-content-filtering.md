@@ -248,7 +248,7 @@ allow if {
 
 To prevent the addon from buffering arbitrarily large request bodies, a configurable size limit is enforced:
 
-- **Default: 1 MiB** (`1048576` bytes).
+- **Default: 64 MB** (`67108864` bytes).
 - If `Content-Length` exceeds the limit, the body is not read. `body_available` is `false`, `body_parse_error` is `"body exceeds size limit"`.
 - If `Content-Length` is absent (chunked encoding), the body is read up to the limit. If the limit is reached before the body ends, reading stops, `body_available` is `false`, `body_parse_error` is `"body exceeds size limit"`.
 - Configurable via `opa.max_body_size` in `proxy.yaml`.
@@ -535,7 +535,7 @@ Body parsing is extracted into a dedicated method. It uses a content-type dispat
 ```python
 _REDACTED_HEADERS = frozenset({"authorization", "x-api-key", "proxy-authorization", "cookie"})
 
-_MAX_BODY_SIZE = 1_048_576  # 1 MiB default
+_MAX_BODY_SIZE = 67_108_864  # 64 MB default
 
 def _parse_body(self, flow: http.HTTPFlow) -> dict | None:
     ct = flow.request.headers.get("content-type", "")
@@ -598,7 +598,7 @@ opa:
   policy_path: "/v1/data/agentbox/allow"
   full_policy_path: "/v1/data/agentbox"
   timeout: 5
-  max_body_size: 1048576  # 1 MiB
+  max_body_size: 67108864  # 64 MB
   fail_open: false  # if true, allow requests when OPA is unreachable (NOT recommended)
 ```
 
@@ -609,7 +609,7 @@ opa:
 | `policy_path` | string | `"/v1/data/agentbox/allow"` | OPA REST API path for the allow decision. |
 | `full_policy_path` | string | `"/v1/data/agentbox"` | OPA REST API path for full evaluation (used to retrieve denial_reasons on deny). |
 | `timeout` | int | `5` | Timeout in seconds for OPA queries. |
-| `max_body_size` | int | `1048576` | Maximum request body size to parse and send to OPA (bytes). |
+| `max_body_size` | int | `67108864` | Maximum request body size to parse and send to OPA (bytes). |
 | `fail_open` | bool | `false` | If `true`, allow non-provider requests when OPA is unreachable. **Not recommended** — defeats the purpose of policy enforcement. Provided for debugging only. When `false` (default), only provider-matched requests are allowed when OPA is down. |
 
 ---
@@ -1072,9 +1072,9 @@ The OPA input document is constructed by the proxy addon from the actual HTTP re
 Parsing untrusted request bodies introduces risk:
 
 - **JSON:** `json.loads()` is safe against arbitrary input (no code execution, bounded memory for bounded input).
-- **XML:** `xmltodict.parse()` is vulnerable to XML entity expansion (billion laughs attack). Mitigation: use `defusedxml` or limit entity expansion. Since the body size is already capped at 1 MiB by default, the blast radius is bounded.
+- **XML:** `xmltodict.parse()` is vulnerable to XML entity expansion (billion laughs attack). Mitigation: use `defusedxml` or limit entity expansion. Since the body size is already capped at 64 MB by default, the blast radius is bounded.
 - **YAML:** `yaml.safe_load()` is safe (no arbitrary Python object instantiation).
-- **Body size limit:** The 1 MiB default cap prevents memory exhaustion from large bodies.
+- **Body size limit:** The 64 MB default cap prevents memory exhaustion from large bodies.
 
 ### 11.5 Credential Redaction
 
