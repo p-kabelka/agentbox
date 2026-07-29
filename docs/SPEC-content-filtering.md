@@ -297,7 +297,7 @@ services:
       - opa-net      # new: proxy can reach OPA
 
   opa:
-    image: docker.io/openpolicyagent/opa:1-static
+    image: docker.io/openpolicyagent/opa:1.18.2-static
     command:
       - "run"
       - "--server"
@@ -1225,14 +1225,14 @@ Rego policies are Turing-incomplete by design (no general loops, recursion is bo
 
 ---
 
-## 13. Open Questions
+## 13. Resolved Questions
 
-1. **OPA image pinning.** The spec uses `openpolicyagent/opa:1-static` (latest v1.x static binary). Should this be pinned to a specific version for reproducibility? The static variant has no OS dependencies, reducing supply chain risk.
+1. **OPA image pinning.** The image is pinned to `openpolicyagent/opa:1.18.2-static`. The static variant has no OS dependencies, reducing supply chain risk. Update the pin when upgrading OPA.
 
-2. **Policy testing tooling.** OPA has built-in test support (`opa test`). Should the PoC include a test harness for policy validation? This would let users run `opa test policies/` to verify their policies before deploying.
+2. **Policy testing tooling.** Not included in the PoC. OPA's built-in `opa test` can be used to validate preset policies during development, but no test harness is shipped to users.
 
-3. **Custom body parsers.** Should the addon support registering custom body parsers for domain-specific content types (e.g., GraphQL query parsing for `application/graphql`)? Or is this deferred to post-PoC?
+3. **Custom body parsers.** Out of scope. The addon supports JSON, form-encoded, XML, YAML, plain text, and multipart. Domain-specific parsers (e.g., GraphQL `application/graphql`) can be added later without architectural changes.
 
-4. **OPA bundles.** OPA supports loading policies from bundles (tar.gz) via HTTP. This is more production-grade than file watching but adds complexity. Defer to post-PoC?
+4. **OPA bundles.** Out of scope. The project runs locally — policies are loaded from a bind-mounted directory with `--watch`. Bundle loading via HTTP can be added later if remote policy management is needed.
 
-5. **Response filtering.** This spec covers only request filtering. Should OPA also evaluate responses (e.g., prevent the agent from receiving credentials in API responses)? This would require a `response()` hook integration and response body parsing. Defer to post-PoC.
+5. **Response filtering.** Deferred. The current architecture supports it without changes — the addon's `response()` hook can parse the response body, build an OPA input document, and query a separate policy path (e.g., `/v1/data/agentbox/allow_response`). No architectural changes needed; it can be added as a follow-up.
