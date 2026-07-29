@@ -105,7 +105,7 @@ Cedar was considered for its formal verification guarantees but intentionally om
                        - access logging          <--- (upstream)
 ```
 
-The OPA server runs on `agent-net` (`internal: true` — no internet route), the same network as the agent and proxy. The proxy can reach OPA directly because it is on `agent-net`. The agent is also on `agent-net` but cannot query OPA directly — all agent HTTP traffic is routed through mitmproxy via `HTTPS_PROXY`/`HTTP_PROXY` environment variables, and OPA's hostname is not in any allowlist, so mitmproxy blocks the request. No TLS is needed for the proxy-to-OPA hop since `agent-net` has no external exposure.
+The OPA server runs on a dedicated `opa-net` network (`internal: true`), shared only with the proxy. The agent container is **not** on `opa-net` and cannot reach OPA at the network level — DNS resolution for `opa` fails and no IP route exists. This is enforced by Podman's network namespace isolation, not by environment variables or proxy settings, so it cannot be bypassed by an agent with root access. The proxy is on all three networks (`agent-net`, `proxy-net`, `opa-net`) and is the only container that can reach both the agent and OPA. No TLS is needed for the proxy-to-OPA hop since `opa-net` is internal with no external exposure.
 
 ### 3.3 Separation of Concerns
 
@@ -279,33 +279,47 @@ This is not a limitation for the PoC — gRPC and streaming protobuf services ar
 
 ### 5.1 Deployment
 
-The OPA server runs as a sidecar container in the same Podman pod or internal network as the proxy. It is added to `compose-base.yaml`:
+The OPA server runs as a sidecar container on a dedicated internal network. The following changes are added to `compose-base.yaml`:
 
 ```yaml
-opa:
-  image: docker.io/openpolicyagent/opa:1-static
-  command:
-    - "run"
-    - "--server"
-    - "--addr=0.0.0.0:8181"
-    - "--watch"
-    - "/policies"
-  volumes:
-    - type: bind
-      source: ${POLICY_DIR:-./policies}
-      target: /policies
-      read_only: true
-  networks:
-    - agent-net
-  restart: unless-stopped
+networks:
+  agent-net:
+    internal: true   # no internet route; enforced by Podman
+  proxy-net:         # internet-connected; only the proxy service is attached
+  opa-net:
+    internal: true   # no internet route; only proxy and opa are attached
+
+services:
+  proxy:
+    networks:
+      - agent-net
+      - proxy-net
+      - opa-net      # new: proxy can reach OPA
+
+  opa:
+    image: docker.io/openpolicyagent/opa:1-static
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--watch"
+      - "/policies"
+    volumes:
+      - type: bind
+        source: ${POLICY_DIR:-./policies}
+        target: /policies
+        read_only: true
+    networks:
+      - opa-net      # only opa-net — not agent-net, not proxy-net
+    restart: unless-stopped
 ```
 
-The OPA container is attached only to `agent-net` (`internal: true` — no internet route). It does not need internet access — policies are loaded from a local bind-mounted volume. The proxy is on both `agent-net` and `proxy-net`, so it can reach OPA over `agent-net`. The agent container is also on `agent-net` but all its traffic is routed through mitmproxy via `HTTPS_PROXY` — it cannot query OPA directly because OPA listens on plain HTTP and the agent's proxy configuration forces all HTTP traffic through mitmproxy, which would block the request (OPA's hostname is not in any allowlist).
+The OPA container is on `opa-net` only. The agent container is on `agent-net` only. These are separate Podman networks with no shared connectivity — the agent cannot reach OPA even with root access (no IP route, no DNS resolution). The proxy is on all three networks and is the sole bridge between them. OPA does not need internet access — policies are loaded from a read-only bind-mounted volume.
 
 Key flags:
 
 - `--server`: Run as a daemon with REST API.
-- `--addr=0.0.0.0:8181`: Listen on all interfaces (`agent-net` only — no external exposure).
+- `--addr=0.0.0.0:8181`: Listen on all interfaces (`opa-net` only — no external exposure).
 - `--watch`: Watch the `/policies` directory for file changes and automatically reload policies.
 
 ### 5.2 Policy Directory Structure
@@ -1107,11 +1121,11 @@ The default and recommended behavior is fail-closed for non-provider requests. I
 
 ### 11.2 OPA Server Isolation
 
-The OPA server is on `agent-net` (`internal: true`), the same network as the agent. However, the agent cannot reach OPA directly because all agent HTTP traffic is forced through mitmproxy via `HTTPS_PROXY`/`HTTP_PROXY` environment variables, and OPA's hostname is not in any allowlist. The agent cannot:
+The OPA server is on `opa-net`, a dedicated internal network. The agent container is on `agent-net` only and is **not** attached to `opa-net`. Network isolation is enforced by Podman's network namespace — no IP route or DNS resolution exists between the agent and OPA. This cannot be bypassed by the agent even with root access (unsetting `HTTP_PROXY`, writing custom scripts, etc.). The agent cannot:
 
-- Query OPA to discover what policies are in effect (blocked by mitmproxy).
-- Modify OPA policies (policy files are bind-mounted read-only from the host).
-- Bypass OPA by connecting directly to external services (`agent-net` has no internet route; `proxy-net` is only attached to the proxy container).
+- Query OPA to discover what policies are in effect (no network route to OPA).
+- Modify OPA policies (policy files are bind-mounted read-only; agent has no filesystem access to the OPA container).
+- Bypass OPA by connecting directly to external services (`agent-net` has no internet route; `proxy-net` and `opa-net` are only attached to the proxy).
 
 ### 11.3 Input Document Trust
 
