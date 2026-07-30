@@ -2,3 +2,4 @@ mitmproxy
 google-auth
 pyyaml
 requests
+xmltodict

@@ -9,6 +9,8 @@ networks:
   agent-net:
     internal: true   # no internet route; enforced by Podman — no host iptables needed
   proxy-net:         # internet-connected; only the proxy service is attached
+  opa-net:
+    internal: true   # no internet route; only proxy and opa are attached
 
 services:
 
@@ -17,6 +19,7 @@ services:
     networks:
       - agent-net
       - proxy-net
+      - opa-net
     volumes:
       - ${AGENTBOX_HOME}/secrets:/run/secrets:ro,Z
       - proxy-ca:/root/.mitmproxy:z
@@ -30,6 +33,20 @@ services:
     #   VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
     #   VERTEX_REGION: ${VERTEX_REGION:-}
     # ports: defined per-project in compose.override.yaml
+    restart: unless-stopped
+
+  opa:
+    image: docker.io/openpolicyagent/opa:1.18.2-static
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--watch"
+      - "/policies"
+    volumes:
+      - ./policies:/policies:ro,Z
+    networks:
+      - opa-net
     restart: unless-stopped
 
   agent:
