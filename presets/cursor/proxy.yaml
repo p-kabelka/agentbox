@@ -3,7 +3,7 @@
 providers:
   - name: cursor
     enabled: true
-    credential_type: static
+    credential_type: cursor_api_key
     api_key_file: ~/.keys/cursor-token
     inject_header: Authorization
     inject_prefix: "Bearer "
