@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
@@ -13,8 +14,9 @@ import socket
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
-from typing import NoReturn
+from typing import Iterator, NoReturn
 
 import yaml
 
@@ -132,6 +134,26 @@ def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProc
         *args,
     ]
     return subprocess.run(cmd, env=env, **kwargs)
+
+
+@contextmanager
+def _proxy_lifetime(session_dir: Path) -> Iterator[None]:
+    """Keep the proxy up while this process (and any siblings) hold a shared lock."""
+    lock_path = session_dir / ".lifetime.lock"
+    with lock_path.open("a") as f:
+        fd = f.fileno()
+        fcntl.flock(fd, fcntl.LOCK_SH)
+        compose(session_dir, "up", "-d", "proxy", check=True)
+        try:
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                pass
+            else:
+                compose(session_dir, "down", check=True)
 
 
 def wait_healthy(session_dir: Path) -> None:
@@ -379,8 +401,8 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
     project_dir = Path(meta["project-dir"])
-    compose(session_dir, "up", "-d", "proxy", check=True)
-    result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
+    with _proxy_lifetime(session_dir):
+        result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
     # Auto-fetch when the session ends
     output_git = session_dir / "output.git"
     if output_git.is_dir():

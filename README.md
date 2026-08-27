@@ -88,7 +88,7 @@ agentbox stop   [--name NAME]            # stop containers
 agentbox remove [--name NAME]            # stop, delete session, output repo, and git remote
 ```
 
-`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. `agentbox start` can be called multiple times on the same session to run independent agent containers concurrently. Because agents run in krun microVMs, `podman exec` cannot reach a running container — use `agentbox start -- bash` to open a shell in a new container instead.
+`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. `agentbox start` can be called multiple times on the same session to run independent agent containers concurrently. The proxy stays up while any of those agents are running and is torn down (`compose down`, same as `agentbox stop`) when the last one exits. Because agents run in krun microVMs, `podman exec` cannot reach a running container — use `agentbox start -- bash` to open a shell in a new container instead.
 
 Everywhere where `--name` can be used, the parameter `--session` can also be used when you provide the session global ID found in `agentbox list --all`.
 
