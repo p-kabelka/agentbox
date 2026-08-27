@@ -14,20 +14,29 @@ _CONFIG_PATH = "/config/proxy.yaml"
 _RELOAD_PORT = 8082
 
 # Content-Types that must never be fully buffered by mitmproxy: plain proto/protobuf
-# bodies, and the Buf Connect streaming variants ("application/connect+proto",
-# "application/connect+json") used by bidirectional/server-streaming RPCs. Buffering
-# those would make mitmproxy wait for the body to end before forwarding anything -
-# which never happens for a long-lived stream, hanging the connection indefinitely.
+# bodies, Buf Connect streaming variants ("application/connect+proto",
+# "application/connect+json") used by bidirectional/server-streaming RPCs, and
+# Server-Sent Events ("text/event-stream") used by HTTP/1.1 fallbacks such as
+# Cursor CLI's useHttp1ForAgent. Buffering those would make mitmproxy wait for
+# the body to end before forwarding anything — which never happens for a
+# long-lived stream, hanging the connection indefinitely. The client then sees
+# the stream close without a terminal event (e.g. turnEnded).
 _STREAMABLE_CONTENT_TYPES = (
     "application/proto",
     "application/x-protobuf",
     "application/connect+",
     "application/grpc",
+    "text/event-stream",
 )
 
 
 def _is_streamable_content_type(content_type: str) -> bool:
-    return any(content_type.startswith(ct) for ct in _STREAMABLE_CONTENT_TYPES)
+    ct = content_type.lower()
+    return any(ct.startswith(prefix) for prefix in _STREAMABLE_CONTENT_TYPES)
+
+
+def _wants_sse(flow: http.HTTPFlow) -> bool:
+    return "text/event-stream" in flow.request.headers.get("accept", "").lower()
 
 
 class JSONFormatter(logging.Formatter):
@@ -194,7 +203,16 @@ class AgentboxAddon:
         if flow.metadata.get("agentbox_blocked"):
             return
         resp = flow.response
-        if resp is not None and _is_streamable_content_type(resp.headers.get("content-type", "")):
+        if resp is None:
+            return
+        # HTTP/1.1 SSE: request is often application/connect+json while the
+        # response is text/event-stream (or Accept advertised SSE). Stream if
+        # either side looks like a long-lived RPC/SSE body.
+        if (
+            _is_streamable_content_type(resp.headers.get("content-type", ""))
+            or _is_streamable_content_type(flow.request.headers.get("content-type", ""))
+            or _wants_sse(flow)
+        ):
             flow.response.stream = True
 
     def response(self, flow: http.HTTPFlow) -> None:
