@@ -786,6 +786,28 @@ def _list_sessions(show_all: bool) -> list[dict]:
     return entries
 
 
+def _list_session_containers(session_dir: Path) -> list[dict]:
+    """Collect container info dicts for listing."""
+    meta = read_compose_metadata(session_dir)
+    name = meta["name"]
+    project_dir = Path(meta["project-dir"])
+    project = f"agentbox-{project_name(project_dir)}-{name}"
+
+    result = subprocess.run(
+        ["podman", "ps", "-a", "--filter", f"label=com.docker.compose.project={project}", "--format", "{{.ID}}\t{{.Names}}"],
+        capture_output=True, text=True,
+    )
+
+    entries: list[dict] = []
+    for line in result.stdout.splitlines():
+        if not line.strip():
+            continue
+        cid, _, cname = line.partition("\t")
+        pid = subprocess.run(["podman", "inspect", "--format", "{{.State.Pid}}", cid], capture_output=True, text=True).stdout.strip()
+        entries.append({"id": cid, "pid": pid, "name": cname or cid})
+    return entries
+
+
 def _print_table(rows: list[list[str]], headers: list[str]) -> None:
     """Print a formatted table with column-aligned output."""
     widths = [len(h) for h in headers]
@@ -821,6 +843,20 @@ def cmd_list(args) -> None:
         headers = ["NAME", "STATUS", "URL", "SESSION ID"]
         rows = [[e["name"], e["status"], e["url"], e["session_id"]] for e in entries]
 
+    _print_table(rows, headers)
+
+
+def cmd_containers(args) -> None:
+    session_dir, _ = resolve_session(args)
+    as_json = getattr(args, "json", False)
+    entries = _list_session_containers(session_dir)
+
+    if as_json:
+        print(json.dumps(entries, indent=2))
+        return
+
+    headers = ["ID", "PID", "NAME"]
+    rows = [[e["id"], e["pid"], e["name"]] for e in entries]
     _print_table(rows, headers)
 
 
@@ -886,6 +922,8 @@ def main() -> None:
     list_subcommand = subcommand.add_parser("list", aliases=["ls"], help="List sessions for the current project")
     list_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
     list_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
+    containers_subcommand = subparser_with_name(subcommand.add_parser("containers", help="List containers for a session"))
+    containers_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
     subcommand.add_parser("status", help="List running agentbox containers")
 
     init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
@@ -957,6 +995,7 @@ def main() -> None:
         "status": cmd_status,
         "list": cmd_list,
         "ls": cmd_list,
+        "containers": cmd_containers,
         "remove": cmd_remove,
         "remote-cleanup": cmd_remote_cleanup,
         "preset": cmd_preset,
