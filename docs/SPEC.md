@@ -124,7 +124,7 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 |-------|----------|
 | Setup | `build [HARNESS...]`, `update [HARNESS...]`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
 | Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
-| Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
+| Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]`, `port-forward [-n NAME \| -s ID] <host>:<container>` |
 | Egress control | `allow <host> [-n NAME \| -s ID]`, `deny <host> [-n NAME \| -s ID]` |
 | Proxy management | `proxy-reload [-n NAME \| -s ID]`, `proxy-restart [-n NAME \| -s ID]` |
 | Reference mounts | `mount list [-n NAME \| -s ID]`, `mount add [-w] <SRC[:DST]> [-n NAME \| -s ID]`, `mount remove <DST> [-n NAME \| -s ID]` |
@@ -146,6 +146,8 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 All commands that operate on a specific session accept `--name <name>` (project-relative lookup) or `--session <session_id>` (global lookup by full session ID, works from any directory). The two flags are mutually exclusive. If the project has exactly one session, both are optional and the session is auto-detected. Session IDs are shown in the `list` output and can be used to manage sessions from any working directory.
 
 `agentbox list` and `agentbox ls` output a formatted table. With `--all`, sessions from all projects are shown with their project directory. With `--json`, the output is a JSON array for machine parsing.
+
+`agentbox port-forward` forwards a host TCP port into every running agent container for the session. It looks up each agent container PID and, in the foreground, runs `socat` with `nsenter` so connections to `<host-port>` are delivered to `<container-port>` on 127.0.0.1 inside the container's network namespace. Ctrl-C stops forwarding and terminates the child `socat` processes.
 
 ---
 
@@ -330,6 +332,7 @@ agentbox deny pypi.org                   # remove it (hot-reloads proxy)
 
 agentbox logs                            # tail the JSON access log from the proxy
 agentbox web                             # print the mitmweb traffic-monitor URL
+agentbox port-forward 8123:8000          # forward host port 8123 to port 8000 in agent containers
 
 agentbox mount add ~/libs/shared-lib     # add a read-only reference mount
 agentbox mount add -w ~/data/scratch     # add a writable reference mount

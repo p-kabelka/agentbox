@@ -99,6 +99,7 @@ agentbox logs [--name NAME] [--tail LAST_N_LINES]   # tail structured JSON acces
 agentbox web  [--name NAME]                         # print the mitmweb traffic-monitor URL
 agentbox list [--all]                               # list sessions (optionally across all projects)
 agentbox status                                     # list all running agentbox containers
+agentbox port-forward 8123:8000 [--name NAME]       # forward host port 8123 to port 8000 in agent containers
 ```
 
 ### Egress control

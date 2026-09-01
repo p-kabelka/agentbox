@@ -10,6 +10,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -860,6 +861,103 @@ def cmd_containers(args) -> None:
     _print_table(rows, headers)
 
 
+def _parse_port_mapping(spec: str) -> tuple[int, int]:
+    """Parse HOST:CONTAINER port mapping."""
+    parts = spec.split(":")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        die(f"invalid port mapping '{spec}' — expected HOST:CONTAINER")
+    try:
+        host_port = int(parts[0])
+        container_port = int(parts[1])
+    except ValueError:
+        die(f"invalid port mapping '{spec}' — ports must be integers")
+    for label, port in (("host", host_port), ("container", container_port)):
+        if not 1 <= port <= 65535:
+            die(f"invalid {label} port {port} — must be 1-65535")
+    return host_port, container_port
+
+
+def _running_agent_pids(session_dir: Path) -> list[int]:
+    """Return PIDs of running agent containers for a session (excludes proxy)."""
+    meta = read_compose_metadata(session_dir)
+    name = meta["name"]
+    project_dir = Path(meta["project-dir"])
+    project = f"agentbox-{project_name(project_dir)}-{name}"
+    prefixes = (f"{project}-agent", f"{project}_agent")
+
+    pids: list[int] = []
+    for entry in _list_session_containers(session_dir):
+        cname = entry["name"]
+        if not cname.startswith(prefixes):
+            continue
+        try:
+            pid = int(entry["pid"])
+        except (TypeError, ValueError):
+            continue
+        if pid > 0:
+            pids.append(pid)
+    return pids
+
+
+def _terminate_process_group(proc: subprocess.Popen) -> None:
+    """Send SIGTERM (then SIGKILL) to a process and its children."""
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+
+
+def cmd_port_forward(args) -> None:
+    host_port, container_port = _parse_port_mapping(args.mapping)
+    session_dir, _ = resolve_session(args)
+
+    if not shutil.which("socat"):
+        die("socat not found — install socat to use port-forward")
+    if not shutil.which("nsenter"):
+        die("nsenter not found — install util-linux to use port-forward")
+
+    pids = _running_agent_pids(session_dir)
+    if not pids:
+        die("no running agent containers found")
+
+    pid_list = ", ".join(str(p) for p in pids)
+    print(f"==> Forwarding host :{host_port} -> container :{container_port} (pid {pid_list})")
+    print("    Press Ctrl-C to stop")
+
+    procs: list[subprocess.Popen] = []
+    try:
+        for pid in pids:
+            exec_addr = (
+                f"nsenter -t {pid} -U -n -- socat STDIO TCP\\:127.0.0.1\\:{container_port}"
+            )
+            procs.append(
+                subprocess.Popen(
+                    [
+                        "socat",
+                        f"TCP-LISTEN:{host_port},reuseaddr,fork",
+                        f"EXEC:{exec_addr}",
+                    ],
+                    start_new_session=True,
+                )
+            )
+        codes = [proc.wait() for proc in procs]
+    finally:
+        for proc in procs:
+            _terminate_process_group(proc)
+    if any(code != 0 for code in codes):
+        sys.exit(1)
+
+
 def cmd_status(args) -> None:
     result = subprocess.run(
         ["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}"],
@@ -924,6 +1022,8 @@ def main() -> None:
     list_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
     containers_subcommand = subparser_with_name(subcommand.add_parser("containers", help="List containers for a session"))
     containers_subcommand.add_argument("--json", action="store_true", help="Output in JSON format")
+    port_forward_subcommand = subparser_with_name(subcommand.add_parser("port-forward", help="Forward a host port into running agent containers"))
+    port_forward_subcommand.add_argument("mapping", metavar="HOST:CONTAINER", help="Host port to container port (e.g. 8123:8000)")
     subcommand.add_parser("status", help="List running agentbox containers")
 
     init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
@@ -996,6 +1096,7 @@ def main() -> None:
         "list": cmd_list,
         "ls": cmd_list,
         "containers": cmd_containers,
+        "port-forward": cmd_port_forward,
         "remove": cmd_remove,
         "remote-cleanup": cmd_remote_cleanup,
         "preset": cmd_preset,
