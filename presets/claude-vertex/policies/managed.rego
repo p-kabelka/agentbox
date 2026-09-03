@@ -2,3 +2,10 @@
 package agentbox
 
 import rego.v1
+
+_managed_allow_hosts := set()
+_managed_deny_hosts := set()
+
+_allow_rules contains true if { input.request.host in _managed_allow_hosts }
+
+deny contains input.request.host if { input.request.host in _managed_deny_hosts }
