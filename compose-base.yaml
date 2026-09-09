@@ -58,6 +58,7 @@ services:
       http_proxy: http://proxy:8080
       NO_PROXY: proxy,localhost,127.0.0.1
       no_proxy: proxy,localhost,127.0.0.1
+      NODE_USE_ENV_PROXY: 1
     volumes:
       - proxy-ca:/proxy-ca:ro,z
     stdin_open: true
