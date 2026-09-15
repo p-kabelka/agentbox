@@ -929,7 +929,7 @@ def main() -> None:
     init_subcommand = subcommand.add_parser("init", help="Initialize a new agentbox session (use --start to also launch)")
     init_subcommand.add_argument("dir", nargs="?")
     init_subcommand.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
-    init_subcommand.add_argument("--preset", default=AGENTBOX_PRESET)
+    init_subcommand.add_argument("--preset", "-p", default=AGENTBOX_PRESET)
     init_subcommand.add_argument("--branch", default="")
     init_subcommand.add_argument("--no-git", action="store_true")
     init_subcommand.add_argument("--ro-mount", action="append", default=[], dest="ro_mounts", metavar="SRC[:DST]", help="Mount read-only reference directory")
