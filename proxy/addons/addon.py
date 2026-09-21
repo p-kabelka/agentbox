@@ -95,6 +95,46 @@ def _build_allowed_rules(providers: list[Provider], cfg: dict) -> list[CompiledR
     return rules
 
 
+def _blocked_request_entry(flow: http.HTTPFlow) -> dict:
+    request = flow.request
+    host = request.pretty_host
+    path = request.path.split("?", 1)[0]
+    method = request.method.upper()
+
+    entry = {
+        "method": method,
+        "url": request.pretty_url,
+        "status": 403,
+        "blocked": True,
+        "blocked_reason": "no matching policy rule",
+        "request_host": host,
+        "request_port": request.port,
+        "request_path": path,
+        "request_method": method,
+    }
+    if _log_req_hdr:
+        entry["req_headers"] = dict(request.headers)
+    if _log_bodies:
+        entry["req_body"] = request.get_text(strict=False)
+    return entry
+
+
+def _deny_request(flow: http.HTTPFlow) -> None:
+    host = flow.request.pretty_host
+    flow.response = http.Response.make(
+        403, f"Host '{host}' not allowed.\nTo allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {host}\n",
+        {"Content-Type": "text/plain"},
+    )
+    log.info(_blocked_request_entry(flow))
+
+
+def _log_failed_blocked_request(flow: http.HTTPFlow) -> None:
+    entry = _blocked_request_entry(flow)
+    entry["status"] = None
+    entry["blocked_reason"] = "no matching policy rule; request body failed"
+    log.info(entry)
+
+
 class AgentboxAddon:
     def __init__(self):
         cfg = _read_config()
@@ -129,6 +169,7 @@ class AgentboxAddon:
         log.info({"message": f"Reload endpoint listening on port {_RELOAD_PORT}"})
 
     async def _handle_reload_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        global _log_req_hdr, _log_resp_hdr, _log_bodies
         try:
             data = await reader.read(4096)
             cfg = _read_config()
@@ -146,6 +187,10 @@ class AgentboxAddon:
             allowed_rules = _build_allowed_rules(providers, cfg)
             new_cfg = _Config(allowed_rules=allowed_rules, providers=providers)
             self._cfg = new_cfg
+            lcfg = cfg.get("logging", {})
+            _log_req_hdr = lcfg.get("log_request_headers", True)
+            _log_resp_hdr = lcfg.get("log_response_headers", False)
+            _log_bodies = lcfg.get("log_bodies", False)
             log.info({"message": "Config reloaded",
                       "allowed_rules": len(new_cfg.allowed_rules),
                       "providers": len(new_cfg.providers)})
@@ -173,20 +218,12 @@ class AgentboxAddon:
         method = flow.request.method.upper()
 
         if not any(rule_matches(rule, host, port, path, method) for rule in cfg.allowed_rules):
-            flow.response = http.Response.make(
-                403, f"Host '{host}' not allowed.\nTo allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {host}\n",
-                {"Content-Type": "text/plain"},
-            )
             flow.metadata["agentbox_blocked"] = True
-            log.info({
-                "method": method,
-                "url": flow.request.pretty_url, "status": 403, "blocked": True,
-                "blocked_reason": "no matching policy rule",
-                "request_host": host,
-                "request_port": port,
-                "request_path": path,
-                "request_method": method,
-            })
+            if _log_bodies:
+                flow.request.stream = False
+                flow.metadata["agentbox_block_pending"] = True
+            else:
+                _deny_request(flow)
             return
 
         injected_providers = inject_matching_providers(cfg.providers, flow)
@@ -196,6 +233,16 @@ class AgentboxAddon:
 
         if _is_streamable_content_type(flow.request.headers.get("content-type", "")):
             flow.request.stream = True
+
+    def request(self, flow: http.HTTPFlow) -> None:
+        """Finish deferred denials after mitmproxy has read the complete request body."""
+        if flow.metadata.pop("agentbox_block_pending", False):
+            _deny_request(flow)
+
+    def error(self, flow: http.HTTPFlow) -> None:
+        """Log a deferred denial when an incomplete request body prevents request()."""
+        if flow.metadata.pop("agentbox_block_pending", False):
+            _log_failed_blocked_request(flow)
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("agentbox_blocked"):
