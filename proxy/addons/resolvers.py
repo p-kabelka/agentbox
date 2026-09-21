@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -10,6 +11,29 @@ from pathlib import PurePosixPath
 log = logging.getLogger("proxy")
 
 RESOLVER_CLASSES: dict[str, type["CredentialResolver"]] = {}
+
+
+def _secret_path(key_file: str, namespaced: bool) -> str:
+    name = PurePosixPath(key_file).name
+    if namespaced:
+        digest = hashlib.sha256(key_file.encode()).hexdigest()[:12]
+        name = f"{digest}-{name}"
+    return f"/run/secrets/{name}"
+
+
+def _read_secret_file(key_file: str, namespaced: bool) -> tuple[str, str, OSError | None]:
+    paths = [_secret_path(key_file, True)]
+    if not namespaced:
+        paths.append(_secret_path(key_file, False))
+
+    last_error = None
+    for path in paths:
+        try:
+            with open(path) as f:
+                return f.read().strip(), path, None
+        except OSError as exc:
+            last_error = exc
+    return "", ", ".join(paths), last_error
 
 
 class CredentialResolver(ABC):
@@ -32,13 +56,12 @@ class StaticKeyResolver(CredentialResolver, resolver_type="static"):
         key_file = config.get("api_key_file", "")
         env_var = config.get("api_key_env", "")
         if key_file:
-            container_path = f"/run/secrets/{PurePosixPath(key_file).name}"
-            try:
-                with open(container_path) as f:
-                    self._key = f.read().strip()
-            except OSError as exc:
+            self._key, container_path, error = _read_secret_file(
+                key_file, config.get("_namespaced_secret", False)
+            )
+            if error:
                 log.error("Provider '%s': cannot read key file at '%s' (from api_key_file '%s'): %s",
-                          name, container_path, key_file, exc)
+                          name, container_path, key_file, error)
         if not self._key and env_var:
             self._key = os.environ.get(env_var, "").strip()
         if not self._key and (key_file or env_var):
@@ -64,13 +87,12 @@ class CursorApiKeyResolver(CredentialResolver, resolver_type="cursor_api_key"):
         key_file = config.get("api_key_file", "")
         env_var = config.get("api_key_env", "")
         if key_file:
-            container_path = f"/run/secrets/{PurePosixPath(key_file).name}"
-            try:
-                with open(container_path) as f:
-                    self._api_key = f.read().strip()
-            except OSError as exc:
+            self._api_key, container_path, error = _read_secret_file(
+                key_file, config.get("_namespaced_secret", False)
+            )
+            if error:
                 log.error("Provider '%s': cannot read key file at '%s' (from api_key_file '%s'): %s",
-                          name, container_path, key_file, exc)
+                          name, container_path, key_file, error)
         if not self._api_key and env_var:
             self._api_key = os.environ.get(env_var, "").strip()
         if not self._api_key and (key_file or env_var):

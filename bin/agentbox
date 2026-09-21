@@ -196,6 +196,11 @@ def save_yaml(path: Path, cfg: dict) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
 
+def injection_secret_name(key_file: str) -> str:
+    digest = hashlib.sha256(key_file.encode()).hexdigest()[:12]
+    return f"{digest}-{Path(key_file).name}"
+
+
 def resolve_preset(name: str) -> Path:
     custom = AGENTBOX_HOME / "custom" / "presets" / name
     if custom.is_dir():
@@ -256,13 +261,25 @@ def generate_compose(
     for p in proxy_cfg.get("providers", []):
         if not p.get("enabled"):
             continue
-        key_file = p.get("api_key_file", "")
-        if key_file:
-            host_path = Path(key_file).expanduser().resolve()
-            if host_path.is_file():
-                proxy_volumes.append(f"{host_path}:/run/secrets/{host_path.name}:ro,Z")
-            else:
-                print(f"Provider {p.get('name', '?')}: api_key_file not found: {host_path}")
+        provider_injection_configs = p.get("injection_policy")
+        if provider_injection_configs is None:
+            injection_configs = [p]
+        else:
+            injection_configs = list(provider_injection_configs)
+        for rule in p.get("request_policy", []):
+            injection_configs.extend(rule.get("injection_policy", []))
+
+        for injection_config in injection_configs:
+            key_file = injection_config.get("api_key_file", "")
+            if key_file:
+                host_path = Path(key_file).expanduser().resolve()
+                if host_path.is_file():
+                    secret_name = injection_secret_name(key_file)
+                    mount = f"{host_path}:/run/secrets/{secret_name}:ro,Z"
+                    if mount not in proxy_volumes:
+                        proxy_volumes.append(mount)
+                else:
+                    print(f"Provider {p.get('name', '?')}: api_key_file not found: {host_path}")
 
     proxy["volumes"] = proxy_volumes
 

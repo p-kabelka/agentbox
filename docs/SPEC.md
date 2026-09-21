@@ -183,17 +183,24 @@ providers:
   - name: anthropic
     enabled: true
     credential_type: static       # "static" (API key) or "oauth" (Google OAuth)
-    api_key_env: ANTHROPIC_API_KEY # env var on the proxy side holding the real key
-    # api_key_file: ~/secrets/key  # alternative: read key from file (takes precedence)
-    inject_header: x-api-key       # HTTP header to inject the credential into
-    inject_prefix: ""              # prefix before the credential value (e.g., "Bearer ")
+    injection_policy:
+      - api_key_env: ANTHROPIC_API_KEY # env var on the proxy side holding the real key
+        # api_key_file: ~/secrets/key  # alternative: read key from file (takes precedence)
+        inject_header: x-api-key       # HTTP header to inject the credential into
+        inject_prefix: ""              # prefix before the credential value (e.g., "Bearer ")
     request_policy:                # L7 request rules — each binds paths to a specific host
       - host: "api\\.anthropic\\.com"
         paths:
           - "/v1/messages(/.*)?$"
           - "/v1/complete$"
-          - "/v1/models(/.*)?$"
         methods: [POST, GET]
+        injection_policy:          # credentials injected only for this rule
+          - api_key_env: ANTHROPIC_ADMIN_KEY
+            inject_header: x-admin-key
+      - host: "api\\.anthropic\\.com"
+        paths:
+          - "/v1/models(/.*)?$"
+        methods: [GET]
 
   - name: vertex
     enabled: true
@@ -236,14 +243,22 @@ logging:
 |-------|----------|-------------|
 | `name` | Yes | Provider identifier |
 | `enabled` | Yes | Whether the provider is active |
-| `credential_type` | Yes | `static` (API key from env/file) or `oauth` (Google OAuth token) |
-| `api_key_env` | No | Environment variable holding the API key (static type) |
-| `api_key_file` | No | Path to file containing the API key; takes precedence over env var (static type) |
-| `inject_header` | Yes | HTTP header where the credential is injected |
-| `inject_prefix` | No | String prepended to the credential value (e.g., `"Bearer "`) |
-| `replace_token` | No | If set, only inject when this token value is found in the header (oauth type) |
+| `credential_type` | Yes | Resolver used by every injection policy: `static`, `cursor_api_key`, or `oauth` |
+| `injection_policy` | No | Ordered list of credentials injected once when any provider request rule matches. Legacy top-level injection fields are treated as one policy when omitted. |
 | `metadata_server` | No | Start fake GCE metadata server for this provider (oauth type) |
 | `request_policy` | Yes | List of L7 request rules (see below) |
+
+**Injection policy fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `api_key_env` | No | Environment variable holding the source API key |
+| `api_key_file` | No | Path to the source API key file; takes precedence over the environment variable and is mounted when the session is initialized. |
+| `inject_header` | No | HTTP header to inject; defaults to `Authorization` |
+| `inject_prefix` | No | String prepended to the credential value (e.g., `"Bearer "`) |
+| `replace_token` | No | Only inject when the original header exactly equals `inject_prefix + replace_token` |
+
+Provider-level injection policies run first for every request that matches the provider. Then every matching request rule's injection policies run in request-rule order. If more than one policy writes the same header, the last successful injection wins. Replacement checks use the request headers as received by the proxy, before any credential is injected.
 
 **Request policy rule fields:**
 
@@ -253,6 +268,7 @@ logging:
 | `port` | `int` or `string` | No | `443` | Port number (exact match) or regex string (full match) |
 | `paths` | `list[string]` | No | `[".*"]` | Regex patterns matched against path (anchored at start with `^`; add `$` for exact match) |
 | `methods` | `list[string]` | No | `[]` (all) | HTTP methods (uppercase, exact match). Empty means all methods allowed |
+| `injection_policy` | `list[object]` | No | `[]` | Ordered credentials injected only when this rule matches |
 
 All regex patterns use Python `re` syntax and support environment variable expansion via `os.path.expandvars()`.
 

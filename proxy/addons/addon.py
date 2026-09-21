@@ -7,7 +7,7 @@ _addon_dir = os.path.dirname(os.path.abspath(__file__))
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
 
-from provider import Provider, CompiledRule, compile_rules, rule_matches
+from provider import Provider, CompiledRule, compile_rules, inject_matching_providers, rule_matches
 from resolvers import RESOLVER_CLASSES
 
 _CONFIG_PATH = "/config/proxy.yaml"
@@ -117,8 +117,7 @@ class AgentboxAddon:
             if cred_type:
                 resolver_cls = RESOLVER_CLASSES.get(cred_type)
                 if resolver_cls:
-                    resolver = resolver_cls(p)
-                    providers.append(Provider(p, resolver))
+                    providers.append(Provider(p, resolver_cls))
                 else:
                     log.error("Unknown credential_type '%s' for provider '%s'",
                               cred_type, p.get("name", "?"))
@@ -190,11 +189,10 @@ class AgentboxAddon:
             })
             return
 
-        for provider in cfg.providers:
-            if provider.matches(flow):
-                provider.inject(flow)
-                flow.metadata["agentbox_provider"] = provider.name
-                break
+        injected_providers = inject_matching_providers(cfg.providers, flow)
+        if injected_providers:
+            flow.metadata["agentbox_provider"] = injected_providers[-1]
+            flow.metadata["agentbox_providers"] = injected_providers
 
         if _is_streamable_content_type(flow.request.headers.get("content-type", "")):
             flow.request.stream = True
@@ -231,6 +229,9 @@ class AgentboxAddon:
         provider = flow.metadata.get("agentbox_provider")
         if provider:
             entry["provider"] = provider
+        providers = flow.metadata.get("agentbox_providers", [])
+        if len(providers) > 1:
+            entry["providers"] = providers
         if _log_req_hdr:
             entry["req_headers"] = dict(flow.request.headers)
         if _log_resp_hdr and resp:

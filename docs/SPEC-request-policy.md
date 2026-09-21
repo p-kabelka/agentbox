@@ -35,6 +35,7 @@ Before designing a custom solution, the following existing systems were evaluate
 |------|-------------|--------|
 | `proxy/addons/addon.py` | Allowlist enforcement + provider dispatch | Replace flat `allowed: list[str]` with compiled request policy; update `requestheaders()` to evaluate policies |
 | `proxy/addons/provider.py` | Provider matching (`fnmatch` on host, path) + credential injection | Remove `fnmatch` usage; replace `matches()` with compiled regex rules matching host+port+path+method; replace `allowed_hosts`/`path_prefixes` with `request_policy` |
+| `proxy/addons/resolvers.py` | Credential resolution | Resolve namespaced secret mounts used by provider- and rule-level injection policies |
 | `presets/*/proxy.yaml` | Provider config with `allowed_hosts` (hostname globs) and `path_prefixes` (path globs) | Replace with `request_policy` rules and `extra_request_policy`; remove `allowed_hosts`, `path_prefixes`, and `extra_allowed_hosts` |
 | `bin/agentbox` | `allow`/`deny` commands modify `extra_allowed_hosts` | Update to read/write `extra_request_policy` instead |
 | `docs/SPEC.md` | Documents current allowlist behavior | Update to reflect new request policy |
@@ -44,7 +45,6 @@ Before designing a custom solution, the following existing systems were evaluate
 
 | File | Reason |
 |------|--------|
-| `proxy/addons/resolvers.py` | Credential resolution is orthogonal to request matching. No changes. |
 | `proxy/metadata_server.py` | Fake metadata server is unaffected by policy changes. |
 | `proxy/start.sh` | Proxy entrypoint is unaffected. |
 | `compose-base.yaml` | Network topology is unaffected. |
@@ -85,6 +85,7 @@ Each rule in the `request_policy` list has the following fields:
 | `port` | `int` or `string` | No | `443` | Port number or regex pattern. When an integer, exact match. When a string, treated as a regex pattern (anchored). Default is `443` since all proxy traffic is HTTPS. |
 | `paths` | `list[string]` | No | `[".*"]` (match all) | List of Python regex patterns matched against the request path (without query string). Each pattern is anchored with implicit `^`. Not anchored with `$` by default — the pattern matches if it matches a prefix of the path unless the user explicitly adds `$`. |
 | `methods` | `list[string]` | No | `[]` (match all) | List of HTTP methods (uppercase). Empty list means all methods are allowed. Exact string match, not regex. |
+| `injection_policy` | `list[object]` | No | `[]` | Ordered credentials injected only when this rule matches. Uses the provider's `credential_type`. |
 
 ### 4.3 Pattern Matching Semantics
 
@@ -113,6 +114,38 @@ For ergonomic CLI usage, `agentbox allow` and `agentbox deny` continue to accept
 The old `allowed_hosts`, `path_prefixes`, and `extra_allowed_hosts` fields are removed. All presets and user configurations must use the new `request_policy` and `extra_request_policy` format.
 
 ### 4.5 Full Preset Examples
+
+Providers can inject multiple credentials by defining ordered `injection_policy` lists. A provider-level list runs once for every request that matches at least one provider rule, while a list on an individual request rule applies only when that rule matches. Each entry uses the provider's `credential_type` and can select its own source file or environment variable, destination header, prefix, and replacement token.
+
+```yaml
+- name: openai
+  enabled: true
+  credential_type: static
+  injection_policy:
+    - api_key_file: ~/.keys/openai-cookie
+      inject_header: Cookie
+      inject_prefix: "d="
+      replace_token: cookie-injected-by-proxy
+  request_policy:
+    - host: "api\\.openai\\.com"
+      paths:
+        - "/v1/chat/completions$"
+        - "/v1/responses(/.*)?$"
+      methods: [POST, GET]
+      injection_policy:
+        - api_key_file: ~/.keys/openai-token
+          inject_header: Authorization
+          inject_prefix: "Bearer "
+          replace_token: dummy-replaced-by-proxy
+    - host: "api\\.openai\\.com"
+      paths:
+        - "/v1/models$"
+      methods: [GET]
+```
+
+For compatibility, providers without `injection_policy` continue to use the top-level `api_key_file`, `api_key_env`, `inject_header`, `inject_prefix`, and `replace_token` fields as a single injection policy.
+
+Evaluation follows configuration order: providers, provider-level policies, matching request rules, then each rule's policies. Every matching rule contributes its policies. If multiple policies write the same header, the last successful write wins. Replacement checks always use the original request headers.
 
 **Anthropic Direct API:**
 
@@ -215,9 +248,7 @@ Compilation happens once at startup (and on hot-reload). Runtime matching is pur
 
 ### 5.2 Provider Matching Logic
 
-The `Provider.matches()` method is updated:
-
-The `replace_token` check remains as a separate guard after rule matching, preserving the Vertex/Cursor dummy token mechanism. The method returns `True` only if both a rule matched AND the replace_token check passes (if configured):
+`Provider.matches()` returns `True` when any compiled request rule matches the request's host, port, path, and method. Credential replacement guards are evaluated separately for every provider-level and rule-level injection policy against the original request headers. This preserves the Vertex/Cursor dummy token mechanism while allowing one provider to inject multiple scoped credentials.
 
 ```python
 def matches(self, flow: http.HTTPFlow) -> bool:
@@ -226,34 +257,13 @@ def matches(self, flow: http.HTTPFlow) -> bool:
     path = flow.request.path.split("?", 1)[0]
     method = flow.request.method.upper()
 
-    rule_matched = False
-    for rule in self._rules:
-        if not rule.host_re.fullmatch(host):
-            continue
-        if isinstance(rule.port, int):
-            if port != rule.port:
-                continue
-        else:
-            if not rule.port.fullmatch(str(port)):
-                continue
-        if not any(p.match(path) for p in rule.path_res):
-            continue
-        if rule.methods and method not in rule.methods:
-            continue
-        rule_matched = True
-        break
-
-    if not rule_matched:
-        return False
-
-    if self._replace_token:
-        current = flow.request.headers.get(self._header, "")
-        expected = f"{self._prefix}{self._replace_token}"
-        if current != expected:
-            return False
-
-    return True
+    return any(
+        rule_matches(rule, host, port, path, method)
+        for rule in self._rules
+    )
 ```
+
+After request matching, provider-level policies run first, followed by the policies from every matching request rule in rule order. Policies with `replace_token` inject only when the original header exactly equals `inject_prefix + replace_token`. Later successful writes override earlier writes to the same header.
 
 ### 5.3 Allowlist Enforcement
 
@@ -285,10 +295,9 @@ def requestheaders(self, flow: http.HTTPFlow) -> None:
         flow.metadata["agentbox_blocked"] = True
         return
 
-    for provider in cfg.providers:
-        if provider.matches(flow):
-            provider.inject(flow)
-            break
+    injected_providers = inject_matching_providers(cfg.providers, flow)
+    if injected_providers:
+        flow.metadata["agentbox_provider"] = injected_providers[-1]
 ```
 
 The `rule_matches()` function is a shared utility used by both the allowlist check and `Provider.matches()` to avoid duplicating the matching logic.
