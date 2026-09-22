@@ -115,7 +115,7 @@ class SecretPathTest(unittest.TestCase):
             with patch("resolvers.open", side_effect=open_secret, create=True):
                 resolver = StaticKeyResolver({
                     "api_key_file": "/new/location/token",
-                    "_namespaced_secret": True,
+                    "_require_namespaced_secret": True,
                 })
 
         self.assertIsNone(resolver.resolve())

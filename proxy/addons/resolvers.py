@@ -21,9 +21,9 @@ def _secret_path(key_file: str, namespaced: bool) -> str:
     return f"/run/secrets/{name}"
 
 
-def _read_secret_file(key_file: str, namespaced: bool) -> tuple[str, str, OSError | None]:
+def _read_secret_file(key_file: str, require_namespaced_secret: bool) -> tuple[str, str, OSError | None]:
     paths = [_secret_path(key_file, True)]
-    if not namespaced:
+    if not require_namespaced_secret:
         paths.append(_secret_path(key_file, False))
 
     last_error = None
@@ -57,7 +57,7 @@ class StaticKeyResolver(CredentialResolver, resolver_type="static"):
         env_var = config.get("api_key_env", "")
         if key_file:
             self._key, container_path, error = _read_secret_file(
-                key_file, config.get("_namespaced_secret", False)
+                key_file, config.get("_require_namespaced_secret", False)
             )
             if error:
                 log.error("Provider '%s': cannot read key file at '%s' (from api_key_file '%s'): %s",
@@ -88,7 +88,7 @@ class CursorApiKeyResolver(CredentialResolver, resolver_type="cursor_api_key"):
         env_var = config.get("api_key_env", "")
         if key_file:
             self._api_key, container_path, error = _read_secret_file(
-                key_file, config.get("_namespaced_secret", False)
+                key_file, config.get("_require_namespaced_secret", False)
             )
             if error:
                 log.error("Provider '%s': cannot read key file at '%s' (from api_key_file '%s'): %s",

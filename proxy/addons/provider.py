@@ -148,14 +148,14 @@ class Provider:
             base_config = {}
         else:
             base_config = resolver_base_config.copy()
-            base_config["_namespaced_secret"] = True
+            base_config["_require_namespaced_secret"] = True
         self._injection_policies = _build_injection_policies(
             policy_configs, base_config, resolver_cls
         )
 
         self._rules: list[CompiledRule] = []
         self._rule_injection_policies: list[tuple[CompiledRule, list[InjectionPolicy]]] = []
-        rule_base_config = {**resolver_base_config, "_namespaced_secret": True}
+        rule_base_config = {**resolver_base_config, "_require_namespaced_secret": True}
         for rule_config in config.get("request_policy", []):
             rule = compile_rule(rule_config)
             if rule is None:
