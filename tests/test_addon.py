@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import sys
+import time
 import types
 import unittest
 from pathlib import Path
@@ -46,8 +47,9 @@ def make_flow(body="denied body"):
         method="POST",
         headers={"Content-Type": "text/plain", "X-Test": "denied"},
         get_text=lambda strict=False: body,
+        timestamp_start=time.time() - 0.1,
     )
-    return types.SimpleNamespace(request=request, response=None, metadata={})
+    return types.SimpleNamespace(request=request, response=None, error=None, metadata={})
 
 
 class DeniedRequestLoggingTest(unittest.TestCase):
@@ -105,6 +107,46 @@ class DeniedRequestLoggingTest(unittest.TestCase):
         self.assertIsNone(entry["status"])
         self.assertEqual(entry["req_body"], "partial body")
         self.assertIn("request body failed", entry["blocked_reason"])
+
+    def test_logs_url_and_error_for_failed_allowed_request(self):
+        addon_module._log_bodies = False
+        flow = make_flow()
+        flow.error = types.SimpleNamespace(
+            msg="Server TLS handshake failed: connection closed",
+            timestamp=time.time(),
+        )
+
+        with patch.object(addon_module.log, "info") as log_info:
+            self.addon.error(flow)
+
+        log_info.assert_called_once()
+        entry = log_info.call_args.args[0]
+        self.assertEqual(entry["method"], "POST")
+        self.assertEqual(entry["url"], flow.request.pretty_url)
+        self.assertIsNone(entry["status"])
+        self.assertGreaterEqual(entry["duration_ms"], 0)
+        self.assertEqual(entry["error"], flow.error.msg)
+        self.assertEqual(entry["req_headers"], flow.request.headers)
+
+    def test_logs_upstream_tls_failure_context(self):
+        conn = types.SimpleNamespace(
+            error="connection closed",
+            sni="api.example.com",
+            address=("api.example.com", 443),
+            peername=("192.0.2.10", 443),
+        )
+
+        with patch.object(addon_module.log, "info") as log_info:
+            self.addon.tls_failed_server(types.SimpleNamespace(conn=conn))
+
+        entry = log_info.call_args.args[0]
+        self.assertEqual(entry["event"], "server_tls_handshake_failed")
+        self.assertEqual(entry["error"], "connection closed")
+        self.assertEqual(entry["server_host"], "api.example.com")
+        self.assertEqual(entry["server_port"], 443)
+        self.assertEqual(entry["server_ip"], "192.0.2.10")
+        self.assertEqual(entry["server_ip_port"], 443)
+        self.assertEqual(entry["server_sni"], "api.example.com")
 
     def test_reload_updates_logging_flags(self):
         class Reader:

@@ -135,6 +135,25 @@ def _log_failed_blocked_request(flow: http.HTTPFlow) -> None:
     log.info(entry)
 
 
+def _log_failed_request(flow: http.HTTPFlow) -> None:
+    error = flow.error
+    entry = {
+        "method": flow.request.method,
+        "url": flow.request.pretty_url,
+        "status": None,
+        "duration_ms": (
+            round((error.timestamp - flow.request.timestamp_start) * 1000)
+            if error else None
+        ),
+        "error": error.msg if error else "unknown HTTP error",
+    }
+    if _log_req_hdr:
+        entry["req_headers"] = dict(flow.request.headers)
+    if _log_bodies:
+        entry["req_body"] = flow.request.get_text(strict=False)
+    log.info(entry)
+
+
 class AgentboxAddon:
     def __init__(self):
         cfg = _read_config()
@@ -240,9 +259,26 @@ class AgentboxAddon:
             _deny_request(flow)
 
     def error(self, flow: http.HTTPFlow) -> None:
-        """Log a deferred denial when an incomplete request body prevents request()."""
+        """Log HTTP failures that do not produce a response event."""
         if flow.metadata.pop("agentbox_block_pending", False):
             _log_failed_blocked_request(flow)
+            return
+        _log_failed_request(flow)
+
+    def tls_failed_server(self, data) -> None:
+        """Add structured context to mitmproxy's upstream TLS failure log."""
+        conn = data.conn
+        entry = {
+            "event": "server_tls_handshake_failed",
+            "message": "Server TLS handshake failed",
+            "error": conn.error or "unknown TLS error",
+            "server_sni": conn.sni,
+        }
+        if conn.address:
+            entry["server_host"], entry["server_port"] = conn.address
+        if conn.peername:
+            entry["server_ip"], entry["server_ip_port"] = conn.peername
+        log.info(entry)
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("agentbox_blocked"):
