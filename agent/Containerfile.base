@@ -8,6 +8,7 @@ RUN dnf install -y \
         vim \
         tmux \
         jq \
+        ripgrep \
     && dnf clean all
 
 COPY start.sh /start.sh
