@@ -20,9 +20,11 @@ providers:
   - name: openai
     enabled: false
     credential_type: static
-    api_key_env: OPENAI_API_KEY
-    inject_header: Authorization
-    inject_prefix: "Bearer "
+    injection_policy:
+      - api_key_file: ~/.openai-api-key
+        inject_header: Authorization
+        inject_prefix: "Bearer "
+        replace_token: "dummy-replaced-by-proxy"
     request_policy:
       - host: "api\\.openai\\.com"
         paths:
@@ -46,16 +48,17 @@ providers:
           - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/.*"
 
   # Azure: uncomment and set api_key_env + request_policy to add Azure OpenAI
-  # - name: azure-openai
-  #   enabled: false
-  #   credential_type: static
-  #   api_key_env: AZURE_OPENAI_API_KEY
-  #   inject_header: api-key
-  #   inject_prefix: ""
-  #   request_policy:
-  #     - host: ".*\\.openai\\.azure\\.com"
-  #       paths:
-  #         - "/openai/deployments/.*"
+  - name: azure-openai
+    enabled: false
+    credential_type: static
+    request_policy:
+      - host: ".*\\.openai\\.azure\\.com"
+        paths:
+          - "/openai/deployments/.*"
+        injection_policy:
+          - api_key_env: AZURE_OPENAI_API_KEY
+            inject_header: api-key
+            inject_prefix: ""
 
 # Custom trusted CA certificates (filenames from custom/certs/). Installed into
 # the proxy's system trust store at startup so mitmproxy trusts upstream servers
