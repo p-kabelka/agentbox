@@ -10,6 +10,7 @@ RUN pip install --no-cache-dir --require-hashes -r /tmp/requirements.txt && \
 
 COPY addons/ /addons/
 COPY metadata_server.py /app/metadata_server.py
+COPY manage_secrets.py /app/manage_secrets.py
 COPY start.sh /start.sh
 
 EXPOSE 8080 8081 9090

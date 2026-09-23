@@ -88,7 +88,7 @@ The system has three distinct trust zones separated by explicit boundaries:
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Host → Proxy**: The host mounts real credentials into the proxy as read-only volumes (environment variables or secret files) and starts the proxy container. The proxy is trusted to enforce policy correctly. It runs minimal, auditable code.
+**Host → Proxy**: Explicit CLI commands transfer provider file credentials through stdin into a private proxy tmpfs. Environment credentials and explicitly mounted OAuth files retain their existing behavior. The proxy is trusted to enforce policy correctly. It runs minimal, auditable code.
 
 **Proxy → Agent (inbound)**: The proxy's fake metadata server issues dummy tokens to satisfy the agent's GCP auth library initialization. For direct API providers, the proxy serves as a CONNECT-tunneling proxy. The agent receives only what it needs to make API calls — not the credentials that authorise those calls. Real credentials are injected by the proxy addon on intercepted requests, never issued to the agent directly.
 
@@ -141,17 +141,25 @@ The proxy container is attached to both networks and is the sole egress point fo
 
 **Addon modules** (`addons/`):
 
-- **`addon.py`** — The `AgentboxAddon` class. Loads `proxy.yaml` at startup and on hot-reload. Builds the combined L7 request policy from all enabled providers' `request_policy` rules plus `extra_request_policy` rules. The `requestheaders()` hook enforces the policy (HTTP 403 for non-matching requests) and delegates credential injection to `Provider` objects. The `response()` hook logs structured JSON. Exposes an async HTTP reload endpoint on port 8082 so that `agentbox allow`/`deny` can update the policy without restarting the proxy or dropping active connections — this is important because interrupting an LLM inference request mid-stream may not be recoverable. Hot-reload supports two paths: a fast path (allowlist-only, reuses existing providers) for `agentbox allow`/`deny`, and a full reload (rebuilds providers with `run_in_executor` for blocking resolver init) when provider configuration changes.
+- **`addon.py`** — The `AgentboxAddon` class. Loads `proxy.yaml` at startup and explicit reload. Builds the combined L7 request policy from enabled providers' `request_policy` plus `extra_request_policy`. `requestheaders()` enforces HTTP 403 for denials and HTTP 503 for applicable unavailable credentials. The loopback-only reload server at `127.0.0.1:8082` serializes both operations with one async lock. Fast `/reload` reuses providers and rejects pending provider-fingerprint changes before touching runtime state. `/reload/providers` checks the expected full-configuration fingerprint, always rebuilds providers in an executor, and atomically applies a structurally valid candidate containing rules, resolvers, logging settings, and availability. Failures retain the previous candidate. `/health` provides a read-only readiness check. Existing connections and streams survive provider swaps. Structured access logs redact injected headers.
 
-- **`provider.py`** — The `Provider` class and L7 request matching engine. Each provider's `request_policy` is compiled at startup into `CompiledRule` objects containing pre-compiled regex patterns for host (full match), port (integer or regex), path (start-anchored), and HTTP methods. The shared `rule_matches()` function is used by both the allowlist check and `Provider.matches()`. On match, the provider delegates to a `CredentialResolver` to obtain the credential value and injects it into the configured HTTP header.
+- **`provider.py`** — The `Provider` class and L7 request matching engine. Each provider's `request_policy` compiles into `CompiledRule` objects with regex patterns for host (full match), port, path, and methods. `rule_matches()` is shared by the allowlist and provider checks. Provider-level and matching rule-level injection policies evaluate original headers, then resolve all applicable credentials before committing any header changes. Invalid skipped rules do not contribute availability requirements. A failed policy cannot partially inject or block unrelated providers/extra rules.
 
 - **`resolvers.py`** — Credential resolver implementations, registered via `__init_subclass__`:
-  - `StaticKeyResolver` (`credential_type: static`) — Reads the API key from a file at `/run/secrets/` (via `api_key_file`) or from an environment variable (via `api_key_env`). File takes precedence.
+  - `StaticKeyResolver` (`credential_type: static`) — Reads synchronized namespaced `/run/secrets/` files at construction and serves keys from memory. A usable file takes precedence over a non-empty `api_key_env` fallback.
+  - `CursorApiKeyResolver` (`credential_type: cursor_api_key`) — Loads the same source types, exchanges the key for a cached token, and starts with an empty token cache on reconstruction.
   - `OAuthResolver` (`credential_type: oauth`) — Loads Google credentials via `google.auth.default()`, refreshes tokens as needed using a threading lock for safe concurrent access.
 
 **`metadata_server.py`** — A minimal HTTP server implementing the subset of the GCE instance metadata API used by the Google auth library. Started only when `vertex.metadata_server: true` is set in `proxy.yaml`. Returns fixed dummy tokens (`dummy-replaced-by-proxy`) on all token requests — it holds no real GCP credentials. The dummy token satisfies the ADC initialization check; the `OAuthResolver` in the addon replaces it with a real token on intercepted requests.
 
 **`start.sh`** — Proxy entrypoint. Conditionally starts the metadata server. Installs custom CA certificates from `/custom-certs/` if present. Launches mitmweb. Waits for CA cert generation. Manages process lifecycle with signal handling.
+
+**`manage_secrets.py`** — Fixed, standard-library-only executable invoked through `compose exec -T`.
+Inventories the Compose-managed secret directory, resets managed targets and private
+temporary files, and installs length/digest/payload frames received exclusively through stdin.
+Each installation uses a unique private temporary file and atomic rename to a `0400` final
+target. Unrelated entries are never deleted. `addons/secret_contract.py` shares target-name
+validation, canonical fingerprints, and framing with the host; no additional host dependency is needed.
 
 ### 4.3 Agent Container
 
@@ -174,7 +182,7 @@ The proxy container is attached to both networks and is the sole egress point fo
 
 `compose-base.yaml` defines the shared service template: two networks (`agent-net` internal, `proxy-net` external), two named volumes (`proxy-ca` for the mitmproxy CA cert, `proxy-logs` for access logs), and base service definitions for the proxy and agent.
 
-At `agentbox init` time, the CLI merges `compose-base.yaml` with the preset configuration to produce a single `compose.yaml` in the session directory. This includes: port mapping for the mitmweb UI, volume mounts for the session's proxy config, source bundle, output repo (with read-only overlays for `hooks/` and `config`), dotfiles, context mounts, Vertex credential mounts, custom certificate mounts, and provider secret file mounts.
+At `agentbox init` time, the CLI merges `compose-base.yaml` with the preset configuration to produce a single `compose.yaml` in the session directory. This includes the web port, mounts for config, source bundle, protected output repo, dotfiles, context, explicit OAuth directories, and certificates. Provider source paths and target names are absent. Compose provides `/run/secrets:rw,noexec,nosuid,nodev,mode=0700` as a root-owned tmpfs (verified with `podman-compose` 1.5.0), without a feature-specific size limit. The CLI and secret helper use this store directly.
 
 ---
 
@@ -268,7 +276,7 @@ This design keeps project directories clean (no `.agentbox/` directories), enabl
 
 ### 6.6 Unified compose.yaml per session
 
-At `agentbox init` time, `compose-base.yaml` (the shared template defining images, networks, and base environment) is merged with the preset configuration (provider volumes, environment variables, runtime) to produce a single `compose.yaml` in the session directory.
+At `agentbox init` time, `compose-base.yaml` (the shared template defining images, networks, tmpfs, and base environment) is merged with the preset configuration (explicit non-provider volumes, environment variables, runtime) to produce a single `compose.yaml` in the session directory.
 
 `podman compose -f compose.yaml` uses this self-contained file at runtime. Images are defined once in `compose-base.yaml` and reused across all projects — a change to the proxy's Python addons requires rebuilding one image, not regenerating every session's configuration.
 
@@ -283,6 +291,30 @@ The addon exposes an async HTTP endpoint on port 8082 that re-reads `proxy.yaml`
 ### 6.8 Resolver pattern for credential injection
 
 Credential injection uses a `CredentialResolver` abstraction with implementations registered via `__init_subclass__`. Each provider in `proxy.yaml` specifies a `credential_type` (e.g., `static`, `oauth`) that maps to a resolver class. This separates provider matching (L7 request policy rules matching host, port, path, and method) from credential acquisition (reading a file, refreshing an OAuth token), making it straightforward to add new credential protocols without modifying the matching logic.
+
+### 6.9 Explicit one-shot secret transactions
+
+Only `start`, `proxy-reload`, and `proxy-restart` synchronize provider files. With
+`<session-dir>/.secret-sync.lock` held, the host reads the current `proxy-config/proxy.yaml`,
+computes full/provider fingerprints, discovers enabled top-level/provider/rule references,
+validates targets/collisions, and opens and reads each source once.
+Relative paths use `x-metadata.project-dir`; the exact configured string determines the
+12-hex SHA-256 prefix and basename. Every invocation reopens sources, handling atomic
+replacement and symlink retargeting without inode-bound mounts.
+
+After preflight the CLI starts/reuses/restarts the proxy, waits for exec and reload readiness,
+resets the entire managed target set, transfers all usable sources, and calls the full reload
+exactly once. It verifies the applied fingerprint before launching the agent. Missing or
+empty sources become per-policy unavailable warnings unless an environment fallback works.
+Teardown, stop, and remove acquire the same lock; failed preflight never restarts a working proxy.
+An interrupted transaction leaves existing resolver memory active and is recovered by rerunning
+a command. There is no persistent sync metadata, change detector, watcher, or background retry.
+
+**Raw Compose and automatic restarts start with an empty secret tmpfs.** Matching file policies
+without fallbacks return 503 until explicit synchronization. `$AGENTBOX_HOME/secrets` is not
+automatically mounted or created. Non-provider OAuth mounts stay outside `/run/secrets`.
+Environment updates still require recreation. See [SPEC-manual-secrets.md](SPEC-manual-secrets.md)
+for the protocol and failure contract.
 
 ---
 

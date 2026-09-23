@@ -1,4 +1,4 @@
-# Default provider preset. Copied to .agentbox/sessions/<name>/config/proxy.yaml on 'agentbox run --name <name>'.
+# Copied to $AGENTBOX_STATE/sessions/<session-id>/proxy-config/proxy.yaml at init.
 
 providers:
   - name: vertex
@@ -13,7 +13,7 @@ providers:
         paths:
           - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/.*"
 
-# Volumes to mount into the proxy container for credentials.
+# OAuth volumes remain bind mounts; /run/secrets is reserved for provider key sync.
 # Each entry has 'src' (host path, ~ expanded) and 'dst' (container path).
 # All mounts are read-only.
 proxy_volumes:

@@ -14,7 +14,7 @@ Two containers run per session: a **proxy** (holds real credentials, enforces an
 
 ## Prerequisites
 
-- Podman with `podman compose`
+- Podman with `podman compose` (`podman-compose` 1.5.0 or newer; tmpfs syntax verified with 1.5.0)
 - Python 3 with PyYAML (`pip install pyyaml`, `dnf install python3-pyyaml`)
 - `krun` / `crun-vm` for VM-level isolation (recommended; agent container uses `runtime: krun`)
 
@@ -111,9 +111,23 @@ agentbox deny  pypi.org [--name NAME]   # remove host from allowlist
 ### Proxy management
 
 ```bash
-agentbox proxy-reload  [--name NAME]    # reload proxy config without restarting
-agentbox proxy-restart [--name NAME]    # restart proxy container (waits for health check)
+agentbox proxy-reload  [--name NAME]    # synchronize keys and reload providers in place
+agentbox proxy-restart [--name NAME]    # restart proxy, repopulate keys, and reload
 ```
+
+Provider files are synchronized **only** by `start`, `proxy-reload`, and `proxy-restart`.
+Edit the current session's `proxy-config/proxy.yaml` or replace a host key file, then run
+`proxy-reload` to apply the change without interrupting active requests. Every `start`
+synchronizes, including when it shares an existing proxy. There is no file watcher.
+
+**Direct `podman compose up` and automatic container restarts do not synchronize keys.**
+Their tmpfs starts empty. Requests requiring an unavailable credential receive HTTP 503
+until a synchronization command runs; healthy providers and ordinary allowlist rules
+continue working. A non-empty `api_key_env` is used as a fallback when configured.
+
+`allow` and `deny` save the edit and reload only non-provider settings. If provider changes
+are pending, the CLI reports that the saved edit is not active: run `proxy-reload` once to
+apply both changes. You do not need to repeat `allow` or `deny`.
 
 ### Reference mounts
 
@@ -150,7 +164,7 @@ agentbox remote-cleanup   # remove stale agentbox-* git remotes with no matching
 
 ### Providers
 
-Each session has its own `proxy.yaml` at `.agentbox/sessions/<name>/proxy.yaml`, copied from the preset on `agentbox init`. Edit it to enable providers:
+Each session has its own `$AGENTBOX_STATE/sessions/<session-id>/proxy-config/proxy.yaml`, copied from the preset on `agentbox init`. The default state directory is `~/.local/state/agentbox`. Edit the session file to enable providers:
 
 ```yaml
 providers:
@@ -158,19 +172,21 @@ providers:
     enabled: true
     credential_type: static        # "static" (API key) or "oauth" (Google OAuth)
     api_key_env: ANTHROPIC_API_KEY # env var on the proxy side
-    # api_key_file: ~/secrets/key  # alternative: read key from file (takes precedence)
+    # api_key_file: ~/secrets/key  # host source synchronized by explicit commands
     inject_header: x-api-key
     inject_prefix: ""
-    allowed_hosts:
-      - api.anthropic.com
-    path_prefixes:                 # only inject credentials on matching paths
-      - /v1/messages
-      - /v1/messages/*
-      - /v1/complete
-      - /v1/models
+    request_policy:
+      - host: 'api\.anthropic\.com'
+        paths: ['/v1/messages(/.*)?$', '/v1/complete$', '/v1/models(/.*)?$']
 ```
 
-The real API key is read from the proxy container's environment or a mounted secret file — never from the agent.
+The real API key is read from the proxy container's environment or synchronized tmpfs — never
+from the agent. `api_key_file` takes precedence. Host `~` expansion is supported; relative paths
+resolve against the session's project directory, even with `--session` from another directory.
+Replacing a file atomically or retargeting a symlink takes effect on the next synchronization.
+Keys and their content digests travel through stdin, never command arguments or Compose.
+Injected headers are redacted in structured access logs. Environment changes still require
+container recreation.
 
 ### Vertex AI
 
@@ -183,11 +199,13 @@ providers:
     inject_header: Authorization
     inject_prefix: "Bearer "
     replace_token: "dummy-replaced-by-proxy"
-    allowed_hosts:
-      - "aiplatform.googleapis.com"
-      - "*-aiplatform.googleapis.com"
-    path_prefixes:
-      - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/*"
+    request_policy:
+      - host: '(.*-)?aiplatform\.googleapis\.com'
+        paths: ['/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/.*']
+
+proxy_volumes:
+  - src: ~/.config/gcloud
+    dst: /root/.config/gcloud
 
 environment:
   GOOGLE_CLOUD_PROJECT: my-gcp-project
@@ -195,7 +213,10 @@ environment:
   VERTEX_REGION: global
 ```
 
-Place GCP credentials at `$AGENTBOX_HOME/secrets/credentials.json`, or let the proxy use your local gcloud ADC (`~/.config/gcloud` is mounted read-only when Vertex is enabled).
+The example mounts local gcloud ADC read-only. Alternatively, explicitly mount a service-account
+file at `/oauth/credentials.json` using `proxy_volumes` and set
+`GOOGLE_APPLICATION_CREDENTIALS: /oauth/credentials.json` in the preset's `environment`.
+OAuth discovery retains its existing behavior and is separate from `api_key_file` synchronization.
 
 ### Presets
 
@@ -241,3 +262,10 @@ git -C ~/.local/share/agentbox pull
 agentbox update              # rebuild all images without cache
 agentbox update claude       # rebuild only the claude harness image
 ```
+
+## Verification
+
+Run `python3 -m unittest discover -s tests -v` with PyYAML installed. Installing
+`podman-compose==1.5.0` enables the Compose tmpfs argument check; installing the proxy's
+mitmproxy dependency enables the real HTTP streaming/reload regression. The latter requires
+working local TCP listeners and reports a skip when the environment cannot provide them.

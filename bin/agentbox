@@ -14,11 +14,14 @@ import socket
 import subprocess
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
-from typing import Iterator, NoReturn
+from typing import Iterator, NamedTuple, NoReturn
 
 import yaml
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "proxy" / "addons"))
+from secret_contract import fingerprint, injection_secret_name, installation_frame
 
 AGENTBOX_HOME   = Path(os.environ.get("AGENTBOX_HOME", Path.home() / ".local" / "share" / "agentbox"))
 AGENTBOX_PRESET = os.environ.get("AGENTBOX_PRESET", "default")
@@ -137,38 +140,45 @@ def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProc
 
 
 @contextmanager
+def _secret_sync_lock(session_dir: Path) -> Iterator[None]:
+    with (session_dir / ".secret-sync.lock").open("a") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        # A remove command may have deleted the session while we waited.
+        if not (session_dir / "compose.yaml").is_file():
+            die("session removed while waiting for secret synchronization")
+        yield
+
+
+@contextmanager
 def _proxy_lifetime(session_dir: Path) -> Iterator[None]:
-    """Keep the proxy up while this process (and any siblings) hold a shared lock."""
+    """Enter under the sync lock after synchronization, before launching an agent."""
     lock_path = session_dir / ".lifetime.lock"
     with lock_path.open("a") as f:
         fd = f.fileno()
         fcntl.flock(fd, fcntl.LOCK_SH)
-        compose(session_dir, "up", "-d", "proxy", check=True)
         try:
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                pass
-            else:
-                compose(session_dir, "down", check=True)
+            if session_dir.exists():
+                with _secret_sync_lock(session_dir):
+                    fcntl.flock(fd, fcntl.LOCK_UN)
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    except BlockingIOError:
+                        pass
+                    else:
+                        compose(session_dir, "down", check=True)
 
 
 def wait_healthy(session_dir: Path) -> None:
-    web_port = read_port(session_dir)
-    print("==> Waiting for proxy", end="", flush=True)
+    """Wait for both compose exec and the loopback reload interface."""
     for _ in range(40):
-        r = subprocess.run(["curl", "-so", "/dev/null", f"http://localhost:{web_port}/"], capture_output=True)
-        if r.returncode == 0:
-            print(" ready.")
+        ready = compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "--max-time", "2",
+                        "http://127.0.0.1:8082/health", capture_output=True)
+        if ready.returncode == 0:
             return
-        print(".", end="", flush=True)
         time.sleep(2)
-    print(" timed out!")
-    compose(session_dir, "logs", "--tail=40", "proxy")
-    sys.exit(1)
+    die("Proxy execution/reload interface timed out; rerun the command")
 
 
 def read_compose_metadata(session_dir: Path) -> dict:
@@ -196,9 +206,132 @@ def save_yaml(path: Path, cfg: dict) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
 
-def injection_secret_name(key_file: str) -> str:
-    digest = hashlib.sha256(key_file.encode()).hexdigest()[:12]
-    return f"{digest}-{Path(key_file).name}"
+class SecretReference(NamedTuple):
+    source: str
+    host_path: Path
+    target: str
+    provider: str
+
+
+def discover_secrets(cfg: dict, project_dir: Path) -> list[SecretReference]:
+    """Discover once for preflight/validation; Compose never declares secrets."""
+    if not project_dir.is_absolute():
+        raise ValueError("Session project-dir must be absolute")
+    references = []
+    sources = set()
+    targets = {}
+    for provider in cfg.get("providers", []):
+        if not provider.get("enabled"):
+            continue
+        policies = provider.get("injection_policy")
+        policies = [provider] if policies is None else list(policies)
+        for rule in provider.get("request_policy", []):
+            policies.extend(rule.get("injection_policy", []))
+        for policy in policies:
+            source = policy.get("api_key_file", "")
+            if not source:
+                continue
+            target = injection_secret_name(source)
+            if source in sources:
+                continue
+            if target in targets and targets[target] != source:
+                raise ValueError("Provider secret target collision")
+            sources.add(source)
+            targets[target] = source
+            path = Path(source).expanduser()
+            if not path.is_absolute():
+                path = project_dir / path
+            try:
+                path = path.resolve()
+            except (OSError, RuntimeError, ValueError):
+                # Inaccessible parents and symlink loops are unavailable sources,
+                # not configuration errors. The open below reports them per source.
+                pass
+            references.append(SecretReference(source, path, target,
+                                              provider.get("name", "?")))
+    return references
+
+
+def _read_source(reference: SecretReference) -> bytes | None:
+    try:
+        payload = reference.host_path.read_bytes()
+        if not payload.decode("utf-8").strip():
+            raise ValueError
+        return payload
+    except (OSError, ValueError):
+        print(f"Warning: provider {reference.provider}: source {reference.source} "
+              "is not transferable; checking proxy fallback on reload", file=sys.stderr)
+        return None
+
+
+def _secret_preflight(session_dir: Path) -> tuple[str, str, list]:
+    try:
+        with (session_dir / "proxy-config" / "proxy.yaml").open() as stream:
+            cfg = yaml.safe_load(stream)
+        if not isinstance(cfg, dict):
+            raise ValueError
+        full = fingerprint(cfg)
+        providers = fingerprint(cfg.get("providers", []))
+        references = discover_secrets(cfg, Path(read_compose_metadata(session_dir)["project-dir"]))
+    except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+        die("Invalid session provider configuration or secret target; fix proxy.yaml and rerun")
+    return full, providers, [(ref, _read_source(ref)) for ref in references]
+
+
+def _manager(session_dir: Path, operation: str, *args: str, payload=None) -> None:
+    result = compose(session_dir, "exec", "-T", "proxy", "python3", "/app/manage_secrets.py",
+                     operation, *args, input=payload, capture_output=True)
+    if result.returncode:
+        die(f"Secret {operation} failed; rerun the synchronization command")
+
+
+def _reload_proxy(session_dir: Path, expected: str | None = None) -> dict:
+    endpoint = "/reload/providers" if expected is not None else "/reload"
+    headers = ["-H", f"X-Agentbox-Config-Fingerprint: {expected}"] if expected is not None else []
+    result = compose(session_dir, "exec", "-T", "proxy", "curl", "-sS", "--max-time", "120",
+                     "-w", "\n%{http_code}", *headers, f"http://127.0.0.1:8082{endpoint}",
+                     capture_output=True, text=True)
+    if result.returncode:
+        die("Proxy reload failed; rerun the command when the proxy is ready")
+    body, _, status = result.stdout.rpartition("\n")
+    if status == "409":
+        if expected is None:
+            die("Allowlist edit saved but not active: provider changes are pending. "
+                "Run agentbox proxy-reload to apply both changes")
+        die("Concurrent configuration change; rerun the synchronization command")
+    if status != "200":
+        die("Proxy rejected the configuration; fix proxy.yaml and rerun")
+    try:
+        response = json.loads(body)
+        if not isinstance(response, dict):
+            raise ValueError
+        return response
+    except ValueError:
+        die("Invalid proxy reload response; rerun the command")
+
+
+def _synchronize_secrets(session_dir: Path, snapshot: tuple, action: str) -> None:
+    """Caller holds .secret-sync.lock across preflight, lifecycle and verification."""
+    full, providers, sources = snapshot
+    if action == "reload":
+        running = compose(session_dir, "exec", "-T", "proxy", "true", capture_output=True).returncode == 0
+        if not running:
+            die("proxy-reload requires a running proxy; run agentbox start")
+    if action == "start":
+        compose(session_dir, "up", "-d", "proxy", check=True)
+    elif action == "restart":
+        compose(session_dir, "restart", "proxy", check=True)
+    wait_healthy(session_dir)
+    _manager(session_dir, "reset")
+    for reference, payload in sources:
+        if payload is not None:
+            _manager(session_dir, "install", reference.target, payload=installation_frame(payload))
+    result = _reload_proxy(session_dir, full)
+    if result.get("fingerprint") != full or result.get("provider_fingerprint") != providers:
+        die("Applied configuration fingerprint mismatch; rerun the synchronization command")
+    for policy in result.get("unavailable", []):
+        print(f"Warning: provider {policy['provider']}, policy {policy['policy']}: credential unavailable",
+              file=sys.stderr)
 
 
 def resolve_preset(name: str) -> Path:
@@ -257,29 +390,6 @@ def generate_compose(
             proxy_volumes.append(f"{cert_path}:/custom-certs/{cert_name}:ro,Z")
         else:
             print(f"Warning: trusted certificate not found: {cert_path}")
-
-    for p in proxy_cfg.get("providers", []):
-        if not p.get("enabled"):
-            continue
-        provider_injection_configs = p.get("injection_policy")
-        if provider_injection_configs is None:
-            injection_configs = [p]
-        else:
-            injection_configs = list(provider_injection_configs)
-        for rule in p.get("request_policy", []):
-            injection_configs.extend(rule.get("injection_policy", []))
-
-        for injection_config in injection_configs:
-            key_file = injection_config.get("api_key_file", "")
-            if key_file:
-                host_path = Path(key_file).expanduser().resolve()
-                if host_path.is_file():
-                    secret_name = injection_secret_name(key_file)
-                    mount = f"{host_path}:/run/secrets/{secret_name}:ro,Z"
-                    if mount not in proxy_volumes:
-                        proxy_volumes.append(mount)
-                else:
-                    print(f"Provider {p.get('name', '?')}: api_key_file not found: {host_path}")
 
     proxy["volumes"] = proxy_volumes
 
@@ -346,8 +456,6 @@ def _resolve_gh_token() -> str | None:
 def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, tag="latest") -> None:
     extra = ["--no-cache"] if no_cache else []
     agent_ctx = AGENTBOX_HOME / "agent"
-
-    (AGENTBOX_HOME / "secrets").mkdir(parents=True, exist_ok=True)
 
     targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
     build_env = dict(os.environ)
@@ -418,8 +526,14 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
     project_dir = Path(meta["project-dir"])
-    with _proxy_lifetime(session_dir):
-        result = compose(session_dir, "run", "--rm", "agent", *(cmd or []))
+    with ExitStack() as lifetime:
+        with _secret_sync_lock(session_dir):
+            snapshot = _secret_preflight(session_dir)
+            _synchronize_secrets(session_dir, snapshot, "start")
+            del snapshot
+            lifetime.enter_context(_proxy_lifetime(session_dir))
+        # Dependency startup would be another proxy lifecycle action outside the lock.
+        result = compose(session_dir, "run", "--rm", "--no-deps", "agent", *(cmd or []))
     # Auto-fetch when the session ends
     output_git = session_dir / "output.git"
     if output_git.is_dir():
@@ -563,7 +677,8 @@ def cmd_start(args) -> None:
 
 def cmd_stop(args) -> None:
     session_dir, _ = resolve_session(args)
-    compose(session_dir, "down", check=True)
+    with _secret_sync_lock(session_dir):
+        compose(session_dir, "down", check=True)
 
 
 def cmd_logs(args) -> None:
@@ -623,7 +738,7 @@ def _update_allowlist(host: str, add: bool, args) -> None:
             print(f"Removed '{host}' from allowlist for session '{session_name}'.")
         else:
             print(f"'{host}' not in allowlist for session '{session_name}'.")
-    compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "http://localhost:8082/reload", check=True)
+    _reload_proxy(session_dir)
 
 
 def cmd_allow(args) -> None:
@@ -636,14 +751,15 @@ def cmd_deny(args) -> None:
 
 def cmd_proxy_reload(args) -> None:
     session_dir, _ = resolve_session(args)
-    compose(session_dir, "exec", "-T", "proxy", "curl", "-sf", "http://localhost:8082/reload", check=True)
+    with _secret_sync_lock(session_dir):
+        _synchronize_secrets(session_dir, _secret_preflight(session_dir), "reload")
     print("Proxy config reloaded.")
 
 
 def cmd_proxy_restart(args) -> None:
     session_dir, _ = resolve_session(args)
-    compose(session_dir, "restart", "proxy", check=True)
-    wait_healthy(session_dir)
+    with _secret_sync_lock(session_dir):
+        _synchronize_secrets(session_dir, _secret_preflight(session_dir), "restart")
 
 
 def cmd_remove(args) -> None:
@@ -651,12 +767,11 @@ def cmd_remove(args) -> None:
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
 
-    compose(session_dir, "down", "-v", check=True)
-
-    remote = f"agentbox-{name}"
-    subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote], capture_output=True)  # best-effort; may not be a git repo
-
-    shutil.rmtree(session_dir, ignore_errors=True)
+    with _secret_sync_lock(session_dir):
+        compose(session_dir, "down", "-v", check=True)
+        remote = f"agentbox-{name}"
+        subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote], capture_output=True)
+        shutil.rmtree(session_dir, ignore_errors=True)
 
     print(f"Removed session '{name}'.")
 

@@ -13,7 +13,7 @@ except ModuleNotFoundError:
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "proxy" / "addons"))
 
-from provider import Provider, inject_matching_providers
+from provider import CredentialUnavailable, Provider, inject_matching_providers
 
 
 class FakeResolver:
@@ -26,6 +26,10 @@ class FakeResolver:
 
     def resolve(self):
         return self._value
+
+    @property
+    def available(self):
+        return bool(self._value)
 
 
 class Headers(dict):
@@ -72,6 +76,38 @@ def provider_config(**overrides):
 
 
 class ProviderTest(unittest.TestCase):
+    def test_unavailable_policy_never_partially_injects_across_policies_or_providers(self):
+        healthy = Provider(provider_config(injection_policy=[{
+            "inject_header": "x-key", "test_value": "healthy", "replace_token": "dummy",
+        }]), FakeResolver)
+        unavailable = Provider(provider_config(injection_policy=[{
+            "inject_header": "x-missing", "replace_token": "dummy",
+        }]), FakeResolver)
+        flow = make_flow({"x-key": "dummy", "x-missing": "dummy"})
+        original = flow.request.headers.copy()
+        with self.assertRaises(CredentialUnavailable):
+            inject_matching_providers([healthy, unavailable], flow)
+        self.assertEqual(flow.request.headers, original)
+
+        combined = Provider(provider_config(injection_policy=[
+            {"inject_header": "x-key", "test_value": "healthy"},
+            {"inject_header": "x-missing"},
+        ]), FakeResolver)
+        with self.assertRaises(CredentialUnavailable):
+            combined.inject(flow)
+        self.assertEqual(flow.request.headers, original)
+
+    def test_missing_nonapplicable_policy_and_invalid_rules_do_not_gate(self):
+        provider = Provider(provider_config(injection_policy=[{
+            "inject_header": "x-missing", "replace_token": "expected",
+        }], request_policy=[
+            {"host": r"api\.openai\.com"},
+            {"host": "[", "injection_policy": [{"api_key_file": "missing"}]},
+        ]), FakeResolver)
+        flow = make_flow({"x-missing": "not-expected"})
+        self.assertEqual(inject_matching_providers([provider], flow), [])
+        self.assertEqual(len(provider.unavailable), 1)
+
     def test_injects_multiple_credentials(self):
         provider = Provider(provider_config(injection_policy=[
             {
@@ -157,9 +193,9 @@ class ProviderTest(unittest.TestCase):
         self.assertEqual(injected, ["openai", "openai2"])
         self.assertEqual(flow.request.headers["x-token"], "second")
 
-    def test_nested_policy_does_not_inherit_legacy_secret_source(self):
+    def test_nested_policy_does_not_inherit_top_level_secret_source(self):
         provider = Provider(provider_config(
-            api_key_file="legacy-file",
+            api_key_file="top-level-file",
             injection_policy=[{
                 "api_key_env": "nested-env",
                 "inject_header": "x-token",

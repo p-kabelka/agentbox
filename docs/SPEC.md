@@ -76,7 +76,7 @@ All agent TCP connections to external hosts are routed through the proxy. The pr
 
 The agent container receives dummy placeholder values for API key environment variables (e.g., `ANTHROPIC_API_KEY=dummy`). When the agent makes an HTTPS call to a provider's API, the connection is intercepted by the proxy. The proxy verifies the destination host is permitted, strips the dummy key from the request headers, and injects the real key. The real key never enters the agent container's memory or filesystem.
 
-The proxy supports reading API keys from environment variables or from files mounted at a secrets path, allowing teams to avoid placing secrets in shell profiles.
+The proxy supports API keys from environment variables or from host files synchronized into proxy-local tmpfs by explicit commands, allowing teams to avoid placing secrets in shell profiles.
 
 **GCP Vertex AI**
 
@@ -135,9 +135,11 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 
 `agentbox init` creates a timestamped (or named) session directory under `$AGENTBOX_STATE/sessions/`, copies the chosen preset's `proxy.yaml` (without its `environment` field) to the session directory, extracts any inline dotfiles from the preset's `agent.yaml`, creates a git bundle of the current branch (unless `--no-git`), initialises the bare output repository with read-only hooks and config, registers a git remote, and generates a unified `compose.yaml`. The session is optionally launched immediately if `--start` is passed.
 
-`agentbox start` starts the proxy, then runs a new agent container interactively. The `compose.yaml` is persistent — edits made directly to it are preserved across restarts. Any arguments after `--` are forwarded to the agent entrypoint and override what gets exec'd (e.g., `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently. When the last concurrent agent for that session exits, the proxy is stopped with `compose down` (the same as `agentbox stop`).
+`agentbox start` preflights the session configuration and provider files, starts or reuses the proxy, synchronizes credentials into its tmpfs, and verifies a full provider reload before running a new agent container interactively. The `compose.yaml` is persistent — edits made directly to it are preserved across restarts. Any arguments after `--` are forwarded to the agent entrypoint and override what gets exec'd (e.g., `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently; each invocation synchronizes. When the last concurrent agent exits, teardown reacquires the synchronization lock before `compose down`.
 
 `agentbox allow` and `agentbox deny` append or remove rules in `extra_request_policy` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections. Hostnames are automatically escaped for regex safety. The `host:port` syntax is supported (e.g., `agentbox allow registry.internal.com:8443`).
+
+These edits use fast `/reload`, which never rebuilds providers. If the provider fingerprint differs from the active snapshot, the edit is saved but not activated; the CLI instructs the user to run `proxy-reload` to apply both changes. `proxy-reload` requires a running proxy and always synchronizes all provider files and rebuilds resolvers, even with unchanged YAML. `proxy-restart` preflights before restarting, then repopulates tmpfs and verifies the reload.
 
 `agentbox build` and `agentbox update` build container images. Both accept optional harness names to build specific harness images (e.g., `agentbox build claude opencode`). `update` rebuilds without cache.
 
@@ -160,7 +162,8 @@ Each session directory is fully self-contained:
 | File | Purpose |
 |------|---------|
 | `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on `agentbox init`. Contains `x-metadata.project-dir` and `x-metadata.name` for session identification. |
-| `proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init |
+| `proxy-config/proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init; sole authority for provider secret declarations |
+| `.secret-sync.lock` | Exclusive synchronization/lifecycle lock; contains no secret data |
 | `dotfiles/` | Extracted dotfiles from preset `agent.yaml` |
 | `source.bundle` | Read-only git snapshot of the source branch |
 | `output.git/` | Bare repo output barrier — agent pushes here |
@@ -185,7 +188,7 @@ providers:
     credential_type: static       # "static" (API key) or "oauth" (Google OAuth)
     injection_policy:
       - api_key_env: ANTHROPIC_API_KEY # env var on the proxy side holding the real key
-        # api_key_file: ~/secrets/key  # alternative: read key from file (takes precedence)
+        # api_key_file: ~/secrets/key  # host source synchronized at start/reload/restart
         inject_header: x-api-key       # HTTP header to inject the credential into
         inject_prefix: ""              # prefix before the credential value (e.g., "Bearer ")
     request_policy:                # L7 request rules — each binds paths to a specific host
@@ -214,7 +217,7 @@ providers:
         paths:
           - "/v1/projects/${VERTEX_PROJECT_ID}/locations/${VERTEX_REGION}/publishers/anthropic/models/.*"
 
-# Volumes to mount into the proxy container for credentials.
+# OAuth/non-provider mounts; /run/secrets and its children are reserved.
 # proxy_volumes:
 #   - src: "~/.config/gcloud"
 #     dst: "/root/.config/gcloud"
@@ -223,7 +226,7 @@ providers:
 # trusted_certificates:
 #   - my-internal-ca.crt
 
-# Additional egress rules (host-only). Changes take effect automatically.
+# Additional egress rules. Apply edits with allow/deny or proxy-reload.
 extra_request_policy: []
 
 # Proxy container environment variables
@@ -244,7 +247,7 @@ logging:
 | `name` | Yes | Provider identifier |
 | `enabled` | Yes | Whether the provider is active |
 | `credential_type` | Yes | Resolver used by every injection policy: `static`, `cursor_api_key`, or `oauth` |
-| `injection_policy` | No | Ordered list of credentials injected once when any provider request rule matches. Legacy top-level injection fields are treated as one policy when omitted. |
+| `injection_policy` | No | Ordered list of credentials injected once when any provider request rule matches. Top-level injection fields are treated as one policy when omitted. |
 | `metadata_server` | No | Start fake GCE metadata server for this provider (oauth type) |
 | `request_policy` | Yes | List of L7 request rules (see below) |
 
@@ -253,12 +256,14 @@ logging:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `api_key_env` | No | Environment variable holding the source API key |
-| `api_key_file` | No | Path to the source API key file; takes precedence over the environment variable and is mounted when the session is initialized. |
+| `api_key_file` | No | Host source synchronized only at `start`, `proxy-reload`, or `proxy-restart`. `~` expands on the host; relative paths use `x-metadata.project-dir`. A usable file takes precedence over the environment fallback. |
 | `inject_header` | No | HTTP header to inject; defaults to `Authorization` |
 | `inject_prefix` | No | String prepended to the credential value (e.g., `"Bearer "`) |
 | `replace_token` | No | Only inject when the original header exactly equals `inject_prefix + replace_token` |
 
 Provider-level injection policies run first for every request that matches the provider. Then every matching request rule's injection policies run in request-rule order. If more than one policy writes the same header, the last successful injection wins. Replacement checks use the request headers as received by the proxy, before any credential is injected.
+
+All applicable credentials resolve before any header is changed. An unavailable applicable policy produces HTTP 503 without upstream contact or partial injection. A `replace_token` mismatch is non-applicable. Invalid skipped request rules never create unavailable runtime policies. Allowlist denials remain HTTP 403; healthy providers and ordinary extra rules are independent. Set `injection_policy: []` when credentials are declared only on request rules.
 
 **Request policy rule fields:**
 
@@ -276,9 +281,53 @@ All regex patterns use Python `re` syntax and support environment variable expan
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `proxy_volumes` | No | List of `{src, dst}` volume mounts for the proxy container (e.g., credential directories). All mounts are read-only. `src` supports `~` expansion. |
+| `proxy_volumes` | No | List of `{src, dst}` read-only mounts (e.g., gcloud ADC at `/root/.config/gcloud`, OAuth JSON at `/oauth/credentials.json`). `src` supports `~`. |
 | `extra_request_policy` | No | Additional egress rules using the same rule schema as provider `request_policy`. These rules control allowlisting only — they never trigger credential injection. |
 | `trusted_certificates` | No | Filenames from `custom/certs/` to install into the proxy's system trust store |
+
+#### Manual provider secret synchronization
+
+The complete protocol is specified in [SPEC-manual-secrets.md](SPEC-manual-secrets.md).
+Generated Compose files declare only an empty, root-owned writable tmpfs:
+
+```yaml
+tmpfs:
+  - /run/secrets:rw,noexec,nosuid,nodev,mode=0700
+```
+
+This syntax is verified against `podman-compose` 1.5.0. There is no feature-specific size
+limit, host secret mount, generated credential target, or credential value in generated
+Compose. `$AGENTBOX_HOME/secrets` is neither automatically mounted nor created for this feature.
+
+Each command holds `<session-dir>/.secret-sync.lock` across preflight, proxy lifecycle,
+readiness, target reset, complete transfer, and exactly one `/reload/providers` call.
+`stop`, `remove`, and final lifetime teardown take the same lock. Preflight validates
+names and collisions and opens and reads every source once before any tmpfs mutation.
+Sources are expected to be regular credential files. Missing, unreadable, empty, or invalid-text files are skipped;
+the proxy uses a non-empty configured environment fallback or marks that policy unavailable.
+
+Targets are `<sha256(exact configured source)[:12]>-<basename>`; ASCII basenames must match
+`[A-Za-z0-9._-]+`, excluding `.` and `..`, with at most 242 bytes (255 including the prefix).
+Payload length, digest, and bytes travel only through stdin to `/app/manage_secrets.py`.
+The helper resets managed targets/private temporary files, refuses unrelated entries, and
+validates each framed transfer before an atomic rename at mode `0400`. No persistent sync
+state or delta detection exists; rerunning a command recovers interrupted staging.
+
+Canonical JSON SHA-256 fingerprints bind the full reload to the host snapshot and prevent
+fast reload from applying unsynchronized provider changes. Full reload constructs a complete
+candidate in an executor, then swaps it in-process after structural validation. Mismatches
+or transfer failures retain the old in-memory resolvers when that process still exists.
+After restart failure, the new process's last successful load determines availability.
+Static resolvers read files only at construction; Cursor reconstruction clears its token cache.
+Existing streams retain their injected credential; subsequent requests use the new resolvers.
+Structured access logs redact injected headers.
+
+**Raw `podman compose up` and automatic restarts do not synchronize.** File policies without
+environment fallbacks return 503 until an explicit synchronization command succeeds. No
+watcher, polling daemon, automatic host-file response, or background retry exists. Environment
+updates still require recreation; OAuth discovery is unchanged. Compose manages `/run/secrets`;
+the synchronizer and secret helper use that directory directly. Resolvers read the generated
+namespaced target for each configured source.
 
 ### 6.4 Agent Configuration (`agent.yaml`)
 
@@ -379,8 +428,8 @@ agentbox remove                          # stop, delete session dir, output repo
 
 ```bash
 agentbox remote-cleanup                  # remove stale agentbox-* git remotes with no matching session
-agentbox proxy-reload                    # reload proxy config without restart
-agentbox proxy-restart                   # restart proxy container (waits for health check)
+agentbox proxy-reload                    # synchronize keys and reload providers in place
+agentbox proxy-restart                   # restart, repopulate tmpfs, and reload providers
 ```
 
 ---

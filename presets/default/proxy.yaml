@@ -1,11 +1,12 @@
-# Default provider preset. Copied to .agentbox/sessions/<name>/config/proxy.yaml on 'agentbox run --name <name>'.
+# Copied to $AGENTBOX_STATE/sessions/<session-id>/proxy-config/proxy.yaml at init.
+# Apply session config/key changes with agentbox proxy-reload (or the next start).
 
 providers:
 
   - name: anthropic
     enabled: false
     credential_type: static
-    # api_key_file: /secrets/anthropic_key  # read key from file (takes precedence over env)
+    # api_key_file: ~/.keys/anthropic_key  # host source; synchronized at start/reload/restart
     api_key_env: ANTHROPIC_API_KEY
     inject_header: x-api-key
     inject_prefix: ""
@@ -34,7 +35,7 @@ providers:
           - "/v1/responses(/.*)?$"
         methods: [POST, GET]
 
-  # Requires credentials at ~/.agentbox/secrets/credentials.json
+  # Requires an explicit gcloud/OAuth proxy_volumes mount (see below).
   - name: vertex
     enabled: false
     credential_type: oauth
@@ -51,6 +52,7 @@ providers:
   - name: azure-openai
     enabled: false
     credential_type: static
+    injection_policy: []  # credentials are declared only on request rules below
     request_policy:
       - host: ".*\\.openai\\.azure\\.com"
         paths:
@@ -67,7 +69,7 @@ providers:
 # trusted_certificates:
 #   - my-internal-ca.pem
 
-# Volumes to mount into the proxy container for credentials.
+# Volumes for OAuth and other non-provider files; /run/secrets is reserved.
 # Each entry has 'src' (host path, ~ expanded) and 'dst' (container path).
 # All mounts are read-only.
 # proxy_volumes:

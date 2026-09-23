@@ -31,7 +31,7 @@ services:
 
 The exact syntax must be verified against the supported `podman-compose` version. The tmpfs has no feature-specific size limit; normal host and container memory limits apply.
 
-`/run/secrets` is reserved for synchronized provider credentials. Compose generation must reject any `proxy_volumes` destination equal to or below it.
+`/run/secrets` is managed by Compose for synchronized provider credentials. The CLI and secret helper use that directory directly; mount type, permissions, and volume destinations are not independently checked.
 
 The current mount logic is localized in `compose-base.yaml:20-22` and `generate_compose()` at `bin/agentbox:243-284`. Replace those mounts in place rather than adding a second Compose-generation path.
 
@@ -57,7 +57,7 @@ Session config creation, the `/config` mount, project metadata, and proxy-side r
 
 For every enabled provider in the configuration snapshot:
 
-1. If the provider has no `injection_policy`, treat the provider object as one legacy injection policy.
+1. If the provider has no `injection_policy`, treat the provider object as one top-level injection policy.
 2. Inspect every provider-level `injection_policy` entry.
 3. Inspect every `injection_policy` entry under every `request_policy` rule.
 4. Include each non-empty `api_key_file` value.
@@ -116,11 +116,11 @@ No watcher, polling thread, generation tracker, or persistent secret-sync state 
 
 ### 4.2 Host Reads
 
-A source is transferable when it can be opened, is a regular file after opening, and is non-empty after resolver whitespace semantics are applied.
+Sources are expected to be regular credential files. A source is transferable when it can be opened and read as UTF-8 text and is non-empty after resolver whitespace semantics are applied.
 
-Each source is read from one open file descriptor before the first tmpfs mutation. The bytes read are retained in a short-lived host buffer, so replacement of the source pathname during the read still produces one complete payload.
+Each source is opened and read once with `Path.read_bytes()` before the first tmpfs mutation. The bytes read are retained in a short-lived host buffer, so replacement of the source pathname during the read still produces one complete payload.
 
-A source that is missing, unreadable, non-regular, or empty is not transferable. Section 5.3 defines its runtime availability semantics.
+A source that is missing, unreadable, invalid UTF-8, or empty is not transferable. Section 5.3 defines its runtime availability semantics.
 
 ### 4.3 Secret Manager
 
@@ -187,11 +187,11 @@ The current request-header injection, `_Config` assignment, and streaming hooks 
 
 Each valid injection policy independently records whether its resolver has a usable credential. A file policy may use its synchronized file or a non-empty configured environment fallback; the host never reads fallback values.
 
-Namespaced lookup, legacy basename fallback, environment fallback, and Static/Cursor caching already exist at `proxy/addons/resolvers.py:16-36,52-100`. Policy construction, invalid-rule skipping, original-header matching, and injection ordering already exist at `proxy/addons/provider.py:49-214`. Extend those implementations with availability status and resolve-then-commit; do not add request-path file reads or a parallel policy engine.
+Resolvers use namespaced lookup, environment fallback, and Static/Cursor caching. Policy construction, invalid-rule skipping, original-header matching, and injection ordering already exist at `proxy/addons/provider.py:49-214`. Extend those implementations with availability status and resolve-then-commit; do not add request-path file reads or a parallel policy engine.
 
 For each allowed request, the proxy evaluates policy applicability against the original headers and resolves all applicable credentials before changing any header. A `replace_token` mismatch makes that policy non-applicable. If any applicable configured policy is unavailable, the proxy returns HTTP 503 without contacting upstream or partially injecting headers.
 
-Unavailable policies do not block healthy providers or ordinary `extra_request_policy` rules. Allowlist denials remain HTTP 403. A missing, unreadable, non-regular, or empty source has no installed target; its policy uses a non-empty configured environment fallback when available and is otherwise marked unavailable. This produces a sanitized warning rather than structural reload failure.
+Unavailable policies do not block healthy providers or ordinary `extra_request_policy` rules. Allowlist denials remain HTTP 403. A missing, unreadable, invalid UTF-8, or empty source has no installed target; its policy uses a non-empty configured environment fallback when available and is otherwise marked unavailable. This produces a sanitized warning rather than structural reload failure.
 
 ---
 
@@ -238,13 +238,13 @@ Synchronized credential bytes may exist only in the configured host file, short-
 
 Credential contents and content digests must not appear in Compose, synchronization locks, persistent metadata, process arguments, environment variables, logs, or command output. Separately configured environment credentials retain their existing behavior. Configuration fingerprints may be transmitted but are not logged as credential identifiers.
 
-Logs may include provider names, configured source paths, generated target names, and sanitized errors. The CLI warns, but does not reject, when a source is group- or world-readable.
+Logs may include provider names, configured source paths, generated target names, and sanitized errors.
 
 ---
 
-## 9. Compatibility and Dependencies
+## 9. Configuration and Dependencies
 
-Existing user-owned Compose files are not rewritten. Before a synchronization command, the CLI detects a bind-mounted or read-only `/run/secrets` and exits with a migration error before launching an agent or changing the proxy. Legacy non-namespaced `/run/secrets/<basename>` resolver fallback remains available to sessions operated outside the new synchronization path.
+Compose provides the secret tmpfs. Synchronization uses it directly, and resolvers read only the generated namespaced targets.
 
 `${AGENTBOX_HOME}/secrets` is no longer automatically visible. It is usable as a provider source only when explicitly referenced by `api_key_file`; non-provider consumers require `proxy_volumes` outside `/run/secrets`.
 
@@ -260,10 +260,10 @@ Update `README.md`, `docs/SPEC.md`, `docs/ARCHITECTURE.md`, credential comments 
 
 Automated coverage must verify:
 
-Existing target-contract and legacy-fallback coverage in `tests/test_secret_paths.py`, policy scope and ordering coverage in `tests/test_provider.py`, and basic reload coverage in `tests/test_addon.py` must be preserved rather than duplicated.
+Target-contract coverage in `tests/test_secret_paths.py`, policy scope and ordering coverage in `tests/test_provider.py`, and basic reload coverage in `tests/test_addon.py` must be preserved rather than duplicated.
 
-- Discovery across legacy, provider-level, and request-rule policies, including exclusions, deduplication, invalid rules, target vectors, collisions, and deterministic path resolution.
-- Compose output has no provider secret mounts or host secret paths and rejects destinations under `/run/secrets`.
+- Discovery across top-level, provider-level, and request-rule policies, including exclusions, deduplication, invalid rules, target vectors, collisions, and deterministic path resolution.
+- Compose output has no provider secret mounts or host secret paths.
 - `${AGENTBOX_HOME}/secrets` receives no mountpoint side effects, and synchronization creates no persistent state file.
 - Stable reads across atomic replacement and symlink retargeting; malformed transfer rejection; target reset; and recovery from partial staging.
 - Exact fingerprint matching, fast/full reload separation, structural rollback, and serialization of overlapping start/reload/restart/teardown operations.
@@ -272,4 +272,4 @@ Existing target-contract and legacy-fallback coverage in `tests/test_secret_path
 - One unavailable policy returns HTTP 503 only for requests requiring it; healthy providers continue, invalid skipped rules do not gate, and multi-policy injection never partially mutates headers.
 - Start synchronizes before agent launch, restart repopulates tmpfs, and automatic or raw-Compose startup leaves only unsynchronized file policies unavailable.
 - Credential values never appear in Compose, arguments, metadata, logs, or command output.
-- Legacy migration detection, legacy resolver fallback, environment-only providers, and permitted `proxy_volumes` remain compatible.
+- Environment-only providers and `proxy_volumes` work with the generated Compose configuration.

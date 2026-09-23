@@ -1,39 +1,28 @@
 import base64
-import hashlib
 import json
 import logging
 import os
 import threading
 import time
 from abc import ABC, abstractmethod
-from pathlib import PurePosixPath
+from secret_contract import injection_secret_name
 
 log = logging.getLogger("proxy")
 
 RESOLVER_CLASSES: dict[str, type["CredentialResolver"]] = {}
 
 
-def _secret_path(key_file: str, namespaced: bool) -> str:
-    name = PurePosixPath(key_file).name
-    if namespaced:
-        digest = hashlib.sha256(key_file.encode()).hexdigest()[:12]
-        name = f"{digest}-{name}"
-    return f"/run/secrets/{name}"
+def _secret_path(key_file: str) -> str:
+    return f"/run/secrets/{injection_secret_name(key_file)}"
 
 
-def _read_secret_file(key_file: str, require_namespaced_secret: bool) -> tuple[str, str, OSError | None]:
-    paths = [_secret_path(key_file, True)]
-    if not require_namespaced_secret:
-        paths.append(_secret_path(key_file, False))
-
-    last_error = None
-    for path in paths:
-        try:
-            with open(path) as f:
-                return f.read().strip(), path, None
-        except OSError as exc:
-            last_error = exc
-    return "", ", ".join(paths), last_error
+def _read_secret_file(key_file: str) -> tuple[str, str, Exception | None]:
+    path = _secret_path(key_file)
+    try:
+        with open(path, encoding="utf-8") as stream:
+            return stream.read().strip(), path, None
+    except (OSError, UnicodeError) as exc:
+        return "", path, exc
 
 
 class CredentialResolver(ABC):
@@ -42,6 +31,10 @@ class CredentialResolver(ABC):
 
     @abstractmethod
     def resolve(self) -> str | None: ...
+
+    @property
+    @abstractmethod
+    def available(self) -> bool: ...
 
     def __init_subclass__(cls, resolver_type: str = "", **kwargs):
         super().__init_subclass__(**kwargs)
@@ -56,12 +49,10 @@ class StaticKeyResolver(CredentialResolver, resolver_type="static"):
         key_file = config.get("api_key_file", "")
         env_var = config.get("api_key_env", "")
         if key_file:
-            self._key, container_path, error = _read_secret_file(
-                key_file, config.get("_require_namespaced_secret", False)
-            )
+            self._key, container_path, error = _read_secret_file(key_file)
             if error:
-                log.error("Provider '%s': cannot read key file at '%s' (from api_key_file '%s'): %s",
-                          name, container_path, key_file, error)
+                log.warning("Provider '%s': cannot read key file at '%s' (from api_key_file '%s')",
+                            name, container_path, key_file)
         if not self._key and env_var:
             self._key = os.environ.get(env_var, "").strip()
         if not self._key and (key_file or env_var):
@@ -70,6 +61,10 @@ class StaticKeyResolver(CredentialResolver, resolver_type="static"):
 
     def resolve(self) -> str | None:
         return self._key or None
+
+    @property
+    def available(self) -> bool:
+        return bool(self._key)
 
 
 _CURSOR_EXCHANGE_URL = "https://api2.cursor.sh/auth/exchange_user_api_key"
@@ -87,12 +82,10 @@ class CursorApiKeyResolver(CredentialResolver, resolver_type="cursor_api_key"):
         key_file = config.get("api_key_file", "")
         env_var = config.get("api_key_env", "")
         if key_file:
-            self._api_key, container_path, error = _read_secret_file(
-                key_file, config.get("_require_namespaced_secret", False)
-            )
+            self._api_key, container_path, error = _read_secret_file(key_file)
             if error:
-                log.error("Provider '%s': cannot read key file at '%s' (from api_key_file '%s'): %s",
-                          name, container_path, key_file, error)
+                log.warning("Provider '%s': cannot read key file at '%s' (from api_key_file '%s')",
+                            name, container_path, key_file)
         if not self._api_key and env_var:
             self._api_key = os.environ.get(env_var, "").strip()
         if not self._api_key and (key_file or env_var):
@@ -120,8 +113,8 @@ class CursorApiKeyResolver(CredentialResolver, resolver_type="cursor_api_key"):
             self._token_exp = self._parse_jwt_exp(access_token)
             log.info("Cursor token exchanged successfully (expires at %s)",
                      time.strftime("%H:%M:%S", time.gmtime(self._token_exp)))
-        except Exception as exc:
-            log.error("Cursor token exchange failed: %s", exc)
+        except Exception:
+            log.error("Cursor token exchange failed")
 
     @staticmethod
     def _parse_jwt_exp(token: str) -> float:
@@ -137,6 +130,10 @@ class CursorApiKeyResolver(CredentialResolver, resolver_type="cursor_api_key"):
             if self._token is None or time.time() >= self._token_exp - _REFRESH_MARGIN:
                 self._exchange()
             return self._token
+
+    @property
+    def available(self) -> bool:
+        return bool(self._api_key)
 
 
 class OAuthResolver(CredentialResolver, resolver_type="oauth"):
@@ -158,8 +155,8 @@ class OAuthResolver(CredentialResolver, resolver_type="oauth"):
             self._creds = (creds, google.auth.transport.requests.Request())
             log.info("Loaded Google credentials for OAuth injection (type=%s)",
                      type(creds).__name__)
-        except Exception as exc:
-            log.error("Failed to load Google credentials: %s", exc)
+        except Exception:
+            log.error("Failed to load Google credentials")
 
     def resolve(self) -> str | None:
         if not self._creds:
@@ -169,3 +166,7 @@ class OAuthResolver(CredentialResolver, resolver_type="oauth"):
             if not creds.valid:
                 creds.refresh(req)
             return creds.token
+
+    @property
+    def available(self) -> bool:
+        return self._creds is not None

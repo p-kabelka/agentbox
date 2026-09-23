@@ -1,5 +1,5 @@
 # mitmproxy addon: allowlist enforcement, credential injection, and JSON access logging.
-import asyncio, dataclasses, json, logging, os, sys, time
+import asyncio, dataclasses, json, logging, os, re, sys, time
 import yaml
 from mitmproxy import http
 
@@ -7,8 +7,10 @@ _addon_dir = os.path.dirname(os.path.abspath(__file__))
 if _addon_dir not in sys.path:
     sys.path.insert(0, _addon_dir)
 
-from provider import Provider, CompiledRule, compile_rules, inject_matching_providers, rule_matches
+from provider import (Provider, CompiledRule, CredentialUnavailable, compile_rules,
+                      inject_matching_providers, rule_matches)
 from resolvers import RESOLVER_CLASSES
+from secret_contract import fingerprint, injection_secret_name
 
 _CONFIG_PATH = "/config/proxy.yaml"
 _RELOAD_PORT = 8082
@@ -64,22 +66,23 @@ _handler.setFormatter(JSONFormatter("proxy"))
 log.addHandler(_handler)
 log.propagate = False
 
-with open(_CONFIG_PATH) as f:
-    _startup_cfg = yaml.safe_load(f)
-
 _session_name = os.environ.get("AGENTBOX_NAME", "")
 _name_flag = f" --name {_session_name}" if _session_name else ""
 
-lcfg = _startup_cfg.get("logging", {})
-_log_req_hdr  = lcfg.get("log_request_headers", True)
-_log_resp_hdr = lcfg.get("log_response_headers", False)
-_log_bodies   = lcfg.get("log_bodies", False)
+_log_req_hdr, _log_resp_hdr, _log_bodies = True, False, False
 
 
 @dataclasses.dataclass(frozen=True)
 class _Config:
     allowed_rules: list[CompiledRule]
     providers: list[Provider]
+    fingerprint: str = ""
+    provider_fingerprint: str = ""
+    logging_flags: tuple[bool, bool, bool] = (True, False, False)
+
+    @property
+    def unavailable(self) -> list[dict]:
+        return [policy for provider in self.providers for policy in provider.unavailable]
 
 
 def _read_config() -> dict:
@@ -137,11 +140,8 @@ def _log_failed_blocked_request(flow: http.HTTPFlow) -> None:
 
 class AgentboxAddon:
     def __init__(self):
-        cfg = _read_config()
-        self._providers = self._load_providers(cfg)
-        self._raw_providers = cfg.get("providers", [])
-        allowed_rules = _build_allowed_rules(self._providers, cfg)
-        self._cfg = _Config(allowed_rules=allowed_rules, providers=self._providers)
+        self._reload_lock = asyncio.Lock()
+        self._apply_candidate(self._build_candidate(_read_config()))
         log.info({"message": "Config loaded",
                   "allowed_rules": len(self._cfg.allowed_rules),
                   "providers": len(self._cfg.providers)})
@@ -149,60 +149,98 @@ class AgentboxAddon:
     @staticmethod
     def _load_providers(cfg: dict) -> list[Provider]:
         providers: list[Provider] = []
-
-        for p in cfg.get("providers", []):
+        raw = cfg.get("providers", [])
+        if not isinstance(raw, list):
+            raise ValueError("providers must be a list")
+        targets = {}
+        for p in raw:
+            if not isinstance(p, dict):
+                raise ValueError("provider must be a mapping")
             if not p.get("enabled"):
                 continue
             cred_type = p.get("credential_type")
-            if cred_type:
-                resolver_cls = RESOLVER_CLASSES.get(cred_type)
-                if resolver_cls:
-                    providers.append(Provider(p, resolver_cls))
-                else:
-                    log.error("Unknown credential_type '%s' for provider '%s'",
-                              cred_type, p.get("name", "?"))
-
+            resolver_cls = RESOLVER_CLASSES.get(cred_type)
+            if resolver_cls is None:
+                raise ValueError("Unknown provider credential_type")
+            if not isinstance(p.get("name", "unknown"), str):
+                raise ValueError("provider name must be a string")
+            provider = Provider(p, resolver_cls)
+            for source in provider.secret_sources:
+                target = injection_secret_name(source)
+                if target in targets and targets[target] != source:
+                    raise ValueError("Provider secret target collision")
+                targets[target] = source
+            providers.append(provider)
         return providers
+
+    @classmethod
+    def _build_candidate(cls, cfg: dict, providers=None) -> _Config:
+        if not isinstance(cfg, dict):
+            raise ValueError("Configuration must be a mapping")
+        full = fingerprint(cfg)
+        provider_fp = fingerprint(cfg.get("providers", []))
+        lcfg = cfg.get("logging", {})
+        flags = tuple(lcfg.get(key, default) for key, default in (
+            ("log_request_headers", True), ("log_response_headers", False), ("log_bodies", False)))
+        if not all(isinstance(flag, bool) for flag in flags):
+            raise ValueError("Logging settings must be booleans")
+        if providers is None:
+            providers = cls._load_providers(cfg)
+        return _Config(_build_allowed_rules(providers, cfg), providers, full, provider_fp, flags)
+
+    def _apply_candidate(self, candidate: _Config) -> None:
+        global _log_req_hdr, _log_resp_hdr, _log_bodies
+        # No awaits: hooks see either the complete old or complete new candidate.
+        self._cfg = candidate
+        _log_req_hdr, _log_resp_hdr, _log_bodies = candidate.logging_flags
 
     async def running(self):
         self._reload_server = await asyncio.start_server(self._handle_reload_conn, "127.0.0.1", _RELOAD_PORT)
         log.info({"message": f"Reload endpoint listening on port {_RELOAD_PORT}"})
 
     async def _handle_reload_conn(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        global _log_req_hdr, _log_resp_hdr, _log_bodies
         try:
-            data = await reader.read(4096)
-            cfg = _read_config()
-            new_raw_providers = cfg.get("providers", [])
-
-            if new_raw_providers != self._raw_providers:
-                loop = asyncio.get_event_loop()
-                providers = await loop.run_in_executor(None, self._load_providers, cfg)
-                self._providers = providers
-                self._raw_providers = new_raw_providers
-                log.info({"message": "Full reload: providers rebuilt"})
+            data = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+            lines = data.decode("ascii").split("\r\n")
+            method, path, _ = lines[0].split()
+            headers = {key.lower(): value for key, value in
+                       (line.split(":", 1) for line in lines[1:] if ":" in line)}
+            if method not in {"GET", "POST"} or path not in {"/reload", "/reload/providers", "/health"}:
+                body, status = {"error": "Unknown endpoint"}, b"404 Not Found"
+            elif path == "/health":
+                body, status = {"ready": True}, b"200 OK"
             else:
-                providers = self._providers
-
-            allowed_rules = _build_allowed_rules(providers, cfg)
-            new_cfg = _Config(allowed_rules=allowed_rules, providers=providers)
-            self._cfg = new_cfg
-            lcfg = cfg.get("logging", {})
-            _log_req_hdr = lcfg.get("log_request_headers", True)
-            _log_resp_hdr = lcfg.get("log_response_headers", False)
-            _log_bodies = lcfg.get("log_bodies", False)
-            log.info({"message": "Config reloaded",
-                      "allowed_rules": len(new_cfg.allowed_rules),
-                      "providers": len(new_cfg.providers)})
-            body = b"OK"
-            status = b"200 OK"
-        except Exception as exc:
-            log.error("Config reload failed (keeping previous config): %s", exc)
-            body = str(exc).encode()
+                async with self._reload_lock:
+                    cfg = _read_config()
+                    full = fingerprint(cfg)
+                    provider_fp = fingerprint(cfg.get("providers", []))
+                    expected = headers.get("x-agentbox-config-fingerprint", "").strip()
+                    if path == "/reload/providers" and not re.fullmatch(r"[0-9a-f]{64}", expected):
+                        body, status = {"error": "Expected configuration fingerprint required"}, b"400 Bad Request"
+                    elif ((path == "/reload/providers" and expected != full)
+                          or (path == "/reload" and provider_fp != self._cfg.provider_fingerprint)):
+                        body = {"error": "Concurrent configuration change; run agentbox proxy-reload"}
+                        status = b"409 Conflict"
+                    else:
+                        providers = self._cfg.providers if path == "/reload" else None
+                        candidate = await asyncio.get_running_loop().run_in_executor(
+                            None, self._build_candidate, cfg, providers)
+                        self._apply_candidate(candidate)
+                        log.info({"message": "Config reloaded", "providers": len(candidate.providers),
+                                  "allowed_rules": len(candidate.allowed_rules),
+                                  "unavailable": candidate.unavailable})
+                        body = {"fingerprint": candidate.fingerprint,
+                                "provider_fingerprint": candidate.provider_fingerprint,
+                                "unavailable": candidate.unavailable}
+                        status = b"200 OK"
+        except Exception:
+            log.error("Config reload failed (keeping previous config)")
+            body = {"error": "Invalid configuration; previous runtime retained"}
             status = b"500 Internal Server Error"
+        body = json.dumps(body).encode()
         response = (
             b"HTTP/1.1 " + status + b"\r\n"
-            b"Content-Type: text/plain\r\n"
+            b"Content-Type: application/json\r\n"
             b"Content-Length: " + str(len(body)).encode() + b"\r\n"
             b"Connection: close\r\n\r\n" + body
         )
@@ -226,7 +264,15 @@ class AgentboxAddon:
                 _deny_request(flow)
             return
 
-        injected_providers = inject_matching_providers(cfg.providers, flow)
+        try:
+            injected_providers = inject_matching_providers(cfg.providers, flow)
+        except CredentialUnavailable:
+            flow.metadata["agentbox_blocked"] = True
+            flow.response = http.Response.make(
+                503, "Provider credential unavailable; run agentbox proxy-reload outside the sandbox.\n",
+                {"Content-Type": "text/plain"})
+            log.warning({"message": "Provider credential unavailable", "status": 503})
+            return
         if injected_providers:
             flow.metadata["agentbox_provider"] = injected_providers[-1]
             flow.metadata["agentbox_providers"] = injected_providers
@@ -280,7 +326,9 @@ class AgentboxAddon:
         if len(providers) > 1:
             entry["providers"] = providers
         if _log_req_hdr:
-            entry["req_headers"] = dict(flow.request.headers)
+            redacted = flow.metadata.get("agentbox_injected_headers", set())
+            entry["req_headers"] = {key: "[redacted]" if key.lower() in redacted else value
+                                    for key, value in flow.request.headers.items()}
         if _log_resp_hdr and resp:
             entry["resp_headers"] = dict(resp.headers)
         if _log_bodies:

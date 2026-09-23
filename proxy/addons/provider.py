@@ -31,6 +31,8 @@ class InjectionPolicy:
     prefix: str
     replace_token: str | None
     resolver: CredentialResolver
+    available: bool
+    source: str
 
     def matches(self, headers) -> bool:
         if not self.replace_token:
@@ -38,12 +40,20 @@ class InjectionPolicy:
         current = headers.get(self.header, "")
         return current == f"{self.prefix}{self.replace_token}"
 
-    def inject(self, flow: http.HTTPFlow) -> bool:
-        value = self.resolver.resolve()
+    def resolve(self) -> tuple[str, str]:
+        if not self.available:
+            raise CredentialUnavailable
+        try:
+            value = self.resolver.resolve()
+        except Exception:
+            raise CredentialUnavailable from None
         if not value:
-            return False
-        flow.request.headers[self.header] = f"{self.prefix}{value}"
-        return True
+            raise CredentialUnavailable
+        return self.header, f"{self.prefix}{value}"
+
+
+class CredentialUnavailable(Exception):
+    """A matching policy cannot supply a credential; never includes its contents."""
 
 
 def _resolver_base_config(config: dict) -> dict:
@@ -60,13 +70,30 @@ def _build_injection_policies(
     resolver_cls: type[CredentialResolver],
 ) -> list[InjectionPolicy]:
     policies: list[InjectionPolicy] = []
+    if not isinstance(policy_configs, list):
+        raise ValueError("injection_policy must be a list")
     for policy_config in policy_configs:
+        if not isinstance(policy_config, dict):
+            raise ValueError("injection policy must be a mapping")
         merged_config = {**base_config, **policy_config}
+        for key in _INJECTION_FIELDS:
+            if key in {"api_key_file", "api_key_env", "replace_token"} and merged_config.get(key) is None:
+                continue
+            if key in merged_config and not isinstance(merged_config[key], str):
+                raise ValueError("Invalid injection policy field")
+        header = merged_config.get("inject_header", "Authorization")
+        if not re.fullmatch(r"[!#$%&'*+.^_`|~0-9A-Za-z-]+", header):
+            raise ValueError("Invalid injection header")
+        if any(c in merged_config.get("inject_prefix", "") for c in "\r\n"):
+            raise ValueError("Invalid injection prefix")
+        resolver = resolver_cls(merged_config)
         policies.append(InjectionPolicy(
-            header=merged_config.get("inject_header", "Authorization"),
+            header=header,
             prefix=merged_config.get("inject_prefix", ""),
             replace_token=merged_config.get("replace_token"),
-            resolver=resolver_cls(merged_config),
+            resolver=resolver,
+            available=resolver.available,
+            source=merged_config.get("api_key_file", ""),
         ))
     return policies
 
@@ -74,7 +101,7 @@ def _build_injection_policies(
 def compile_rule(rule_dict: dict) -> CompiledRule | None:
     host_raw = rule_dict.get("host")
     if not host_raw:
-        log.warning("Rule missing required 'host' field, skipping: %s", rule_dict)
+        log.warning("Rule missing required 'host' field, skipping")
         return None
 
     host_raw = os.path.expandvars(str(host_raw))
@@ -140,6 +167,8 @@ def rule_matches(rule: CompiledRule, host: str, port: int, path: str, method: st
 class Provider:
     def __init__(self, config: dict, resolver_cls: type[CredentialResolver]):
         self.name = config.get("name", "unknown")
+        if not isinstance(config.get("request_policy", []), list):
+            raise ValueError("request_policy must be a list")
         resolver_base_config = _resolver_base_config(config)
 
         policy_configs = config.get("injection_policy")
@@ -147,15 +176,13 @@ class Provider:
             policy_configs = [config]
             base_config = {}
         else:
-            base_config = resolver_base_config.copy()
-            base_config["_require_namespaced_secret"] = True
+            base_config = resolver_base_config
         self._injection_policies = _build_injection_policies(
             policy_configs, base_config, resolver_cls
         )
 
         self._rules: list[CompiledRule] = []
         self._rule_injection_policies: list[tuple[CompiledRule, list[InjectionPolicy]]] = []
-        rule_base_config = {**resolver_base_config, "_require_namespaced_secret": True}
         for rule_config in config.get("request_policy", []):
             rule = compile_rule(rule_config)
             if rule is None:
@@ -163,7 +190,7 @@ class Provider:
             self._rules.append(rule)
             rule_policies = _build_injection_policies(
                 rule_config.get("injection_policy", []),
-                rule_base_config,
+                resolver_base_config,
                 resolver_cls,
             )
             self._rule_injection_policies.append((rule, rule_policies))
@@ -185,12 +212,29 @@ class Provider:
 
         return True
 
-    def inject(self, flow: http.HTTPFlow, original_headers=None) -> bool:
+    @property
+    def secret_sources(self) -> list[str]:
+        policies = self._injection_policies + [p for _, group in self._rule_injection_policies for p in group]
+        return [p.source for p in policies if p.source]
+
+    @property
+    def unavailable(self) -> list[dict]:
+        result = []
+        groups = [("provider", self._injection_policies)]
+        groups.extend((f"rule[{i}]", policies)
+                      for i, (_, policies) in enumerate(self._rule_injection_policies))
+        for scope, policies in groups:
+            for i, policy in enumerate(policies):
+                if not policy.available:
+                    result.append({"provider": self.name, "policy": f"{scope}[{i}]"})
+        return result
+
+    def resolve_injections(self, flow: http.HTTPFlow, original_headers=None) -> list[tuple[str, str]]:
         headers = original_headers if original_headers is not None else flow.request.headers.copy()
-        injected = False
+        resolved = []
         for policy in self._injection_policies:
-            if policy.matches(headers) and policy.inject(flow):
-                injected = True
+            if policy.matches(headers):
+                resolved.append(policy.resolve())
 
         host = flow.request.pretty_host
         port = flow.request.port
@@ -200,15 +244,35 @@ class Provider:
             if not rule_matches(rule, host, port, path, method):
                 continue
             for policy in policies:
-                if policy.matches(headers) and policy.inject(flow):
-                    injected = True
-        return injected
+                if policy.matches(headers):
+                    resolved.append(policy.resolve())
+        return resolved
+
+    def inject(self, flow: http.HTTPFlow, original_headers=None) -> bool:
+        resolved = self.resolve_injections(flow, original_headers)
+        _commit_injections(flow, resolved)
+        return bool(resolved)
+
+
+def _commit_injections(flow: http.HTTPFlow, resolved: list[tuple[str, str]]) -> None:
+    for header, value in resolved:
+        flow.request.headers[header] = value
+    if resolved and hasattr(flow, "metadata"):
+        # Flow metadata is serialized by mitmweb; keep it JSON/msgpack-compatible.
+        redacted = set(flow.metadata.get("agentbox_injected_headers", []))
+        redacted.update(header.lower() for header, _ in resolved)
+        flow.metadata["agentbox_injected_headers"] = sorted(redacted)
 
 
 def inject_matching_providers(providers: list[Provider], flow: http.HTTPFlow) -> list[str]:
     original_headers = flow.request.headers.copy()
     injected: list[str] = []
+    resolved = []
     for provider in providers:
-        if provider.matches(flow) and provider.inject(flow, original_headers):
-            injected.append(provider.name)
+        if provider.matches(flow):
+            pending = provider.resolve_injections(flow, original_headers)
+            if pending:
+                resolved.extend(pending)
+                injected.append(provider.name)
+    _commit_injections(flow, resolved)
     return injected

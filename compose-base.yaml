@@ -1,5 +1,5 @@
 # Shared base compose — do not edit per-project settings here.
-# Per-project overrides live in <project>/.agentbox/compose.override.yaml.
+# Per-session configuration lives in the generated session compose.yaml.
 
 volumes:
   proxy-ca:    # mitmproxy CA cert shared between proxy and agent
@@ -17,15 +17,17 @@ services:
     networks:
       - agent-net
       - proxy-net
+    # Populated only by agentbox start / proxy-reload / proxy-restart.
+    tmpfs:
+      - /run/secrets:rw,noexec,nosuid,nodev,mode=0700
     volumes:
-      - ${AGENTBOX_HOME}/secrets:/run/secrets:ro,Z
       - proxy-ca:/root/.mitmproxy:z
     # environment:
     #   AGENTBOX_NAME: ${AGENTBOX_NAME:-}
     #   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     #   OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     #   AZURE_OPENAI_API_KEY: ${AZURE_OPENAI_API_KEY:-}
-    #   GOOGLE_APPLICATION_CREDENTIALS: /run/secrets/credentials.json
+    #   GOOGLE_APPLICATION_CREDENTIALS: /oauth/credentials.json
     #   GOOGLE_CLOUD_PROJECT: ${VERTEX_PROJECT_ID:-}
     #   VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
     #   VERTEX_REGION: ${VERTEX_REGION:-}
