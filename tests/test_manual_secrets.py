@@ -186,9 +186,13 @@ class HostSecretsTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as exit:
                 self.agentbox["_launch"](self.session)
         self.assertEqual(exit.exception.code, 0)
+        up_index = self.events.index(("up", "-d", "proxy"))
+        ready_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/health"))
+        reset_index = next(i for i, e in enumerate(self.events) if "reset" in e)
+        install_index = next(i for i, e in enumerate(self.events) if "install" in e)
         reload_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/reload/providers"))
         run_index = next(i for i, e in enumerate(self.events) if e[0] == "run")
-        self.assertLess(reload_index, run_index)
+        self.assertTrue(up_index < ready_index < reset_index < install_index < reload_index < run_index)
         self.assertIn("--no-deps", self.events[run_index])
         self.assertEqual(self.events[-1], ("down",))
         self.assertEqual(self.frames, [installation_frame(self.source.read_bytes())])
@@ -199,6 +203,17 @@ class HostSecretsTest(unittest.TestCase):
             self.assertNotIn(hashlib.sha256(self.source.read_bytes()).hexdigest(), text)
         self.assertEqual((self.session / ".secret-sync.lock").read_bytes(), b"")
 
+    def test_secret_synchronization_only_resets_and_installs(self):
+        _, _, sources = self.agentbox["_secret_preflight"](self.session)
+        with patch.dict(self.g, compose=self.compose,
+                        wait_healthy=lambda session: self.fail("sync waited for the proxy"),
+                        _reload_proxy=lambda *args: self.fail("sync reloaded providers")):
+            self.agentbox["_synchronize_secrets"](self.session, sources)
+        self.assertEqual(len(self.events), 2)
+        self.assertIn("reset", self.events[0])
+        self.assertIn("install", self.events[1])
+        self.assertEqual(self.frames, [installation_frame(self.source.read_bytes())])
+
     def test_reload_and_restart_always_transfer_current_snapshot_once(self):
         for command in ("cmd_proxy_reload", "cmd_proxy_reload", "cmd_proxy_restart"):
             self.events.clear()
@@ -207,9 +222,16 @@ class HostSecretsTest(unittest.TestCase):
             self.assertEqual(sum(e[-1].endswith("/reload/providers") for e in self.events), 1)
             self.assertEqual(sum("reset" in e for e in self.events), 1)
             self.assertEqual(sum("install" in e for e in self.events), 1)
+            ready_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/health"))
+            reset_index = next(i for i, e in enumerate(self.events) if "reset" in e)
+            install_index = next(i for i, e in enumerate(self.events) if "install" in e)
+            reload_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/reload/providers"))
+            self.assertTrue(ready_index < reset_index < install_index < reload_index)
             if command == "cmd_proxy_restart":
-                self.assertLess(self.events.index(("restart", "proxy")),
-                                next(i for i, e in enumerate(self.events) if "reset" in e))
+                self.assertEqual(self.events[0], ("restart", "proxy"))
+            else:
+                self.assertEqual(self.events[0], ("exec", "-T", "proxy", "true"))
+                self.assertFalse(any(e[0] in {"up", "restart"} for e in self.events))
         self.cfg["providers"][0]["api_key_file"] = "second"
         (self.project / "second").write_bytes(b"second-key")
         self.write_config(self.cfg)

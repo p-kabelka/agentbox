@@ -310,22 +310,16 @@ def _reload_proxy(session_dir: Path, expected: str | None = None) -> dict:
         die("Invalid proxy reload response; rerun the command")
 
 
-def _synchronize_secrets(session_dir: Path, snapshot: tuple, action: str) -> None:
-    """Caller holds .secret-sync.lock across preflight, lifecycle and verification."""
-    full, providers, sources = snapshot
-    if action == "reload":
-        running = compose(session_dir, "exec", "-T", "proxy", "true", capture_output=True).returncode == 0
-        if not running:
-            die("proxy-reload requires a running proxy; run agentbox start")
-    if action == "start":
-        compose(session_dir, "up", "-d", "proxy", check=True)
-    elif action == "restart":
-        compose(session_dir, "restart", "proxy", check=True)
-    wait_healthy(session_dir)
+def _synchronize_secrets(session_dir: Path, sources: list[tuple[SecretReference, bytes | None]]) -> None:
+    """Reset and transfer secrets to a ready proxy while the sync lock is held."""
     _manager(session_dir, "reset")
     for reference, payload in sources:
         if payload is not None:
             _manager(session_dir, "install", reference.target, payload=installation_frame(payload))
+
+
+def _reload_synchronized_providers(session_dir: Path, full: str, providers: str) -> None:
+    """Apply the staged configuration and verify the proxy accepted our snapshot."""
     result = _reload_proxy(session_dir, full)
     if result.get("fingerprint") != full or result.get("provider_fingerprint") != providers:
         die("Applied configuration fingerprint mismatch; rerun the synchronization command")
@@ -528,9 +522,12 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     project_dir = Path(meta["project-dir"])
     with ExitStack() as lifetime:
         with _secret_sync_lock(session_dir):
-            snapshot = _secret_preflight(session_dir)
-            _synchronize_secrets(session_dir, snapshot, "start")
-            del snapshot
+            full, providers, sources = _secret_preflight(session_dir)
+            compose(session_dir, "up", "-d", "proxy", check=True)
+            wait_healthy(session_dir)
+            _synchronize_secrets(session_dir, sources)
+            del sources
+            _reload_synchronized_providers(session_dir, full, providers)
             lifetime.enter_context(_proxy_lifetime(session_dir))
         # Dependency startup would be another proxy lifecycle action outside the lock.
         result = compose(session_dir, "run", "--rm", "--no-deps", "agent", *(cmd or []))
@@ -752,14 +749,26 @@ def cmd_deny(args) -> None:
 def cmd_proxy_reload(args) -> None:
     session_dir, _ = resolve_session(args)
     with _secret_sync_lock(session_dir):
-        _synchronize_secrets(session_dir, _secret_preflight(session_dir), "reload")
+        full, providers, sources = _secret_preflight(session_dir)
+        running = compose(session_dir, "exec", "-T", "proxy", "true", capture_output=True).returncode == 0
+        if not running:
+            die("proxy-reload requires a running proxy; run agentbox start")
+        wait_healthy(session_dir)
+        _synchronize_secrets(session_dir, sources)
+        del sources
+        _reload_synchronized_providers(session_dir, full, providers)
     print("Proxy config reloaded.")
 
 
 def cmd_proxy_restart(args) -> None:
     session_dir, _ = resolve_session(args)
     with _secret_sync_lock(session_dir):
-        _synchronize_secrets(session_dir, _secret_preflight(session_dir), "restart")
+        full, providers, sources = _secret_preflight(session_dir)
+        compose(session_dir, "restart", "proxy", check=True)
+        wait_healthy(session_dir)
+        _synchronize_secrets(session_dir, sources)
+        del sources
+        _reload_synchronized_providers(session_dir, full, providers)
 
 
 def cmd_remove(args) -> None:
