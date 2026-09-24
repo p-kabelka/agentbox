@@ -103,9 +103,9 @@ With the synchronization lock held as defined in Section 6, each invocation perf
 2. Compute full-configuration and provider fingerprints.
 3. Discover and validate the desired references, detect target collisions, and attempt every host source read.
 4. Start, reuse, or restart the proxy as required by the invoking command, then invoke one `compose exec -T` for the transaction.
-5. Inside the exec, wait for the loopback reload interface before changing the store.
-6. Clean private temporary files and reset the managed target set.
-7. Install every transferable source.
+5. Inside the exec, clean private temporary files and reset the managed target set.
+6. Install every transferable source while mitmweb starts.
+7. Wait for the loopback reload interface.
 8. Call `/reload/providers` exactly once with the expected full-configuration fingerprint.
 9. Verify the applied fingerprint and report unavailable policies.
 
@@ -136,7 +136,7 @@ An installation frame contains payload length, digest, and payload. The helper:
 5. Sets mode `0400` and atomically renames the file to its final target.
 6. Removes its temporary file on every failure.
 
-Managed final targets match `^[0-9a-f]{12}-[A-Za-z0-9._-]+$`. After readiness and before installation, the helper removes every managed final target and every file bearing its private temporary prefix. An unrelated entry is a fatal error and is not removed. Once all frames and end-of-stream are verified, the helper calls the existing `/reload/providers` endpoint once and returns its sanitized status/body to the host for fingerprint verification.
+Managed final targets match `^[0-9a-f]{12}-[A-Za-z0-9._-]+$`. Before installation, the helper removes every managed final target and every file bearing its private temporary prefix. An unrelated entry is a fatal error and is not removed. Once all frames and end-of-stream are verified, the helper waits for the reload interface and calls the existing `/reload/providers` endpoint once, returning its sanitized status/body to the host for fingerprint verification.
 
 Existing resolvers keep credentials in memory, so resetting files does not alter active requests.
 
@@ -200,7 +200,7 @@ Unavailable policies do not block healthy providers or ordinary `extra_request_p
 |-----------|-------------------|
 | `start` | After host preflight, start or reuse the proxy, then enter one exec that waits for the reload endpoint. Report unavailable-policy warnings, release the lock after verification, then launch the agent. Do not launch on transaction failure. |
 | `proxy-reload` | Require a running proxy, perform one complete transaction, and rebuild providers even when YAML is unchanged. |
-| `proxy-restart` | Complete host preflight before restarting the proxy, then hold the lock through endpoint readiness, tmpfs repopulation, reload, and verification. |
+| `proxy-restart` | Complete host preflight before restarting the proxy, then hold the lock through tmpfs repopulation, endpoint readiness, reload, and verification. |
 | `allow` / `deny` | Save the allowlist edit, then use fast `/reload`; do not synchronize or rebuild providers. If provider changes are pending, report that the edit is saved but not active and instruct the user to run `proxy-reload`, which applies both changes. The user does not rerun `allow` or `deny`. |
 | Automatic proxy restart | File policies without usable environment fallbacks are unavailable until the next synchronization command; only matching requests receive HTTP 503. |
 | Raw `podman compose up` | Does not synchronize. File-backed policies without usable environment fallbacks are unavailable until an `agentbox` synchronization command runs. |

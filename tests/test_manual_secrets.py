@@ -85,7 +85,8 @@ class SecretManagerTest(unittest.TestCase):
         def request(path, **kwargs):
             calls.append((path, kwargs))
             if path == "/health":
-                self.assertEqual((self.store / self.target).read_bytes(), b"old")
+                self.assertEqual((self.store / self.target).read_bytes(), b"new")
+                self.assertEqual((self.store / other).read_bytes(), b"second")
                 return 200, {"ready": True}
             self.assertEqual((self.store / self.target).read_bytes(), b"new")
             self.assertEqual((self.store / other).read_bytes(), b"second")
@@ -105,21 +106,29 @@ class SecretManagerTest(unittest.TestCase):
                   valid.replace(b"secret", b"change"),
                   synchronization_frame(full, [(self.target, b"secret"), (self.target, b"secret")]),
                   valid.replace(self.target.encode(), b"../escape")]
-        with (patch.object(manager, "wait_ready"), patch.object(manager, "_request") as request):
+        with (patch.object(manager, "wait_ready") as ready, patch.object(manager, "_request") as request):
             for frame in frames:
                 with self.subTest(frame=frames.index(frame)), self.assertRaises(ValueError):
                     manager.sync(io.BytesIO(frame))
+            ready.assert_not_called()
             request.assert_not_called()
         self.assertEqual(list(self.store.glob(manager.TEMP_PREFIX + "*")), [])
 
-    def test_sync_never_resets_when_proxy_is_unready(self):
+    def test_sync_stages_secrets_but_does_not_reload_when_proxy_is_unready(self):
         (self.store / self.target).write_bytes(b"old")
         with (patch.object(manager, "_request", side_effect=ConnectionRefusedError) as request,
-              patch.object(manager.time, "sleep")):
+              patch.object(manager.time, "monotonic", side_effect=[0, 81])):
             with self.assertRaises(ValueError):
-                manager.sync(io.BytesIO(synchronization_frame("a" * 64, [])))
-        self.assertEqual(request.call_count, 40)
-        self.assertEqual((self.store / self.target).read_bytes(), b"old")
+                manager.sync(io.BytesIO(synchronization_frame("a" * 64, [(self.target, b"new")])))
+        request.assert_called_once_with("/health")
+        self.assertEqual((self.store / self.target).read_bytes(), b"new")
+
+    def test_readiness_retries_quickly_after_connection_refused(self):
+        with (patch.object(manager, "_request", side_effect=[ConnectionRefusedError, (200, {"ready": True})])
+              as request, patch.object(manager.time, "sleep") as sleep):
+            manager.wait_ready()
+        self.assertEqual(request.call_count, 2)
+        self.assertLessEqual(sleep.call_args.args[0], 0.2)
 
     def test_reload_request_forwards_fingerprint_over_loopback(self):
         with patch.object(manager.http.client, "HTTPConnection") as connection:
@@ -332,7 +341,7 @@ class HostSecretsTest(unittest.TestCase):
                   patch.dict(self.g, compose=self.compose), redirect_stderr(io.StringIO()),
                   self.assertRaises(SystemExit)):
                 self.agentbox["_launch"](self.session)
-            self.assertEqual([path for path, _ in self.probes], ["/health"])
+            self.assertEqual(self.probes, [])
             self.assertFalse(any(e[0] in {"run", "down"} for e in self.events))
 
     def test_fingerprint_verification_failure_does_not_launch(self):

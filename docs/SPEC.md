@@ -300,7 +300,7 @@ limit, host secret mount, generated credential target, or credential value in ge
 Compose. `$AGENTBOX_HOME/secrets` is neither automatically mounted nor created for this feature.
 
 Each command holds `<session-dir>/.secret-sync.lock` across preflight, proxy lifecycle,
-readiness, target reset, complete transfer, and exactly one `/reload/providers` call.
+target reset, complete transfer, reload readiness, and exactly one `/reload/providers` call.
 `stop`, `remove`, and final lifetime teardown take the same lock. Preflight validates
 names and collisions and opens and reads every source once before any tmpfs mutation.
 Sources are expected to be regular credential files. Missing, unreadable, empty, or invalid-text files are skipped;
@@ -309,9 +309,9 @@ the proxy uses a non-empty configured environment fallback or marks that policy 
 Targets are `<sha256(exact configured source)[:12]>-<basename>`; ASCII basenames must match
 `[A-Za-z0-9._-]+`, excluding `.` and `..`, with at most 242 bytes (255 including the prefix).
 Payload length, digest, and bytes travel only through stdin to `/app/manage_secrets.py`.
-One `compose exec -T` carries the entire transaction: the helper waits for loopback readiness,
-resets managed targets/private temporary files, refuses unrelated entries, validates each
-framed transfer before an atomic rename at mode `0400`, then invokes `/reload/providers`.
+One `compose exec -T` carries the entire transaction: the helper resets managed targets/private
+temporary files, refuses unrelated entries, validates each framed transfer before an atomic
+rename at mode `0400`, then waits for loopback readiness and invokes `/reload/providers`.
 No persistent sync state or delta detection exists; rerunning a command recovers interrupted staging.
 
 Canonical JSON SHA-256 fingerprints bind the full reload to the host snapshot and prevent

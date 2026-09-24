@@ -82,16 +82,18 @@ def _request(path: str, *, expected: str = "", timeout: int = 2) -> tuple[int, d
 
 
 def wait_ready() -> None:
-    for attempt in range(40):
+    deadline = time.monotonic() + 80
+    while True:
         try:
             status, body = _request("/health")
             if status == 200 and body.get("ready") is True:
                 return
         except (OSError, ValueError, http.client.HTTPException):
             pass
-        if attempt < 39:
-            time.sleep(2)
-    raise ValueError("Proxy reload interface timed out")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise ValueError("Proxy reload interface timed out")
+        time.sleep(min(0.2, remaining))
 
 
 def sync(stream) -> dict:
@@ -100,7 +102,6 @@ def sync(stream) -> dict:
     if header is None:
         raise ValueError("Invalid synchronization header")
     expected, count = header.groups()
-    wait_ready()  # Never reset a store when the reload interface is unavailable.
     reset()
     targets = set()
     for _ in range(int(count)):
@@ -115,6 +116,7 @@ def sync(stream) -> dict:
         install(target, stream, require_eof=False)
     if stream.read(1):
         raise ValueError("Trailing synchronization data")
+    wait_ready()  # The proxy can start mitmweb while we stage credentials.
     status, body = _request("/reload/providers", expected=expected.decode(), timeout=120)
     return {"status": status, "body": body}
 
