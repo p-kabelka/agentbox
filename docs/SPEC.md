@@ -10,6 +10,8 @@ agentbox defends against these threats by structuring the environment so that th
 
 For the internal structure and design decisions behind this architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
+For the proposed, not-yet-implemented persistent sandbox mode, see [SPEC-persistent-sandboxes.md](SPEC-persistent-sandboxes.md). The command behavior below describes the current ephemeral mode.
+
 ---
 
 ## 2. Threat Model
