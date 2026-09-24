@@ -7,7 +7,7 @@ CA=/proxy-ca/mitmproxy-ca-cert.pem
 # wait until the proxy certificate is created by proxy container
 until [ -f "$CA" ]; do sleep 0.2; done
 ANCHOR=/etc/pki/ca-trust/source/anchors/proxy-ca.crt
-if ! cmp -s "$CA" "$ANCHOR"; then
+if [ ! -f "$ANCHOR" ] || [ "$(<"$CA")" != "$(<"$ANCHOR")" ]; then
     # append it to system cert store (faster than update-ca-trust)
     cat "$CA" >> /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
     cp "$CA" "$ANCHOR"
