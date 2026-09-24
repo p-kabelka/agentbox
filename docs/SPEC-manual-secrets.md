@@ -102,11 +102,12 @@ With the synchronization lock held as defined in Section 6, each invocation perf
 1. Parse one host `proxy.yaml` snapshot.
 2. Compute full-configuration and provider fingerprints.
 3. Discover and validate the desired references, detect target collisions, and attempt every host source read.
-4. Start, reuse, or restart the proxy as required by the invoking command, then wait for its execution and reload interfaces.
-5. Clean private temporary files and reset the managed target set.
-6. Install every transferable source.
-7. Call `/reload/providers` exactly once with the expected full-configuration fingerprint.
-8. Verify the applied fingerprint and report unavailable policies.
+4. Start, reuse, or restart the proxy as required by the invoking command, then invoke one `compose exec -T` for the transaction.
+5. Inside the exec, wait for the loopback reload interface before changing the store.
+6. Clean private temporary files and reset the managed target set.
+7. Install every transferable source.
+8. Call `/reload/providers` exactly once with the expected full-configuration fingerprint.
+9. Verify the applied fingerprint and report unavailable policies.
 
 Steps 1-3 are host preflight and occur before a command starts or restarts a proxy. Invalid YAML, invalid target names, and target collisions therefore cannot destroy a working proxy; structural checks performed only by the proxy can still fail after `proxy-restart`, as defined in Section 7.
 
@@ -124,9 +125,7 @@ A source that is missing, unreadable, invalid UTF-8, or empty is not transferabl
 
 ### 4.3 Secret Manager
 
-A fixed Python helper in the proxy provides inventory, managed-target reset, private temporary-file cleanup, and installation. Generated target names may be command arguments after validation; credential bytes and their SHA-256 digest are sent only through stdin.
-
-The existing `compose()` wrapper and `compose exec -T` pattern at `bin/agentbox:122-136,626,639` provide the transport. Reuse them instead of adding a Podman client. `proxy/manage_secrets.py` and its `proxy/Containerfile` copy step are the only new executable component.
+A fixed Python helper in the proxy provides inventory, managed-target reset, private temporary-file cleanup, installation, and loopback reload. One `compose exec -T proxy python3 /app/manage_secrets.py sync` carries the complete transaction through stdin: `v1 <full-fingerprint> <transfer-count>\n`, followed by each validated target name and length/digest/payload frame. No credential contents or digests travel in command arguments.
 
 An installation frame contains payload length, digest, and payload. The helper:
 
@@ -137,7 +136,7 @@ An installation frame contains payload length, digest, and payload. The helper:
 5. Sets mode `0400` and atomically renames the file to its final target.
 6. Removes its temporary file on every failure.
 
-Managed final targets match `^[0-9a-f]{12}-[A-Za-z0-9._-]+$`. Before installation, the helper removes every managed final target and every file bearing its private temporary prefix. An unrelated entry is a fatal error and is not removed.
+Managed final targets match `^[0-9a-f]{12}-[A-Za-z0-9._-]+$`. After readiness and before installation, the helper removes every managed final target and every file bearing its private temporary prefix. An unrelated entry is a fatal error and is not removed. Once all frames and end-of-stream are verified, the helper calls the existing `/reload/providers` endpoint once and returns its sanitized status/body to the host for fingerprint verification.
 
 Existing resolvers keep credentials in memory, so resetting files does not alter active requests.
 
@@ -199,7 +198,7 @@ Unavailable policies do not block healthy providers or ordinary `extra_request_p
 
 | Operation | Required behavior |
 |-----------|-------------------|
-| `start` | After host preflight, start or reuse the proxy and wait for both `compose exec` and the reload endpoint. Report unavailable-policy warnings, release the lock after verification, then launch the agent. Do not launch on transaction failure. |
+| `start` | After host preflight, start or reuse the proxy, then enter one exec that waits for the reload endpoint. Report unavailable-policy warnings, release the lock after verification, then launch the agent. Do not launch on transaction failure. |
 | `proxy-reload` | Require a running proxy, perform one complete transaction, and rebuild providers even when YAML is unchanged. |
 | `proxy-restart` | Complete host preflight before restarting the proxy, then hold the lock through endpoint readiness, tmpfs repopulation, reload, and verification. |
 | `allow` / `deny` | Save the allowlist edit, then use fast `/reload`; do not synchronize or rebuild providers. If provider changes are pending, report that the edit is saved but not active and instruct the user to run `proxy-reload`, which applies both changes. The user does not rerun `allow` or `deny`. |
@@ -272,4 +271,5 @@ Target-contract coverage in `tests/test_secret_paths.py`, policy scope and order
 - One unavailable policy returns HTTP 503 only for requests requiring it; healthy providers continue, invalid skipped rules do not gate, and multi-policy injection never partially mutates headers.
 - Start synchronizes before agent launch, restart repopulates tmpfs, and automatic or raw-Compose startup leaves only unsynchronized file policies unavailable.
 - Credential values never appear in Compose, arguments, metadata, logs, or command output.
+- One exec per synchronization handles all transferable sources, including zero sources, and calls `/reload/providers` exactly once after successful installation.
 - Environment-only providers and `proxy_volumes` work with the generated Compose configuration.

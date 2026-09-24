@@ -1,20 +1,23 @@
 """One-shot, stdin-only provider secret installation into the proxy tmpfs."""
 
 import hashlib
+import http.client
 import json
 import os
 import re
 import stat
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "addons"))
 sys.path.insert(0, "/addons")
-from secret_contract import MANAGED_TARGET, validate_target
+from secret_contract import MANAGED_TARGET, NAME_MAX, validate_target
 
 SECRET_DIR = Path("/run/secrets")
 TEMP_PREFIX = ".agentbox-secret-"
+RELOAD_PORT = 8082
 
 
 def inventory() -> list[Path]:
@@ -32,7 +35,7 @@ def reset() -> None:
         entry.unlink()
 
 
-def install(target: str, stream) -> None:
+def install(target: str, stream, *, require_eof: bool = True) -> None:
     validate_target(target)
     header = stream.readline(128)
     if not re.fullmatch(rb"[1-9][0-9]* [0-9a-f]{64}\n", header):
@@ -52,7 +55,7 @@ def install(target: str, stream) -> None:
                 output.write(chunk)
                 digest.update(chunk)
                 remaining -= len(chunk)
-            if stream.read(1) or digest.hexdigest().encode() != expected:
+            if (require_eof and stream.read(1)) or digest.hexdigest().encode() != expected:
                 raise ValueError("Installation frame verification failed")
             output.flush()
             os.fchmod(output.fileno(), 0o400)
@@ -63,20 +66,67 @@ def install(target: str, stream) -> None:
             Path(temporary).unlink(missing_ok=True)
 
 
+def _request(path: str, *, expected: str = "", timeout: int = 2) -> tuple[int, dict]:
+    connection = http.client.HTTPConnection("127.0.0.1", RELOAD_PORT, timeout=timeout)
+    headers = {"X-Agentbox-Config-Fingerprint": expected} if expected else {}
+    try:
+        connection.request("GET", path, headers=headers)
+        response = connection.getresponse()
+        status = response.status
+        body = json.loads(response.read())
+        if not isinstance(body, dict):
+            raise ValueError("Invalid proxy response")
+        return status, body
+    finally:
+        connection.close()
+
+
+def wait_ready() -> None:
+    for attempt in range(40):
+        try:
+            status, body = _request("/health")
+            if status == 200 and body.get("ready") is True:
+                return
+        except (OSError, ValueError, http.client.HTTPException):
+            pass
+        if attempt < 39:
+            time.sleep(2)
+    raise ValueError("Proxy reload interface timed out")
+
+
+def sync(stream) -> dict:
+    """Receive one snapshot, replace managed secrets, and reload in the same exec."""
+    header = re.fullmatch(rb"v1 ([0-9a-f]{64}) (0|[1-9][0-9]*)\n", stream.readline(128))
+    if header is None:
+        raise ValueError("Invalid synchronization header")
+    expected, count = header.groups()
+    wait_ready()  # Never reset a store when the reload interface is unavailable.
+    reset()
+    targets = set()
+    for _ in range(int(count)):
+        line = stream.readline(NAME_MAX + 2)
+        if not line.endswith(b"\n"):
+            raise ValueError("Invalid synchronization target")
+        target = line[:-1].decode("ascii")
+        validate_target(target)
+        if target in targets:
+            raise ValueError("Duplicate synchronization target")
+        targets.add(target)
+        install(target, stream, require_eof=False)
+    if stream.read(1):
+        raise ValueError("Trailing synchronization data")
+    status, body = _request("/reload/providers", expected=expected.decode(), timeout=120)
+    return {"status": status, "body": body}
+
+
 def main() -> int:
     try:
-        args = sys.argv[1:]
-        if args == ["inventory"]:
-            print(json.dumps([entry.name for entry in inventory()]))
-        elif args == ["reset"]:
-            reset()
-        elif len(args) == 2 and args[0] == "install":
-            install(args[1], sys.stdin.buffer)
-        else:
+        if sys.argv[1:] != ["sync"]:
             raise ValueError("Invalid secret manager operation")
+        print(json.dumps(sync(sys.stdin.buffer)))
         return 0
-    except (OSError, ValueError):
-        print("Secret store operation failed", file=sys.stderr)
+    except (OSError, ValueError, UnicodeError, http.client.HTTPException):
+        print("Secret synchronization failed", file=sys.stderr)
         return 1
 
 

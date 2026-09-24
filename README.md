@@ -118,7 +118,8 @@ agentbox proxy-restart [--name NAME]    # restart proxy, repopulate keys, and re
 Provider files are synchronized **only** by `start`, `proxy-reload`, and `proxy-restart`.
 Edit the current session's `proxy-config/proxy.yaml` or replace a host key file, then run
 `proxy-reload` to apply the change without interrupting active requests. Every `start`
-synchronizes, including when it shares an existing proxy. There is no file watcher.
+synchronizes, including when it shares an existing proxy. One Compose exec transfers all
+provider secrets and applies the reload. There is no file watcher.
 
 **Direct `podman compose up` and automatic container restarts do not synchronize keys.**
 Their tmpfs starts empty. Requests requiring an unavailable credential receive HTTP 503

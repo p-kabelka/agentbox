@@ -42,7 +42,7 @@ async def streaming_worker():
 
     root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(root / "proxy" / "addons"))
-    from secret_contract import fingerprint, injection_secret_name, installation_frame
+    from secret_contract import fingerprint, injection_secret_name, installation_frame, synchronization_frame
     import resolvers
 
     async def probe(reader, writer):
@@ -136,6 +136,7 @@ async def streaming_worker():
                             raise AssertionError("Proxy exited during startup")
                         await asyncio.sleep(0.01)
                     reload_port = addon._reload_server.sockets[0].getsockname()[1]
+                    manager.RELOAD_PORT = reload_port
 
                     async def request(path):
                         reader, writer = await asyncio.open_connection("127.0.0.1", proxy_port)
@@ -173,13 +174,16 @@ async def streaming_worker():
                     await later.read()
                     later_writer.close()
                     assert received == ["Bearer integration-old-secret", "Bearer integration-old-secret",
-                                        "Bearer integration-new-secret"]
+                                         "Bearer integration-new-secret"]
+                    # Exercise the one-shot helper while the original stream is still live.
+                    result = await asyncio.to_thread(
+                        manager.sync, io.BytesIO(synchronization_frame(fingerprint(cfg), [])))
+                    assert result["status"] == 200
+                    assert result["body"]["fingerprint"] == fingerprint(cfg)
                     release.set()
                     assert b"data: second\n\n" in await stream.read()
                     stream_writer.close()
                     await stream_writer.wait_closed()
-                    manager.reset()
-                    await reload()
                     status, unavailable, unavailable_writer = await request("/unavailable")
                     assert status == 503
                     await unavailable.read()

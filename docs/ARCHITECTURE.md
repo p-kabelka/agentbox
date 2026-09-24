@@ -154,9 +154,10 @@ The proxy container is attached to both networks and is the sole egress point fo
 
 **`start.sh`** — Proxy entrypoint. Conditionally starts the metadata server. Installs custom CA certificates from `/custom-certs/` if present. Launches mitmweb. Waits for CA cert generation. Manages process lifecycle with signal handling.
 
-**`manage_secrets.py`** — Fixed, standard-library-only executable invoked through `compose exec -T`.
-Inventories the Compose-managed secret directory, resets managed targets and private
-temporary files, and installs length/digest/payload frames received exclusively through stdin.
+**`manage_secrets.py`** — Fixed, standard-library-only executable invoked once through
+`compose exec -T` per synchronization. Its `sync` operation checks loopback reload readiness,
+resets the Compose-managed secret directory, installs every length/digest/payload frame
+received through stdin, and calls `/reload/providers` with the host's expected fingerprint.
 Each installation uses a unique private temporary file and atomic rename to a `0400` final
 target. Unrelated entries are never deleted. `addons/secret_contract.py` shares target-name
 validation, canonical fingerprints, and framing with the host; no additional host dependency is needed.
@@ -302,10 +303,11 @@ Relative paths use `x-metadata.project-dir`; the exact configured string determi
 12-hex SHA-256 prefix and basename. Every invocation reopens sources, handling atomic
 replacement and symlink retargeting without inode-bound mounts.
 
-After preflight the CLI starts/reuses/restarts the proxy, waits for exec and reload readiness,
-resets the entire managed target set, transfers all usable sources, and calls the full reload
-exactly once. It verifies the applied fingerprint before launching the agent. Missing or
-empty sources become per-policy unavailable warnings unless an environment fallback works.
+After preflight the CLI starts/reuses/restarts the proxy, then invokes one `compose exec -T`
+with the expected fingerprint and all usable sources on stdin. Inside that exec, the helper
+waits for reload readiness, resets the entire managed target set, installs all sources, and
+calls the full reload exactly once. The CLI verifies the applied fingerprint before launching
+the agent. Missing or empty sources become per-policy unavailable warnings unless an environment fallback works.
 Teardown, stop, and remove acquire the same lock; failed preflight never restarts a working proxy.
 An interrupted transaction leaves existing resolver memory active and is recovered by rerunning
 a command. There is no persistent sync metadata, change detector, watcher, or background retry.

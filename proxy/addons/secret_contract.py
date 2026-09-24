@@ -34,3 +34,12 @@ def fingerprint(value) -> str:
 
 def installation_frame(payload: bytes) -> bytes:
     return f"{len(payload)} {hashlib.sha256(payload).hexdigest()}\n".encode() + payload
+
+
+def synchronization_frame(expected: str, sources: list[tuple[str, bytes]]) -> bytes:
+    """One stdin transaction: snapshot fingerprint, targets, and verified payload frames."""
+    for target, _ in sources:
+        validate_target(target)
+    header = f"v1 {expected} {len(sources)}\n".encode()
+    return header + b"".join(target.encode() + b"\n" + installation_frame(payload)
+                             for target, payload in sources)

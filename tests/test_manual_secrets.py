@@ -21,7 +21,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "proxy" / "addons"))
-from secret_contract import fingerprint, injection_secret_name, installation_frame
+from secret_contract import fingerprint, injection_secret_name, installation_frame, synchronization_frame
 
 spec = importlib.util.spec_from_file_location("manage_secrets", ROOT / "proxy" / "manage_secrets.py")
 manager = importlib.util.module_from_spec(spec)
@@ -78,6 +78,61 @@ class SecretManagerTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             manager.install("../escape", io.BytesIO(installation_frame(b"payload")))
 
+    def test_sync_replaces_all_targets_then_reloads_once(self):
+        other = injection_secret_name("/keys/other")
+        (self.store / self.target).write_bytes(b"old")
+        calls = []
+        def request(path, **kwargs):
+            calls.append((path, kwargs))
+            if path == "/health":
+                self.assertEqual((self.store / self.target).read_bytes(), b"old")
+                return 200, {"ready": True}
+            self.assertEqual((self.store / self.target).read_bytes(), b"new")
+            self.assertEqual((self.store / other).read_bytes(), b"second")
+            return 200, {"fingerprint": "a" * 64}
+        frame = synchronization_frame("a" * 64, [(self.target, b"new"), (other, b"second")])
+        with patch.object(manager, "_request", side_effect=request):
+            self.assertEqual(manager.sync(io.BytesIO(frame)),
+                             {"status": 200, "body": {"fingerprint": "a" * 64}})
+        self.assertEqual([path for path, _ in calls], ["/health", "/reload/providers"])
+        self.assertEqual(calls[1][1]["expected"], "a" * 64)
+        self.assertEqual(stat.S_IMODE((self.store / other).stat().st_mode), 0o400)
+
+    def test_sync_rejects_bad_frames_without_reloading(self):
+        full = "a" * 64
+        valid = synchronization_frame(full, [(self.target, b"secret")])
+        frames = [b"invalid\n", valid[:-1], valid + b"extra",
+                  valid.replace(b"secret", b"change"),
+                  synchronization_frame(full, [(self.target, b"secret"), (self.target, b"secret")]),
+                  valid.replace(self.target.encode(), b"../escape")]
+        with (patch.object(manager, "wait_ready"), patch.object(manager, "_request") as request):
+            for frame in frames:
+                with self.subTest(frame=frames.index(frame)), self.assertRaises(ValueError):
+                    manager.sync(io.BytesIO(frame))
+            request.assert_not_called()
+        self.assertEqual(list(self.store.glob(manager.TEMP_PREFIX + "*")), [])
+
+    def test_sync_never_resets_when_proxy_is_unready(self):
+        (self.store / self.target).write_bytes(b"old")
+        with (patch.object(manager, "_request", side_effect=ConnectionRefusedError) as request,
+              patch.object(manager.time, "sleep")):
+            with self.assertRaises(ValueError):
+                manager.sync(io.BytesIO(synchronization_frame("a" * 64, [])))
+        self.assertEqual(request.call_count, 40)
+        self.assertEqual((self.store / self.target).read_bytes(), b"old")
+
+    def test_reload_request_forwards_fingerprint_over_loopback(self):
+        with patch.object(manager.http.client, "HTTPConnection") as connection:
+            response = connection.return_value.getresponse.return_value
+            response.status = 409
+            response.read.return_value = b'{"error":"conflict"}'
+            self.assertEqual(manager._request("/reload/providers", expected="a" * 64,
+                                              timeout=120), (409, {"error": "conflict"}))
+            connection.assert_called_once_with("127.0.0.1", manager.RELOAD_PORT, timeout=120)
+            connection.return_value.request.assert_called_once_with(
+                "GET", "/reload/providers", headers={"X-Agentbox-Config-Fingerprint": "a" * 64})
+            connection.return_value.close.assert_called_once()
+
 
 class HostSecretsTest(unittest.TestCase):
     def setUp(self):
@@ -92,6 +147,8 @@ class HostSecretsTest(unittest.TestCase):
         self.source = self.project / "token"
         self.source.write_bytes(b"private-test-value\n")
         self.source.chmod(0o600)
+        self.store = self.root / "store"
+        self.store.mkdir()
         self.cfg = {"providers": [{"name": "test", "enabled": True, "credential_type": "static",
                                    "api_key_file": "token"}]}
         self.write_config(self.cfg)
@@ -105,21 +162,30 @@ class HostSecretsTest(unittest.TestCase):
         self.addCleanup(self.patches.stop)
         self.events = []
         self.frames = []
+        self.probes = []
 
     def write_config(self, cfg):
         (self.session / "proxy-config" / "proxy.yaml").write_text(yaml.safe_dump(cfg))
 
     def compose(self, session, *args, **kwargs):
         self.events.append(args)
-        if "install" in args:
+        if args[-1] == "sync":
             self.frames.append(kwargs["input"])
-        body = ""
-        if args[-1] == "http://127.0.0.1:8082/reload/providers":
-            cfg = yaml.safe_load((self.session / "proxy-config" / "proxy.yaml").read_text())
-            body = json.dumps({"fingerprint": fingerprint(cfg),
-                               "provider_fingerprint": fingerprint(cfg.get("providers", [])),
-                               "unavailable": []}) + "\n200"
-        return subprocess.CompletedProcess(args, 0, stdout=body, stderr="")
+            def request(path, **options):
+                self.probes.append((path, options))
+                if path == "/health":
+                    return 200, {"ready": True}
+                cfg = yaml.safe_load((self.session / "proxy-config" / "proxy.yaml").read_text())
+                return 200, {"fingerprint": fingerprint(cfg),
+                             "provider_fingerprint": fingerprint(cfg.get("providers", [])),
+                             "unavailable": []}
+            with patch.object(manager, "SECRET_DIR", self.store), patch.object(manager, "_request", side_effect=request):
+                try:
+                    reply = manager.sync(io.BytesIO(kwargs["input"]))
+                except (OSError, ValueError):
+                    return subprocess.CompletedProcess(args, 1, stdout=b"", stderr=b"")
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps(reply).encode(), stderr=b"")
+        return subprocess.CompletedProcess(args, 0, stdout="{}\n200", stderr="")
 
     def test_discovery_all_scopes_exclusions_dedup_and_project_resolution(self):
         cfg = {"providers": [
@@ -187,15 +253,15 @@ class HostSecretsTest(unittest.TestCase):
                 self.agentbox["_launch"](self.session)
         self.assertEqual(exit.exception.code, 0)
         up_index = self.events.index(("up", "-d", "proxy"))
-        ready_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/health"))
-        reset_index = next(i for i, e in enumerate(self.events) if "reset" in e)
-        install_index = next(i for i, e in enumerate(self.events) if "install" in e)
-        reload_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/reload/providers"))
+        sync_index = next(i for i, e in enumerate(self.events) if e[-1] == "sync")
         run_index = next(i for i, e in enumerate(self.events) if e[0] == "run")
-        self.assertTrue(up_index < ready_index < reset_index < install_index < reload_index < run_index)
+        self.assertTrue(up_index < sync_index < run_index)
+        self.assertEqual([path for path, _ in self.probes], ["/health", "/reload/providers"])
         self.assertIn("--no-deps", self.events[run_index])
         self.assertEqual(self.events[-1], ("down",))
-        self.assertEqual(self.frames, [installation_frame(self.source.read_bytes())])
+        self.assertEqual(self.frames, [synchronization_frame(fingerprint(self.cfg), [
+            (injection_secret_name("token"), self.source.read_bytes())])])
+        self.assertEqual((self.store / injection_secret_name("token")).read_bytes(), self.source.read_bytes())
         after = {p.relative_to(self.session) for p in self.session.rglob("*")}
         self.assertEqual(after - before, {Path(".secret-sync.lock"), Path(".lifetime.lock")})
         for text in (output.getvalue(), repr(self.events), (self.session / "compose.yaml").read_text()):
@@ -203,41 +269,51 @@ class HostSecretsTest(unittest.TestCase):
             self.assertNotIn(hashlib.sha256(self.source.read_bytes()).hexdigest(), text)
         self.assertEqual((self.session / ".secret-sync.lock").read_bytes(), b"")
 
-    def test_secret_synchronization_only_resets_and_installs(self):
-        _, _, sources = self.agentbox["_secret_preflight"](self.session)
-        with patch.dict(self.g, compose=self.compose,
-                        wait_healthy=lambda session: self.fail("sync waited for the proxy"),
-                        _reload_proxy=lambda *args: self.fail("sync reloaded providers")):
-            self.agentbox["_synchronize_secrets"](self.session, sources)
-        self.assertEqual(len(self.events), 2)
-        self.assertIn("reset", self.events[0])
-        self.assertIn("install", self.events[1])
-        self.assertEqual(self.frames, [installation_frame(self.source.read_bytes())])
+    def test_secret_synchronization_uses_one_exec_for_all_steps(self):
+        full, providers, sources = self.agentbox["_secret_preflight"](self.session)
+        with patch.dict(self.g, compose=self.compose):
+            self.agentbox["_synchronize_proxy"](self.session, full, providers, sources)
+        self.assertEqual(self.events, [("exec", "-T", "proxy", "python3", "/app/manage_secrets.py", "sync")])
+        self.assertEqual([path for path, _ in self.probes], ["/health", "/reload/providers"])
+        self.assertEqual(self.frames, [synchronization_frame(full, [
+            (injection_secret_name("token"), self.source.read_bytes())])])
+
+    def test_multiple_sources_still_use_one_exec_and_skip_missing_files(self):
+        (self.project / "second").write_bytes(b"second-key")
+        self.cfg["providers"].extend([
+            {"name": "second", "enabled": True, "credential_type": "static", "api_key_file": "second"},
+            {"name": "missing", "enabled": True, "credential_type": "static", "api_key_file": "absent"},
+        ])
+        self.write_config(self.cfg)
+        with patch.dict(self.g, compose=self.compose), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            self.agentbox["cmd_proxy_reload"](self.args)
+        self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.frames, [synchronization_frame(fingerprint(self.cfg), [
+            (injection_secret_name("token"), self.source.read_bytes()),
+            (injection_secret_name("second"), b"second-key")])])
+        self.assertEqual(len(list(self.store.iterdir())), 2)
 
     def test_reload_and_restart_always_transfer_current_snapshot_once(self):
         for command in ("cmd_proxy_reload", "cmd_proxy_reload", "cmd_proxy_restart"):
             self.events.clear()
+            self.probes.clear()
             with patch.dict(self.g, compose=self.compose), redirect_stdout(io.StringIO()):
                 self.agentbox[command](self.args)
-            self.assertEqual(sum(e[-1].endswith("/reload/providers") for e in self.events), 1)
-            self.assertEqual(sum("reset" in e for e in self.events), 1)
-            self.assertEqual(sum("install" in e for e in self.events), 1)
-            ready_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/health"))
-            reset_index = next(i for i, e in enumerate(self.events) if "reset" in e)
-            install_index = next(i for i, e in enumerate(self.events) if "install" in e)
-            reload_index = next(i for i, e in enumerate(self.events) if e[-1].endswith("/reload/providers"))
-            self.assertTrue(ready_index < reset_index < install_index < reload_index)
+            self.assertEqual(sum(e[-1] == "sync" for e in self.events), 1)
+            self.assertEqual([path for path, _ in self.probes], ["/health", "/reload/providers"])
             if command == "cmd_proxy_restart":
                 self.assertEqual(self.events[0], ("restart", "proxy"))
             else:
-                self.assertEqual(self.events[0], ("exec", "-T", "proxy", "true"))
+                self.assertEqual(len(self.events), 1)
+                self.assertEqual(self.events[0][-1], "sync")
                 self.assertFalse(any(e[0] in {"up", "restart"} for e in self.events))
         self.cfg["providers"][0]["api_key_file"] = "second"
         (self.project / "second").write_bytes(b"second-key")
         self.write_config(self.cfg)
         with patch.dict(self.g, compose=self.compose), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.agentbox["cmd_proxy_reload"](self.args)
-        self.assertEqual(self.frames[-1], installation_frame(b"second-key"))
+        self.assertEqual(self.frames[-1], synchronization_frame(fingerprint(self.cfg), [
+            (injection_secret_name("second"), b"second-key")]))
 
     def test_preflight_failure_prevents_restart_or_launch(self):
         for text in ("providers: [", "providers: [{enabled: true, api_key_file: '..'}]", "[]"):
@@ -251,30 +327,51 @@ class HostSecretsTest(unittest.TestCase):
     def test_reset_or_transfer_failure_skips_reload_and_agent(self):
         for operation in ("reset", "install"):
             self.events.clear()
-            def failing(session, *args, **kwargs):
-                result = self.compose(session, *args, **kwargs)
-                if operation in args:
-                    result.returncode = 1
-                return result
-            with patch.dict(self.g, compose=failing), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.probes.clear()
+            with (patch.object(manager, operation, side_effect=ValueError),
+                  patch.dict(self.g, compose=self.compose), redirect_stderr(io.StringIO()),
+                  self.assertRaises(SystemExit)):
                 self.agentbox["_launch"](self.session)
-            self.assertFalse(any(e[-1].endswith("/reload/providers") or e[0] in {"run", "down"} for e in self.events))
-            if operation == "reset":
-                self.assertFalse(any("install" in e for e in self.events))
+            self.assertEqual([path for path, _ in self.probes], ["/health"])
+            self.assertFalse(any(e[0] in {"run", "down"} for e in self.events))
 
     def test_fingerprint_verification_failure_does_not_launch(self):
-        with (patch.dict(self.g, compose=self.compose, _reload_proxy=lambda *args: {
-                "fingerprint": "wrong", "provider_fingerprint": "wrong"}),
-              redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
+        def mismatch(session, *args, **kwargs):
+            result = self.compose(session, *args, **kwargs)
+            if args[-1] == "sync":
+                result.stdout = json.dumps({"status": 200, "body": {
+                    "fingerprint": "wrong", "provider_fingerprint": "wrong"}}).encode()
+            return result
+        with (patch.dict(self.g, compose=mismatch),
+               redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
             self.agentbox["_launch"](self.session)
         self.assertFalse(any(e[0] in {"run", "down"} for e in self.events))
+
+    def test_synchronized_reload_reports_conflict_and_rejection(self):
+        for status, message in ((409, "Concurrent configuration change"),
+                                (500, "Proxy rejected the configuration")):
+            self.events.clear()
+            def rejected(session, *args, **kwargs):
+                result = self.compose(session, *args, **kwargs)
+                if args[-1] == "sync":
+                    reply = json.loads(result.stdout)
+                    reply["status"] = status
+                    result.stdout = json.dumps(reply).encode()
+                return result
+            output = io.StringIO()
+            with (patch.dict(self.g, compose=rejected), redirect_stderr(output),
+                  self.assertRaises(SystemExit)):
+                self.agentbox["cmd_proxy_reload"](self.args)
+            self.assertIn(message, output.getvalue())
+            self.assertEqual(len(self.events), 1)
 
     def test_environment_only_sync_has_no_transfer_and_build_has_no_secret_directory_side_effect(self):
         self.write_config({"providers": [{"enabled": True, "credential_type": "static", "api_key_env": "KEY"}]})
         with patch.dict(self.g, compose=self.compose), redirect_stdout(io.StringIO()):
             self.agentbox["cmd_proxy_reload"](self.args)
-        self.assertEqual(self.frames, [])
-        self.assertTrue(any("reset" in e for e in self.events))
+        self.assertEqual(self.frames, [synchronization_frame(fingerprint(yaml.safe_load(
+            (self.session / "proxy-config" / "proxy.yaml").read_text())), [])])
+        self.assertEqual([path for path, _ in self.probes], ["/health", "/reload/providers"])
         home = self.root / "home"
         (home / "proxy").mkdir(parents=True)
         (home / "proxy" / "Containerfile").touch()
@@ -291,6 +388,7 @@ class HostSecretsTest(unittest.TestCase):
         with patch.dict(self.g, compose=stopped), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.agentbox["cmd_proxy_reload"](self.args)
         self.assertEqual(len(self.events), 1)
+        self.assertEqual(self.events[0][-1], "sync")
 
     def test_proxy_volumes_are_generated(self):
         config = {"proxy_volumes": [{"src": str(self.source), "dst": "/oauth/key"}]}

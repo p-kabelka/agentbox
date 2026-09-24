@@ -309,9 +309,10 @@ the proxy uses a non-empty configured environment fallback or marks that policy 
 Targets are `<sha256(exact configured source)[:12]>-<basename>`; ASCII basenames must match
 `[A-Za-z0-9._-]+`, excluding `.` and `..`, with at most 242 bytes (255 including the prefix).
 Payload length, digest, and bytes travel only through stdin to `/app/manage_secrets.py`.
-The helper resets managed targets/private temporary files, refuses unrelated entries, and
-validates each framed transfer before an atomic rename at mode `0400`. No persistent sync
-state or delta detection exists; rerunning a command recovers interrupted staging.
+One `compose exec -T` carries the entire transaction: the helper waits for loopback readiness,
+resets managed targets/private temporary files, refuses unrelated entries, validates each
+framed transfer before an atomic rename at mode `0400`, then invokes `/reload/providers`.
+No persistent sync state or delta detection exists; rerunning a command recovers interrupted staging.
 
 Canonical JSON SHA-256 fingerprints bind the full reload to the host snapshot and prevent
 fast reload from applying unsynchronized provider changes. Full reload constructs a complete
