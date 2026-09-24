@@ -6,10 +6,12 @@ set -euo pipefail
 CA=/proxy-ca/mitmproxy-ca-cert.pem
 # wait until the proxy certificate is created by proxy container
 until [ -f "$CA" ]; do sleep 0.2; done
-# append it to system cert store (faster than update-ca-trust)
-cat "$CA" >> /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
-# copy it to system cert sources in case update-ca-trust runs
-cp "$CA" /etc/pki/ca-trust/source/anchors/proxy-ca.crt
+ANCHOR=/etc/pki/ca-trust/source/anchors/proxy-ca.crt
+if ! cmp -s "$CA" "$ANCHOR"; then
+    # append it to system cert store (faster than update-ca-trust)
+    cat "$CA" >> /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem
+    cp "$CA" "$ANCHOR"
+fi
 # make libraries trust the cert directly
 export SSL_CERT_FILE="$CA"
 export CURL_CA_BUNDLE="$CA"
@@ -29,8 +31,8 @@ if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     echo "[agent] When done: git push origin HEAD"
 fi
 
-# Apply preset dotfiles to home directory
-[ -d /agentbox-dotfiles ] && cp -rT /agentbox-dotfiles ~/
+# Seed preset dotfiles without overwriting changes on subsequent starts
+[ -d /agentbox-dotfiles ] && cp -rn /agentbox-dotfiles/. ~/
 
 # krun's virtio-console sends \n for Enter instead of \r. Node.js readline in
 # raw mode expects \r. setRawMode() clears icrnl but not inlcr, so inlcr set

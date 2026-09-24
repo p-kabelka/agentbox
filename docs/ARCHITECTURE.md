@@ -173,9 +173,9 @@ validation, canonical fingerprints, and framing with the host; no additional hos
 - `Containerfile.cursor` — Installs Cursor via the official install script.
 
 **`start.sh`** — Agent entrypoint. Performs in order:
-1. Waits for the mitmproxy CA certificate to appear, then appends it to the system PEM bundle and exports `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `REQUESTS_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS` so all common TLS libraries trust the proxy's certificate.
+1. Waits for the mitmproxy CA certificate to appear, then appends it to the system PEM bundle only when the anchor changes and exports `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `REQUESTS_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS` so all common TLS libraries trust the proxy's certificate.
 2. If `/source/project.bundle` is present and `/workspace/.git` does not yet exist, clones the bundle to `/workspace`, renames the bundle remote from `origin` to `source`, adds the output bare repository as `origin`, and enables `push.autoSetupRemote` so the agent can push with just `git push`.
-3. Copies preset dotfiles from `/agentbox-dotfiles` into the container's home directory (if the directory is mounted).
+3. Seeds missing preset dotfiles from `/agentbox-dotfiles` into the container's home directory without overwriting edits on restart.
 4. If arguments were passed (`$# > 0`), execs them directly. Otherwise execs `AGENT_HARNESS` with `AGENT_HARNESS_ARGS`, or falls back to bash.
 
 **Traffic interception:** proxychains4 is configured in `dynamic_chain` mode. All libc-level TCP connections to external hosts are intercepted via `LD_PRELOAD` and tunneled through the mitmproxy CONNECT endpoint at `proxy:8080`. Additionally, `HTTPS_PROXY` and `HTTP_PROXY` environment variables are set so that tools which respect them use the proxy directly. Tools that respect neither mechanism are caught by proxychains at the syscall level.
@@ -274,6 +274,8 @@ Sessions are stored in a central state directory (`$AGENTBOX_STATE`, defaulting 
 
 The project directory and session name are stored in the session's `compose.yaml` as `x-metadata.project-dir` and `x-metadata.name` (Compose extension fields, ignored by the container runtime). This replaces the previous approach of inferring the project directory from the filesystem path.
 
+Compose project names include a short hash of the session ID in both ephemeral and persistent modes. This separates networks, volumes, and containers even when two project directories share the same basename and session name.
+
 This design keeps project directories clean (no `.agentbox/` directories), enables cross-project session management (`agentbox list --all`), and follows the XDG Base Directory Specification for state data.
 
 ### 6.6 Unified compose.yaml per session
@@ -282,7 +284,9 @@ At `agentbox init` time, `compose-base.yaml` (the shared template defining image
 
 `podman compose -f compose.yaml` uses this self-contained file at runtime. Images are defined once in `compose-base.yaml` and reused across all projects — a change to the proxy's Python addons requires rebuilding one image, not regenerating every session's configuration.
 
-The `compose.yaml` is generated once at init and then user-owned: edits persist across `agentbox start` calls. Running `agentbox init` again regenerates it, preserving the session's web port and any context mounts already registered via `agentbox mount add`.
+The `compose.yaml` is generated at init and then user-owned: edits persist across `agentbox start` calls. Running `agentbox init` again regenerates an ephemeral session, preserving its web port and context mounts. Persistent sessions may be re-initialized only before the agent container has been created.
+
+By default, each `start` launches a removable one-off agent; multiple starts can share the proxy. `init --persist` instead gives the agent and proxy fixed service names under a session-specific Compose project. The first start creates the agent service with `compose create --no-deps agent`, then runs it with `podman start -ai`; later starts run that same service container with `podman start -ai`. A nonblocking exclusive lifetime lock prevents a second owner, while the existing secret-sync lock covers proxy synchronization and agent creation. Releasing that lock before the blocking start permits `stop` and proxy reload, but allows `stop` to stop the proxy immediately before the agent starts. Exit and `stop` use `compose stop` so the writable agent filesystem survives; `remove` uses `compose down -v`. Compose saves the agent's image, mounts, environment, and command when creating it; changing `services.agent` later does not reconfigure that container on restart.
 
 ### 6.7 Hot-reload over proxy restart for allowlist changes
 
@@ -331,7 +335,7 @@ The architecture is designed so that the most common customisations require no c
 | Add a new LLM provider | Add a stanza to `proxy.yaml` | No |
 | Open additional egress | `agentbox allow <host>` | No |
 | Switch agent harness | Create or select a preset with the desired `agent_image` and `AGENT_HARNESS` | No |
-| Add a read-only reference project | `agentbox mount add` | No |
+| Add a read-only reference project | `agentbox init --ro-mount` | No |
 | Use a different preset per project | `agentbox init --preset` | No |
 | Trust a custom CA certificate | Add cert to `custom/certs/`, list in `trusted_certificates` | No |
 | Enable VM-level isolation | Install `crun-vm` / `krun`; `runtime: krun` is always generated in the compose | No |

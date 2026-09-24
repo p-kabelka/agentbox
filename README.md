@@ -8,7 +8,7 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](d
 
 ## How it works
 
-Two containers run per session: a **proxy** (holds real credentials, enforces an egress allowlist, logs all traffic) and an **agent** (holds no credentials, has no internet route). All agent network traffic transits mitmproxy. Your project is delivered to the agent as a read-only git bundle; output comes back through a bare repository with immutable hooks.
+Each session has a **proxy** (holds real credentials, enforces an egress allowlist, logs all traffic) and one or more **agents** (hold no credentials, have no internet route). All agent network traffic transits mitmproxy. Your project is delivered to the agent as a read-only git bundle; output comes back through a bare repository with immutable hooks.
 
 ---
 
@@ -70,6 +70,20 @@ agentbox start -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 
 
 Some caveats: the start command is entirely customizable on the command line. By default if you don't provide a command to run it will launch the agent harness configured in the preset. The presets usually have some configuration in .bashrc that pre-configures the agent harness to be usable from the sandbox right way. Therefore it is almost always more preferable to use the tmux session start command echoed by the init command.
 
+To keep the agent's workspace and home directory across starts, opt in at initialization:
+
+```bash
+agentbox init --name feature --persist
+agentbox start --name feature -- bash     # first start chooses the saved command
+# exit bash, then restart the same container and its filesystem
+agentbox start --name feature
+agentbox stop --name feature              # retain the stopped agent and proxy
+agentbox remove --name feature            # delete the container and unpublished work
+```
+
+Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits to the output remote before removing the session; auto-fetch runs after each attached exit unless `remove` has deleted the session while it was running.
+After the first start, edits to `services.agent` in `compose.yaml` do not reconfigure the retained agent on the next start. Create a new session for a different agent image, environment, mounts, or command.
+
 The default environment does not include any agent harness, so it can be used as a temporary sandbox.
 
 Currently, for all provided agents you need to create your own preset (or modify the generated compose file) to configure them. Checkout [docs](docs/) for the specific agent harness setup guide.
@@ -81,14 +95,14 @@ Currently, for all provided agents you need to create your own preset (or modify
 ### Session lifecycle
 
 ```bash
-agentbox init   [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] \
+agentbox init   [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] [--persist] \
                 [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]
 agentbox start  [--name NAME] [-- CMD]   # launch agent harness (or CMD, e.g. -- bash, -- tmux)
 agentbox stop   [--name NAME]            # stop containers
 agentbox remove [--name NAME]            # stop, delete session, output repo, and git remote
 ```
 
-`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. `agentbox start` can be called multiple times on the same session to run independent agent containers concurrently. The proxy stays up while any of those agents are running and is torn down (`compose down`, same as `agentbox stop`) when the last one exits. Because agents run in krun microVMs, `podman exec` cannot reach a running container — use `agentbox start -- bash` to open a shell in a new container instead.
+`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. By default, `agentbox start` can run independent agent containers concurrently; the proxy stays up until the last one exits, then `compose down` tears the project down. With `init --persist`, the agent is one retained Compose service container; `start -- CMD` is only valid before its first creation, later starts use its saved command, and a second simultaneous start fails. `stop` retains both persistent service containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running container; use another ephemeral start or a separate session for parallel shells.
 
 Everywhere where `--name` can be used, the parameter `--session` can also be used when you provide the session global ID found in `agentbox list --all`.
 
@@ -98,6 +112,7 @@ Everywhere where `--name` can be used, the parameter `--session` can also be use
 agentbox logs [--name NAME] [--tail LAST_N_LINES]   # tail structured JSON access log from the proxy
 agentbox web  [--name NAME]                         # print the mitmweb traffic-monitor URL
 agentbox list [--all]                               # list sessions (optionally across all projects)
+agentbox containers [--name NAME] [--json]          # list session containers and their states
 agentbox status                                     # list all running agentbox containers
 ```
 
@@ -132,15 +147,13 @@ apply both changes. You do not need to repeat `allow` or `deny`.
 
 ### Reference mounts
 
-Mount additional projects at `/context/<name>` inside the agent:
+Mount additional projects at `/context/<name>` when initializing a session:
 
 ```bash
-agentbox mount add ~/libs/shared-lib [--name NAME]   # read-only (default)
-agentbox mount add -w ~/data/scratch [--name NAME]   # writable
-agentbox mount remove shared-lib     [--name NAME]
-agentbox mount list                  [--name NAME]
-agentbox start                                       # restart to apply
+agentbox init --ro-mount ~/libs/shared-lib:shared-lib --rw-mount ~/data/scratch:scratch
 ```
+
+For a persistent session, set mounts during `init`. Existing containers keep their original mounts; create a new session to change them.
 
 ### Retrieving output
 

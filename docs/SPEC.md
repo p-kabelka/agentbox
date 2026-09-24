@@ -10,7 +10,7 @@ agentbox defends against these threats by structuring the environment so that th
 
 For the internal structure and design decisions behind this architecture, see [ARCHITECTURE.md](ARCHITECTURE.md).
 
-For the proposed, not-yet-implemented persistent sandbox mode, see [SPEC-persistent-sandboxes.md](SPEC-persistent-sandboxes.md). The command behavior below describes the current ephemeral mode.
+For the persistent sandbox lifecycle and verification contract, see [SPEC-persistent-sandboxes.md](SPEC-persistent-sandboxes.md). Ephemeral mode remains the default.
 
 ---
 
@@ -48,7 +48,7 @@ A developer creates an agentbox for a feature branch, provides the agent with a 
 
 ### Use Case 2: Multi-Repo Context
 
-The agent needs read access to a shared internal library while implementing changes to the main project. The developer adds the library path with `agentbox mount add ~/libs/shared-lib`. The library is mounted read-only into the agent container as an additional reference directory. The agent can read its source but cannot modify it or push to it. The mount is recorded in the session's `compose.yaml` and persists across agentbox restarts. Writable mounts are also supported via `--rw-mount` or `agentbox mount add -w` for cases where the agent needs to write to a reference directory.
+The agent needs read access to a shared internal library while implementing changes to the main project. The developer initializes the session with `agentbox init --ro-mount ~/libs/shared-lib:shared-lib`. The library is mounted read-only into the agent container as an additional reference directory. The agent can read its source but cannot modify it or push to it. The mount is recorded in the session's `compose.yaml`. Writable mounts are supported via `--rw-mount` at initialization.
 
 ### Use Case 3: Restricted Provider Switching
 
@@ -125,19 +125,20 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 | Group | Commands |
 |-------|----------|
 | Setup | `build [HARNESS...]`, `update [HARNESS...]`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
-| Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
+| Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--persist] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
 | Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
 | Egress control | `allow <host> [-n NAME \| -s ID]`, `deny <host> [-n NAME \| -s ID]` |
 | Proxy management | `proxy-reload [-n NAME \| -s ID]`, `proxy-restart [-n NAME \| -s ID]` |
-| Reference mounts | `mount list [-n NAME \| -s ID]`, `mount add [-w] <SRC[:DST]> [-n NAME \| -s ID]`, `mount remove <DST> [-n NAME \| -s ID]` |
-| Observation | `status`, `list [--all] [--json]` / `ls [--all] [--json]` |
+| Observation | `status`, `list [--all] [--json]` / `ls [--all] [--json]`, `containers [-n NAME \| -s ID] [--json]` |
 | Maintenance | `remote-cleanup` |
 
 ### 5.2 Key Command Behaviors
 
 `agentbox init` creates a timestamped (or named) session directory under `$AGENTBOX_STATE/sessions/`, copies the chosen preset's `proxy.yaml` (without its `environment` field) to the session directory, extracts any inline dotfiles from the preset's `agent.yaml`, creates a git bundle of the current branch (unless `--no-git`), initialises the bare output repository with read-only hooks and config, registers a git remote, and generates a unified `compose.yaml`. The session is optionally launched immediately if `--start` is passed.
 
-`agentbox start` preflights the session configuration and provider files, starts or reuses the proxy, synchronizes credentials into its tmpfs, and verifies a full provider reload before running a new agent container interactively. The `compose.yaml` is persistent — edits made directly to it are preserved across restarts. Any arguments after `--` are forwarded to the agent entrypoint and override what gets exec'd (e.g., `agentbox start -- tmux` or `agentbox start -- bash`). When the agent container exits, output is auto-fetched. Multiple `agentbox start` calls on the same session run independent agent containers concurrently; each invocation synchronizes. When the last concurrent agent exits, teardown reacquires the synchronization lock before `compose down`.
+`agentbox start` preflights the session configuration and provider files, starts or reuses the proxy, synchronizes credentials into its tmpfs, and verifies a full provider reload before starting the agent. Without `--persist`, `compose run --rm --no-deps agent` launches independent agent containers concurrently; arguments after `--` override the entrypoint's command for that invocation. The last concurrent exit tears the project down. Output is auto-fetched after each attached exit unless the session was removed while running.
+
+With `init --persist`, the first `start` creates the named `agent` Compose service container using `compose create --no-deps agent`, then runs it interactively with `podman start -ai`. Later starts use `podman start -ai` on that same container. `start -- CMD` saves the command only on first creation; reuse with `-- CMD` fails before proxy changes. Only one start may own the session at a time. Exiting or `stop` stops both service containers without removing them; `remove` uses `compose down -v` to delete them and the session data, including when the agent is running. The agent's writable workspace and home persist, but processes do not. Re-initializing a populated persistent session or changing its mode is rejected. Init-specified mounts cannot be changed on an existing container; direct edits to `services.agent` in `compose.yaml` do not reconfigure it on the next start. Create a new session to change its image, environment, mounts, or command. Every new start synchronizes credentials before starting the agent. A concurrent `stop` can stop the proxy in the brief gap between synchronization and `podman start -ai`.
 
 `agentbox allow` and `agentbox deny` append or remove rules in `extra_request_policy` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections. Hostnames are automatically escaped for regex safety. The `host:port` syntax is supported (e.g., `agentbox allow registry.internal.com:8443`).
 
@@ -149,7 +150,7 @@ These edits use fast `/reload`, which never rebuilds providers. If the provider 
 
 All commands that operate on a specific session accept `--name <name>` (project-relative lookup) or `--session <session_id>` (global lookup by full session ID, works from any directory). The two flags are mutually exclusive. If the project has exactly one session, both are optional and the session is auto-detected. Session IDs are shown in the `list` output and can be used to manage sessions from any working directory.
 
-`agentbox list` and `agentbox ls` output a formatted table. With `--all`, sessions from all projects are shown with their project directory. With `--json`, the output is a JSON array for machine parsing.
+`agentbox list` and `agentbox ls` output a formatted table. With `--all`, sessions from all projects are shown with their project directory. With `--json`, the output is a JSON array for machine parsing, with a `persistent` boolean per session. A retained stopped agent and a proxy running alone are not reported as an active agent. `agentbox containers` shows each container's state in both session modes.
 
 ---
 
@@ -163,9 +164,10 @@ Each session directory is fully self-contained:
 
 | File | Purpose |
 |------|---------|
-| `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on `agentbox init`. Contains `x-metadata.project-dir` and `x-metadata.name` for session identification. |
+| `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on ephemeral `agentbox init` or persistent init before agent creation. Contains `x-metadata.project-dir`, `x-metadata.name`, and `x-metadata.persist` for session identification. |
 | `proxy-config/proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init; sole authority for provider secret declarations |
 | `.secret-sync.lock` | Exclusive synchronization/lifecycle lock; contains no secret data |
+| `.lifetime.lock` | Shared by concurrent ephemeral agents; exclusively owned by an attached persistent start |
 | `dotfiles/` | Extracted dotfiles from preset `agent.yaml` |
 | `source.bundle` | Read-only git snapshot of the source branch |
 | `output.git/` | Bare repo output barrier — agent pushes here |
@@ -399,10 +401,6 @@ agentbox deny pypi.org                   # remove it (hot-reloads proxy)
 agentbox logs                            # tail the JSON access log from the proxy
 agentbox web                             # print the mitmweb traffic-monitor URL
 
-agentbox mount add ~/libs/shared-lib     # add a read-only reference mount
-agentbox mount add -w ~/data/scratch     # add a writable reference mount
-agentbox start                           # restart session to apply new mount
-
 agentbox list                            # list all sessions for this project with status
 agentbox status                          # list all running agentbox containers across projects
 ```
@@ -423,8 +421,8 @@ git log agentbox-mywork/agent-work       # review commit history
 git diff HEAD agentbox-mywork/agent-work # review all changes before merging
 git merge agentbox-mywork/agent-work     # merge after review
 
-agentbox stop                            # tear down containers and networks
-agentbox remove                          # stop, delete session dir, output repo, and git remote
+agentbox stop                            # ephemeral: tear down; persistent: stop and retain
+agentbox remove                          # delete containers, session dir, output repo, and git remote
 ```
 
 ### 8.4 Maintenance
