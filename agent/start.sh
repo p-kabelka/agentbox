@@ -31,8 +31,11 @@ if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
     echo "[agent] When done: git push origin HEAD"
 fi
 
-# Seed preset dotfiles without overwriting changes on subsequent starts
-[ -d /agentbox-dotfiles ] && cp -rn /agentbox-dotfiles/. ~/
+# Replace image defaults (including .bashrc) on first boot, then preserve edits.
+if [ -d /agentbox-dotfiles ] && [ ! -e "$HOME/.agentbox-dotfiles-seeded" ]; then
+    cp -rT /agentbox-dotfiles "$HOME"
+    touch "$HOME/.agentbox-dotfiles-seeded"
+fi
 
 # krun's virtio-console sends \n for Enter instead of \r. Node.js readline in
 # raw mode expects \r. setRawMode() clears icrnl but not inlcr, so inlcr set

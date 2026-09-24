@@ -591,7 +591,9 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
             full, providers, sources = _secret_preflight(session_dir)
             proxy_started_here = not _container_running(containers.get(_persistent_name(session_dir, "proxy")))
             try:
-                compose(session_dir, "up", "-d", "proxy", check=True)
+                # podman-compose's up otherwise tears down *all* services when
+                # the Compose YAML changes, including a retained agent.
+                compose(session_dir, "up", "-d", "--no-recreate", "proxy", check=True)
                 _synchronize_proxy(session_dir, full, providers, sources)
                 del sources
                 if agent is None:
@@ -599,7 +601,10 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
                         cfg = load_yaml(session_dir / "compose.yaml")
                         cfg["services"]["agent"]["command"] = cmd
                         save_yaml(session_dir / "compose.yaml", cfg)
-                    compose(session_dir, "create", "--no-deps", "agent", check=True)
+                    # podman-compose has no `create` subcommand. This creates
+                    # only the agent service, without restarting the proxy or
+                    # recreating an existing container after a YAML change.
+                    compose(session_dir, "up", "--no-start", "--no-deps", "--no-recreate", "agent", check=True)
                     if not any(c["name"] == name for c in _list_session_containers(session_dir)):
                         die("Compose did not create the persistent agent service container")
             except BaseException:

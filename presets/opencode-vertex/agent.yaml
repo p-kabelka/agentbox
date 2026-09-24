@@ -14,7 +14,7 @@ environment:
   GOOGLE_CLOUD_PROJECT: your-gcp-project
   VERTEX_LOCATION: global
 
-# Dotfiles placed in the agent's $HOME at session start.
+# Dotfiles copied over image defaults on the agent container's first start.
 # Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
 dotfiles:
   .bashrc: |

@@ -14,7 +14,7 @@ environment:
   AGENT_HARNESS: agent
   AGENT_HARNESS_ARGS:
 
-# Dotfiles placed in the agent's $HOME at session start.
+# Dotfiles copied over image defaults on the agent container's first start.
 # Keys are paths relative to home (e.g. .bashrc, .gitconfig, .config/git/config).
 dotfiles:
   .bashrc: |

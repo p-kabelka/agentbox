@@ -1,5 +1,6 @@
 """Persistent CLI lifecycle with real flock locks and a simulated Compose provider."""
 
+import asyncio
 import io
 import json
 import runpy
@@ -10,7 +11,7 @@ import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import yaml
 
@@ -46,6 +47,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.stop_fails = False
         self.attaching = None
         self.release_attach = None
+        self.compose_hash = None
         p = patch.object(subprocess, "run", side_effect=self.podman)
         p.start()
         self.addCleanup(p.stop)
@@ -67,10 +69,19 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.events.append(args)
         action = args[0]
         if action == "up":
-            proxy = self.containers.get(self.agentbox["_persistent_name"](session, "proxy"))
-            if proxy is None:
-                proxy = self.container("proxy")
-            proxy["State"].update(Status="running", Running=True, Pid=12)
+            current_hash = (session / "compose.yaml").read_bytes()
+            if self.containers and current_hash != self.compose_hash and "--no-recreate" not in args:
+                self.containers.clear()  # podman-compose's default up tears down the project
+            if args[-1] == "proxy":
+                proxy = self.containers.get(self.agentbox["_persistent_name"](session, "proxy"))
+                if proxy is None:
+                    proxy = self.container("proxy")
+                proxy["State"].update(Status="running", Running=True, Pid=12)
+            elif args[-1] == "agent" and "--no-start" in args and "--no-deps" in args:
+                self.container("agent")
+            else:
+                self.fail(f"unexpected Compose up: {args}")
+            self.compose_hash = current_hash
         elif action == "exec":
             if self.sync_fails:
                 return subprocess.CompletedProcess(args, 1, stdout=b"")
@@ -79,8 +90,6 @@ class PersistentSandboxesTest(unittest.TestCase):
             reply = {"status": 200, "body": {"fingerprint": full,
                     "provider_fingerprint": self.g["fingerprint"](cfg.get("providers", []))}}
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(reply).encode())
-        elif action == "create":
-            self.container("agent")
         elif action == "stop":
             if self.stop_fails:
                 return subprocess.CompletedProcess(args, 1)
@@ -144,11 +153,22 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertFalse(agent["State"]["Running"])
         self.assertEqual(self.start(), 7)
         self.assertIs(self.containers[name], agent)
-        self.assertEqual([e for e in self.events if e[0] == "create"], [("create", "--no-deps", "agent")])
+        self.assertEqual([e for e in self.events if e[-1] == "agent"],
+                         [("up", "--no-start", "--no-deps", "--no-recreate", "agent")])
+        self.assertEqual([e for e in self.events if e[-1] == "proxy"],
+                         [("up", "-d", "--no-recreate", "proxy")] * 2)
         self.assertEqual(self.starts, [("podman", "start", "-ai", name)] * 2)
         self.assertEqual([e for e in self.events if e[0] == "stop"], [("stop",)] * 2)
         self.assertFalse(any(e[0] in ("run", "down") for e in self.events))
-        self.assertEqual([e[0] for e in self.events], ["up", "exec", "create", "stop", "up", "exec", "stop"])
+        self.assertEqual([e[0] for e in self.events], ["up", "exec", "up", "stop", "up", "exec", "stop"])
+
+    def test_first_start_recovers_stopped_proxy_from_failed_creation(self):
+        proxy = self.container("proxy", "exited")
+        self.compose_hash = (self.session / "compose.yaml").read_bytes()
+        self.assertEqual(self.start(["tmux", "new-session"]), 7)
+        self.assertIs(self.containers[proxy["Name"]], proxy)
+        self.assertEqual([e[0] for e in self.events], ["up", "exec", "up", "stop"])
+        self.assertIn(self.agentbox["_persistent_name"](self.session, "agent"), self.containers)
 
     def test_reuse_rejects_command_before_proxy_changes(self):
         self.start()
@@ -172,6 +192,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertIs(self.containers[name], container)
         self.assertEqual(container["Config"], saved)
         self.assertEqual([e[0] for e in self.events], ["up", "exec", "stop"])
+        self.assertIn(("up", "-d", "--no-recreate", "proxy"), self.events)
 
     def test_failed_sync_does_not_create_agent_and_stops_new_proxy(self):
         self.sync_fails = True
@@ -187,7 +208,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual(self.events, [])
         self.agentbox["cmd_stop"](self.args)
         self.assertEqual(self.start(), 7)
-        self.assertEqual([e for e in self.events if e[0] == "create"], [])
+        self.assertEqual([e for e in self.events if e[-1] == "agent"], [])
 
     def test_remove_stops_running_unattached_agent(self):
         self.container("agent", "running")
@@ -351,6 +372,38 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.start_return = 125
         self.assertEqual(self.start(), 125)
         self.assertFalse(self.containers[self.agentbox["_persistent_name"](self.session, "agent")]["State"]["Running"])
+
+
+class PodmanComposeCompatibilityTest(unittest.TestCase):
+    def test_up_creates_only_agent_after_proxy_yaml_hash_changes(self):
+        try:
+            import podman_compose
+        except ImportError:
+            self.skipTest("Install podman-compose==1.5.0 to verify persistent service creation")
+
+        args = podman_compose.podman_compose._parse_args(
+            ["up", "--no-start", "--no-deps", "--no-recreate", "agent"])
+        self.assertEqual(args.services, ["agent"])
+        self.assertTrue(args.no_start and args.no_deps and args.no_recreate)
+
+        podman = types.SimpleNamespace(
+            output=AsyncMock(return_value=json.dumps([{
+                "Names": ["proxy"], "Labels": {"io.podman.compose.config-hash": "old"}
+            }]).encode()),
+            run=AsyncMock(return_value=0),
+        )
+        compose = types.SimpleNamespace(
+            services={"proxy": {"_deps": []}, "agent": {"_deps": []}},
+            containers=[{"_service": "proxy", "name": "proxy"},
+                        {"_service": "agent", "name": "agent"}],
+            yaml_hash="new", project_name="test", podman=podman,
+            commands={"build": AsyncMock(return_value=0), "down": AsyncMock()},
+        )
+        with patch.object(podman_compose, "create_pods", new=AsyncMock()), \
+             patch.object(podman_compose, "container_to_args", new=AsyncMock(return_value=["--name", "agent"])):
+            self.assertEqual(asyncio.run(podman_compose.compose_up(compose, args)), 0)
+        podman.run.assert_awaited_once_with([], "create", ["--name", "agent"])
+        compose.commands["down"].assert_not_awaited()
 
 
 if __name__ == "__main__":
