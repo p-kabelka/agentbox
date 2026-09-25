@@ -43,7 +43,7 @@ def die(msg: str) -> NoReturn:
     sys.exit(1)
 
 
-def project_name(path: Path) -> str:
+def _base_project_name(path: Path) -> str:
     name = re.sub(r"[^a-z0-9]+", "-", path.resolve().name.lower()).strip("-")
     return name or "agentbox"
 
@@ -60,10 +60,10 @@ def _session_id(name: str, project_dir: Path) -> str:
     return f"{name}-{h}"
 
 
-def _project(session_dir: Path) -> str:
+def _project_name(session_dir: Path) -> str:
     """Give each session its own Compose project, even if directories share a basename."""
     meta = read_compose_metadata(session_dir)
-    name = f"agentbox-{project_name(Path(meta['project-dir']))}-{meta['name']}"
+    name = f"agentbox-{_base_project_name(Path(meta['project-dir']))}-{meta['name']}"
     return f"{name}-{hashlib.sha256(session_dir.name.encode()).hexdigest()[:12]}"
 
 
@@ -148,7 +148,7 @@ def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProc
     }
     cmd = [
         "podman", "compose",
-        "--project-name", _project(session_dir),
+        "--project-name", _project_name(session_dir),
         "-f", str((session_dir / "compose.yaml").resolve()),
         *args,
     ]
@@ -956,7 +956,7 @@ def _session_activity(session_dir: Path, running: str) -> tuple[bool, bool, bool
         agent = containers.get(_persistent_name(session_dir, "agent"))
         proxy = containers.get(_persistent_name(session_dir, "proxy"))
         return True, _container_running(agent), _container_running(proxy)
-    active = f"{_project(session_dir)}_" in running
+    active = f"{_project_name(session_dir)}_" in running
     return False, active, active
 
 
@@ -1012,7 +1012,7 @@ def _list_sessions(show_all: bool) -> list[dict]:
 def _list_session_containers(session_dir: Path) -> list[dict]:
     """Collect container info dicts for listing."""
     result = subprocess.run(
-        ["podman", "ps", "-a", "--filter", f"label=com.docker.compose.project={_project(session_dir)}", "--format", "{{.ID}}\t{{.Names}}"],
+        ["podman", "ps", "-a", "--filter", f"label=com.docker.compose.project={_project_name(session_dir)}", "--format", "{{.ID}}\t{{.Names}}"],
         capture_output=True, text=True, check=True,
     )
 
