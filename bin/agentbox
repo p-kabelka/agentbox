@@ -416,7 +416,9 @@ def generate_compose(
         src = Path(vol["src"]).expanduser().resolve()
         dst = vol["dst"]
         if src.exists():
-            proxy_volumes.append(f"{src}:{dst}:ro,Z")
+            # Host OAuth sources can be mounted by multiple proxy sessions.
+            # A private :Z relabel would revoke access from earlier containers.
+            proxy_volumes.append(f"{src}:{dst}:ro,z")
         else:
             print(f"Warning: proxy_volumes source not found: {src}")
 

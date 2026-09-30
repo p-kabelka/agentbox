@@ -399,10 +399,23 @@ class HostSecretsTest(unittest.TestCase):
         self.assertEqual(len(self.events), 1)
         self.assertEqual(self.events[0][-1], "sync")
 
-    def test_proxy_volumes_are_generated(self):
-        config = {"proxy_volumes": [{"src": str(self.source), "dst": "/oauth/key"}]}
-        self.agentbox["generate_compose"](self.session, self.project, "test", 1234, config, {}, [])
-        self.assertIn("/oauth/key", (self.session / "compose.yaml").read_text())
+    def test_proxy_volumes_use_shared_read_only_labels_across_sessions(self):
+        gcloud = self.root / "gcloud"
+        gcloud.mkdir()
+        config = {"proxy_volumes": [
+            {"src": str(gcloud), "dst": "/root/.config/gcloud"},
+            {"src": str(self.source), "dst": "/oauth/key"},
+        ]}
+        other_session = self.root / "other-session"
+        other_session.mkdir()
+        for session, name in ((self.session, "test"), (other_session, "other")):
+            with self.subTest(session=name):
+                self.agentbox["generate_compose"](session, self.project, name, 1234, config, {}, [])
+                cfg = yaml.safe_load((session / "compose.yaml").read_text())
+                volumes = cfg["services"]["proxy"]["volumes"]
+                self.assertIn(f"{gcloud}:/root/.config/gcloud:ro,z", volumes)
+                self.assertIn(f"{self.source}:/oauth/key:ro,z", volumes)
+                self.assertIn("./proxy-config:/config:ro,Z", volumes)
 
     def test_all_lifecycle_commands_wait_for_sync_lock(self):
         # Separate file descriptions exercise flock, including threads in one CLI test process.

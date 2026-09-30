@@ -230,6 +230,7 @@ environment:
 The example mounts local gcloud ADC read-only. Alternatively, explicitly mount a service-account
 file at `/oauth/credentials.json` using `proxy_volumes` and set
 `GOOGLE_APPLICATION_CREDENTIALS: /oauth/credentials.json` in the preset's `environment`.
+`proxy_volumes` use shared SELinux labels (`:ro,z`) so multiple sessions can read the same credentials.
 OAuth discovery retains its existing behavior and is separate from `api_key_file` synchronization.
 
 ### Presets

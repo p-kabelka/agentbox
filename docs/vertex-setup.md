@@ -10,3 +10,7 @@ gcloud auth application-default set-quota-project <your quota project>
 ```
 
 Create a custom preset by copying `claude-vertex` or `opencode-vertex` (or similar) and set the appropriate environment variables for your Vertex project and region.
+
+On SELinux systems, the gcloud directory must have a shared container label when
+multiple proxy sessions mount it. `proxy_volumes` are generated with `:ro,z` for
+this reason.
