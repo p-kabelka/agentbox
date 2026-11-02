@@ -1,14 +1,32 @@
 FROM fedora:44 AS verifier
 
 ARG AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=0
-RUN dnf install -y curl $([ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ] && echo gh) && dnf clean all
+RUN dnf install -y curl jq $([ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ] && echo gh) && dnf clean all
 
+# "latest" selects the newest stable v2 release, not GitHub's latest v1 release.
+ARG AGENTBOX_BUILD_OPENCODE_VERSION=latest
 RUN --mount=type=secret,id=gh_token \
+    set -eu; \
+    version="$AGENTBOX_BUILD_OPENCODE_VERSION"; \
+    if [ "$version" = "latest" ]; then \
+        page=1; \
+        while :; do \
+            releases=$(curl -fsSL "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100&page=$page"); \
+            version=$(printf '%s\n' "$releases" | jq -r 'first(.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v2\\.[0-9]+\\.[0-9]+$")))) | .tag_name // empty'); \
+            if [ -n "$version" ]; then break; fi; \
+            if [ "$(printf '%s\n' "$releases" | jq length)" -eq 0 ]; then \
+                echo "Error: no stable OpenCode v2 release found" >&2; \
+                exit 1; \
+            fi; \
+            page=$((page + 1)); \
+        done; \
+    fi; \
+    version="v${version#v}"; \
     curl -fsSLo /tmp/opencode.tar.gz \
-        https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-x64.tar.gz && \
+        "https://github.com/anomalyco/opencode/releases/download/$version/opencode-linux-x64.tar.gz" && \
     if [ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ]; then \
         GH_TOKEN=$(cat /run/secrets/gh_token) \
-        gh release verify-asset /tmp/opencode.tar.gz \
+        gh release verify-asset "$version" /tmp/opencode.tar.gz \
             --repo anomalyco/opencode; \
     else \
         echo "Warning: skipping opencode attestation verification"; \

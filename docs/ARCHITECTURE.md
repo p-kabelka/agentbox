@@ -169,7 +169,7 @@ validation, canonical fingerprints, and framing with the host; no additional hos
 
 **Harness images** — Each supported agent harness has its own Containerfile extending the base:
 - `Containerfile.claude` — Imports Claude Code's GPG signing key, adds the official RPM repository, and installs `claude-code` via `dnf`.
-- `Containerfile.opencode` — Multi-stage build: downloads the OpenCode binary from GitHub and optionally verifies attestation via `gh release verify-asset` (requires `GH_TOKEN`; can be skipped with `AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1`).
+- `Containerfile.opencode` — Multi-stage build: downloads the newest stable `v2.*` OpenCode release from GitHub by default (rather than GitHub's `latest`, which tracks v1). Set `--build-arg AGENTBOX_BUILD_OPENCODE_VERSION=v2.2.4` to pin a release; versions with or without the `v` prefix are accepted, including older v1 releases. Attestation verification uses the selected release tag via `gh release verify-asset` (requires the `gh_token` build secret; can be skipped with `AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1`). Use `agentbox update opencode` or `podman build --no-cache` to refresh the default version instead of reusing a cached download.
 - `Containerfile.cursor` — Installs Cursor via the official install script.
 
 **`start.sh`** — Agent entrypoint. Performs in order:
