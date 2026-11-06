@@ -323,6 +323,13 @@ def _reload_proxy(session_dir: Path) -> dict:
         die("Proxy reload failed; rerun the command when the proxy is ready")
     body, _, status = result.stdout.rpartition("\n")
     if status == "409":
+        try:
+            restart_required = json.loads(body).get("restart_required") is True
+        except (ValueError, AttributeError):
+            restart_required = False
+        if restart_required:
+            die("Allowlist edit saved but not active: HTTP protocol policy changed. "
+                "Run agentbox proxy-restart to apply it")
         die("Allowlist edit saved but not active: provider changes are pending. "
             "Run agentbox proxy-reload to apply both changes")
     if status != "200":
@@ -354,6 +361,8 @@ def _synchronize_proxy(session_dir: Path, full: str, providers: str,
     except (ValueError, TypeError, KeyError):
         die("Invalid proxy synchronization response; rerun the command")
     if status == 409:
+        if applied.get("restart_required") is True:
+            die("HTTP protocol policy changed; run agentbox proxy-restart to apply it")
         die("Concurrent configuration change; rerun the synchronization command")
     if status != 200:
         die("Proxy rejected the configuration; fix proxy.yaml and rerun")

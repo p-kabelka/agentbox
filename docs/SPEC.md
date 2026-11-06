@@ -287,7 +287,22 @@ All regex patterns use Python `re` syntax and support environment variable expan
 |-------|----------|-------------|
 | `proxy_volumes` | No | List of `{src, dst}` read-only mounts (e.g., gcloud ADC at `/root/.config/gcloud`, OAuth JSON at `/oauth/credentials.json`). `src` supports `~`. |
 | `extra_request_policy` | No | Additional egress rules using the same rule schema as provider `request_policy`. These rules control allowlisting only — they never trigger credential injection. |
+| `force_http1_hosts` | No | List of `{host: regex, port: integer or regex}` destinations forced to upstream HTTP/1.1. Default `[]`; port defaults to 443. Does not grant egress access or inject credentials. |
 | `trusted_certificates` | No | Filenames from `custom/certs/` to install into the proxy's system trust store |
+
+`force_http1_hosts` is independent of request policies. The public `server_connect`
+hook matches the destination hostname/SNI and port before upstream TLS negotiation
+and offers only `http/1.1` for listed destinations. It applies to all their paths
+and methods; allowlisting and credential injection remain unchanged. Client-facing
+HTTP/2, unrelated destinations, and certificate verification are unaffected.
+Only `host` and `port` are accepted in each entry. Invalid types or regexes reject
+the configuration rather than silently leaving a destination on HTTP/2.
+
+The set of forced host/port patterns is fixed for one proxy process. Changing it
+requires `proxy-restart`; both reload endpoints return HTTP 409 with
+`restart_required: true` and retain the previous runtime if it changes. Reordering
+or duplicating entries does not require a restart. Changes that leave the set
+unchanged, such as request-policy edits or credential rotation, remain reloadable.
 
 #### Manual provider secret synchronization
 

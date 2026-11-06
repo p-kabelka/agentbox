@@ -123,6 +123,25 @@ agentbox allow pypi.org [--name NAME]   # add host to allowlist (hot-reloads pro
 agentbox deny  pypi.org [--name NAME]   # remove host from allowlist
 ```
 
+To force HTTP/1.1 upstream for a destination, add the optional top-level
+`force_http1_hosts` list, separate from request policies:
+
+```yaml
+force_http1_hosts:
+  - host: 'api\.example\.com'
+    port: 8443
+```
+
+The list defaults to `[]` (normal negotiation). Each entry requires a hostname
+regex (full match) and accepts an optional integer or regex `port`, defaulting to
+443. It applies to **all paths on the matching host and port**, whether allowed by
+provider rules or `extra_request_policy`. It does not allow any requests or inject
+credentials by itself: existing host/path/method policies are unchanged.
+
+The addon uses mitmproxy's public upstream ALPN offers; it does not patch mitmproxy
+internals or disable HTTP/2 globally. Client-facing HTTP/2 and TLS certificate
+verification remain unchanged. Native gRPC or HTTP/2-only services must not be forced.
+
 ### Proxy management
 
 ```bash
@@ -135,6 +154,12 @@ Edit the current session's `proxy-config/proxy.yaml` or replace a host key file,
 `proxy-reload` to apply the change without interrupting active requests. Every `start`
 synchronizes, including when it shares an existing proxy. One Compose exec transfers all
 provider secrets and applies the reload. There is no file watcher.
+
+Changes to `force_http1_hosts` destinations require `agentbox proxy-restart --name NAME`:
+existing pooled TLS connections cannot renegotiate. A reload detects such changes,
+keeps the previous runtime configuration, and reports that a restart is required.
+Path/method changes or credential rotation that leave those destinations unchanged
+still reload normally. A restart interrupts active connections.
 
 **Direct `podman compose up` and automatic container restarts do not synchronize keys.**
 Their tmpfs starts empty. Requests requiring an unavailable credential receive HTTP 503
@@ -282,5 +307,6 @@ agentbox update claude       # rebuild only the claude harness image
 
 Run `python3 -m unittest discover -s tests -v` with PyYAML installed. Installing
 `podman-compose==1.5.0` enables the Compose tmpfs argument check; installing the proxy's
-mitmproxy dependency enables the real HTTP streaming/reload regression. The latter requires
+mitmproxy dependency enables the real TLS/ALPN and HTTP streaming/reload regressions.
+TLS negotiation runs in memory without sockets. The streaming regression requires
 working local TCP listeners and reports a skip when the environment cannot provide them.

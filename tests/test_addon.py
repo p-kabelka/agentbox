@@ -146,6 +146,63 @@ class DeniedRequestLoggingTest(unittest.TestCase):
         self.assertTrue(addon_module._log_bodies)
 
 
+class ForceHTTP1Test(unittest.TestCase):
+    def setUp(self):
+        self.addon = addon_module.AgentboxAddon.__new__(addon_module.AgentboxAddon)
+
+    def configure(self, cfg):
+        self.addon._apply_candidate(self.addon._build_candidate(cfg))
+
+    def connection(self, host="api.example", port=8443, sni=None):
+        server = types.SimpleNamespace(address=(host, port), sni=sni,
+                                       alpn_offers=(b"h2", b"http/1.1"))
+        return types.SimpleNamespace(server=server, client=types.SimpleNamespace(alpn=b"h2"))
+
+    def test_hosts_force_whole_destination_without_broadening_allowlist(self):
+        self.configure({"extra_request_policy": [{
+            "host": r"api\.example", "port": 8443, "methods": ["POST"],
+            "paths": ["/private$"],
+        }], "force_http1_hosts": [{"host": r"api\.example", "port": 8443}]})
+        data = self.connection()
+        self.addon.server_connect(data)
+        self.assertEqual(data.server.alpn_offers, (b"http/1.1",))
+        self.assertEqual(data.client.alpn, b"h2")
+        flow = make_flow()
+        flow.request.pretty_host, flow.request.port = "api.example", 8443
+        flow.request.path = "/blocked"
+        with patch.object(addon_module.log, "info"):
+            self.addon.requestheaders(flow)
+        self.assertEqual(flow.response.status_code, 403)
+
+    def test_provider_rules_and_sni_with_regex_port(self):
+        self.configure({"providers": [{
+            "name": "api", "enabled": True, "credential_type": "static", "injection_policy": [],
+            "request_policy": [{"host": r"api\.example", "port": "844[34]"}],
+        }], "force_http1_hosts": [{"host": r"api\.example", "port": "844[34]"}]})
+        data = self.connection(host="192.0.2.10", port=8444, sni="api.example")
+        self.addon.server_connect(data)
+        self.assertEqual(data.server.alpn_offers, (b"http/1.1",))
+
+    def test_unrelated_hosts_and_ports_preserve_alpn(self):
+        self.configure({"force_http1_hosts": [{"host": r"api\.example", "port": 8443}]})
+        for host, port in (("api.example.evil", 8443), ("api.example", 443),
+                           ("default.example", 8443)):
+            with self.subTest(host=host, port=port):
+                data = self.connection(host, port)
+                offers = data.server.alpn_offers
+                self.addon.server_connect(data)
+                self.assertIs(data.server.alpn_offers, offers)
+        data.server.address = None
+        self.addon.server_connect(data)
+
+    def test_missing_or_empty_hosts_preserve_alpn(self):
+        for config in ({}, {"force_http1_hosts": []}):
+            self.configure(config)
+            data = self.connection()
+            self.addon.server_connect(data)
+            self.assertEqual(data.server.alpn_offers, (b"h2", b"http/1.1"))
+
+
 class ReloadTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -190,6 +247,46 @@ class ReloadTest(unittest.IsolatedAsyncioTestCase):
                                         pretty_url=f"https://{host}{path}", timestamp_start=time.time(),
                                         headers=Headers(headers or {}), get_text=lambda **kw: "")
         return types.SimpleNamespace(request=request, response=None, metadata={})
+
+    async def test_protocol_changes_require_restart_and_keep_entire_runtime(self):
+        previous = self.addon._cfg
+        self.cfg["force_http1_hosts"] = [{"host": "public.example"}]
+        self.cfg["logging"] = {"log_bodies": True}
+        for path in ("/reload", "/reload/providers"):
+            status, body = await self.reload(path)
+            self.assertEqual(status, 409)
+            self.assertIs(body["restart_required"], True)
+            self.assertIn("proxy-restart", body["error"])
+            self.assertIs(self.addon._cfg, previous)
+            self.assertFalse(addon_module._log_bodies)
+        self.addon = addon_module.AgentboxAddon()  # restart reads the new transport policy
+        self.assertEqual((await self.reload())[0], 200)
+        self.cfg["force_http1_hosts"] = []
+        self.assertEqual((await self.reload())[0], 409)
+
+    async def test_reordered_and_duplicate_transport_entries_can_reload(self):
+        self.cfg["force_http1_hosts"] = [{"host": "api.example"}, {"host": "public.example"}]
+        self.addon = addon_module.AgentboxAddon()
+        self.cfg["force_http1_hosts"].reverse()
+        self.cfg["force_http1_hosts"].append({"host": "api.example"})
+        self.assertEqual((await self.reload())[0], 200)
+
+    async def test_path_and_credential_reload_keeps_same_transport_policy(self):
+        rule = self.cfg["providers"][0]["request_policy"][0]
+        self.cfg["force_http1_hosts"] = [{"host": "api.example"}]
+        self.addon = addon_module.AgentboxAddon()
+        rule["paths"] = ["/messages$", "/test$"]
+        self.secret.write_text("new-key")
+        self.assertEqual((await self.reload())[0], 200)
+        flow = self.flow(path="/test")
+        self.addon.requestheaders(flow)
+        self.assertEqual(flow.request.headers["authorization"], "Bearer new-key")
+
+    async def test_invalid_protocol_configuration_rolls_back(self):
+        previous = self.addon._cfg
+        self.cfg["force_http1_hosts"] = [{"host": "api.example", "port": False}]
+        self.assertEqual((await self.reload())[0], 500)
+        self.assertIs(self.addon._cfg, previous)
 
     async def test_static_rotation_is_explicit_stream_survives_and_headers_are_redacted(self):
         streaming = self.flow(headers={"content-type": "application/connect+json"})

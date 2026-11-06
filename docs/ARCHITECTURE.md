@@ -145,6 +145,14 @@ The proxy container is attached to both networks and is the sole egress point fo
 
 - **`provider.py`** — The `Provider` class and L7 request matching engine. Each provider's `request_policy` compiles into `CompiledRule` objects with regex patterns for host (full match), port, path, and methods. `rule_matches()` is shared by the allowlist and provider checks. Provider-level and matching rule-level injection policies evaluate original headers, then resolve all applicable credentials before committing any header changes. Invalid skipped rules do not contribute availability requirements. A failed policy cannot partially inject or block unrelated providers/extra rules.
 
+- **`transport_policy.py`** — Compiles the independent top-level `force_http1_hosts`
+  list (hostname regex plus optional integer/regex port, default 443). The addon's
+  public `server_connect` hook restricts upstream ALPN to HTTP/1.1 for matches,
+  without changing request policies, client-facing HTTP/2, or certificate checks.
+  Changes to the destination set require `proxy-restart`; reload rejects them with
+  HTTP 409 and retains the previous runtime so existing pooled connections cannot
+  silently keep an outdated protocol policy.
+
 - **`resolvers.py`** — Credential resolver implementations, registered via `__init_subclass__`:
   - `StaticKeyResolver` (`credential_type: static`) — Reads synchronized namespaced `/run/secrets/` files at construction and serves keys from memory. A usable file takes precedence over a non-empty `api_key_env` fallback.
   - `CursorApiKeyResolver` (`credential_type: cursor_api_key`) — Loads the same source types, exchanges the key for a cached token, and starts with an empty token cache on reconstruction.

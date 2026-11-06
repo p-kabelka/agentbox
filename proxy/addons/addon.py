@@ -11,6 +11,7 @@ from provider import (Provider, CompiledRule, CredentialUnavailable, compile_rul
                       inject_matching_providers, rule_matches)
 from resolvers import RESOLVER_CLASSES
 from secret_contract import fingerprint, injection_secret_name
+from transport_policy import CompiledHost, compile_http1_hosts
 
 _CONFIG_PATH = "/config/proxy.yaml"
 _RELOAD_PORT = 8082
@@ -79,10 +80,17 @@ class _Config:
     fingerprint: str = ""
     provider_fingerprint: str = ""
     logging_flags: tuple[bool, bool, bool] = (True, False, False)
+    force_http1_hosts: list[CompiledHost] = dataclasses.field(default_factory=list)
 
     @property
     def unavailable(self) -> list[dict]:
         return [policy for provider in self.providers for policy in provider.unavailable]
+
+    @property
+    def http1_destinations(self) -> frozenset[tuple[str, int | str]]:
+        return frozenset((rule.host_re.pattern,
+                          rule.port if isinstance(rule.port, int) else rule.port.pattern)
+                         for rule in self.force_http1_hosts)
 
 
 def _read_config() -> dict:
@@ -186,7 +194,8 @@ class AgentboxAddon:
             raise ValueError("Logging settings must be booleans")
         if providers is None:
             providers = cls._load_providers(cfg)
-        return _Config(_build_allowed_rules(providers, cfg), providers, full, provider_fp, flags)
+        return _Config(_build_allowed_rules(providers, cfg), providers, full, provider_fp, flags,
+                       force_http1_hosts=compile_http1_hosts(cfg.get("force_http1_hosts", [])))
 
     def _apply_candidate(self, candidate: _Config) -> None:
         global _log_req_hdr, _log_resp_hdr, _log_bodies
@@ -225,14 +234,21 @@ class AgentboxAddon:
                         providers = self._cfg.providers if path == "/reload" else None
                         candidate = await asyncio.get_running_loop().run_in_executor(
                             None, self._build_candidate, cfg, providers)
-                        self._apply_candidate(candidate)
-                        log.info({"message": "Config reloaded", "providers": len(candidate.providers),
-                                  "allowed_rules": len(candidate.allowed_rules),
-                                  "unavailable": candidate.unavailable})
-                        body = {"fingerprint": candidate.fingerprint,
-                                "provider_fingerprint": candidate.provider_fingerprint,
-                                "unavailable": candidate.unavailable}
-                        status = b"200 OK"
+                        if candidate.http1_destinations != self._cfg.http1_destinations:
+                            # Public connection hooks cannot renegotiate pooled TLS
+                            # connections. Retain the entire previous configuration.
+                            body = {"error": "HTTP protocol policy changed; run agentbox proxy-restart",
+                                    "restart_required": True}
+                            status = b"409 Conflict"
+                        else:
+                            self._apply_candidate(candidate)
+                            log.info({"message": "Config reloaded", "providers": len(candidate.providers),
+                                      "allowed_rules": len(candidate.allowed_rules),
+                                      "unavailable": candidate.unavailable})
+                            body = {"fingerprint": candidate.fingerprint,
+                                    "provider_fingerprint": candidate.provider_fingerprint,
+                                    "unavailable": candidate.unavailable}
+                            status = b"200 OK"
         except Exception:
             log.error("Config reload failed (keeping previous config)")
             body = {"error": "Invalid configuration; previous runtime retained"}
@@ -247,6 +263,18 @@ class AgentboxAddon:
         writer.write(response)
         await writer.drain()
         writer.close()
+
+    def server_connect(self, data) -> None:
+        """Use mitmproxy's public ALPN offers before an upstream TLS handshake."""
+        server = data.server
+        if server.address is None:
+            return
+        host, port = server.address
+        host = server.sni or host
+        if any(rule.matches(host, port) for rule in self._cfg.force_http1_hosts):
+            # Host-wide: methods and paths are unavailable at TLS negotiation.
+            # The client-facing connection and unrelated destinations keep HTTP/2.
+            server.alpn_offers = (b"http/1.1",)
 
     def requestheaders(self, flow: http.HTTPFlow) -> None:
         cfg = self._cfg

@@ -113,6 +113,27 @@ For ergonomic CLI usage, `agentbox allow` and `agentbox deny` continue to accept
 
 The old `allowed_hosts`, `path_prefixes`, and `extra_allowed_hosts` fields are removed. All presets and user configurations must use the new `request_policy` and `extra_request_policy` format.
 
+The independent optional top-level `force_http1_hosts` list selects upstream
+HTTP/1.1 by hostname regex and port (integer or regex, default 443):
+
+```yaml
+force_http1_hosts:
+  - host: 'api\.example\.com'
+    port: 8443
+```
+
+It defaults to `[]`, applies across all paths/providers/extra rules for the
+destination, and does not grant access or inject credentials. The public
+`server_connect` hook sets `Server.alpn_offers` to `(b"http/1.1",)` for matches;
+client-facing HTTP/2 and TLS verification remain unchanged. No mitmproxy internals
+are modified. Entries accept only `host` and `port`; invalid types or regexes
+reject the configuration. This setting does not belong inside request rules.
+
+Changes to the set require `agentbox proxy-restart`, because existing pooled
+connections retain their negotiated protocols. Both reload endpoints reject
+such changes with HTTP 409 and `restart_required: true`, retaining the old runtime.
+Reordering/duplicates or edits that leave this set unchanged remain reloadable.
+
 ### 4.5 Full Preset Examples
 
 Providers can inject multiple credentials by defining ordered `injection_policy` lists. A provider-level list runs once for every request that matches at least one provider rule, while a list on an individual request rule applies only when that rule matches. Each entry uses the provider's `credential_type` and can select its own source file or environment variable, destination header, prefix, and replacement token.
