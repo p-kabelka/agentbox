@@ -134,7 +134,7 @@ class ProviderTest(unittest.TestCase):
             {"inject_header": "x-missing"},
         ]), FakeResolver)
         with self.assertRaises(CredentialUnavailable):
-            combined.inject(flow)
+            inject_matching_providers([combined], flow)
         self.assertEqual(flow.request.headers, original)
 
     def test_missing_nonapplicable_policy_and_invalid_rules_do_not_gate(self):
@@ -169,7 +169,7 @@ class ProviderTest(unittest.TestCase):
         })
 
         self.assertTrue(provider.matches(flow))
-        self.assertTrue(provider.inject(flow, flow.request.headers.copy()))
+        self.assertEqual(inject_matching_providers([provider], flow), ["openai"])
         self.assertEqual(flow.request.headers["Authorization"], "Bearer auth-token")
         self.assertEqual(flow.request.headers["Cookie"], "d=cookie-token")
 
@@ -192,7 +192,7 @@ class ProviderTest(unittest.TestCase):
             "Cookie": "dummy-cookie",
         })
 
-        self.assertTrue(provider.inject(flow, flow.request.headers.copy()))
+        self.assertEqual(inject_matching_providers([provider], flow), ["openai"])
         self.assertEqual(flow.request.headers["Authorization"], "Bearer other")
         self.assertEqual(flow.request.headers["Cookie"], "cookie-token")
 
@@ -211,7 +211,7 @@ class ProviderTest(unittest.TestCase):
         ]), FakeResolver)
         flow = make_flow({"x-token": "dummy"})
 
-        self.assertTrue(provider.inject(flow, flow.request.headers.copy()))
+        self.assertEqual(inject_matching_providers([provider], flow), ["openai"])
         self.assertEqual(flow.request.headers["x-token"], "second")
 
     def test_last_provider_for_header_wins(self):
@@ -243,7 +243,7 @@ class ProviderTest(unittest.TestCase):
         ), FakeResolver)
         flow = make_flow({})
 
-        self.assertTrue(provider.inject(flow))
+        self.assertEqual(inject_matching_providers([provider], flow), ["openai"])
         self.assertEqual(flow.request.headers["x-token"], "nested-env")
 
     def test_provider_policy_and_request_rule_policy_have_different_scopes(self):

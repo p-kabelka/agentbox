@@ -248,11 +248,6 @@ class Provider:
                     resolved.append(policy.resolve())
         return resolved
 
-    def inject(self, flow: http.HTTPFlow, original_headers=None) -> bool:
-        resolved = self.resolve_injections(flow, original_headers)
-        _commit_injections(flow, resolved)
-        return bool(resolved)
-
 
 def _commit_injections(flow: http.HTTPFlow, resolved: list[tuple[str, str]]) -> None:
     for header, value in resolved:
