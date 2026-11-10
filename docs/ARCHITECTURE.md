@@ -190,7 +190,7 @@ validation, canonical fingerprints, and framing with the host; no additional hos
 
 ### 4.4 Compose Configuration
 
-`compose-base.yaml` defines the shared service template: two networks (`agent-net` internal, `proxy-net` external), two named volumes (`proxy-ca` for the mitmproxy CA cert, `proxy-logs` for access logs), and base service definitions for the proxy and agent.
+`compose-base.yaml` defines the shared service template: two networks (`agent-net` internal, `proxy-net` external), one named volume (`proxy-ca` for the mitmproxy CA cert), and base service definitions for the proxy and agent.
 
 At `agentbox init` time, the CLI merges `compose-base.yaml` with the preset configuration to produce a single `compose.yaml` in the session directory. This includes the web port, mounts for config, source bundle, protected output repo, dotfiles, context, explicit OAuth directories, and certificates. Provider source paths and target names are absent. Compose provides `/run/secrets:rw,noexec,nosuid,nodev,mode=0700` as a root-owned tmpfs (verified with `podman-compose` 1.5.0), without a feature-specific size limit. The CLI and secret helper use this store directly.
 

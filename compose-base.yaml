@@ -3,7 +3,6 @@
 
 volumes:
   proxy-ca:    # mitmproxy CA cert shared between proxy and agent
-  proxy-logs:  # persistent structured access logs
 
 networks:
   agent-net:

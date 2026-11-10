@@ -141,7 +141,7 @@ def compile_rule(rule_dict: dict) -> CompiledRule | None:
 
 def compile_rules(rules: list[dict]) -> list[CompiledRule]:
     compiled: list[CompiledRule] = []
-    for i, rule_dict in enumerate(rules):
+    for rule_dict in rules:
         rule = compile_rule(rule_dict)
         if rule is not None:
             compiled.append(rule)
@@ -229,8 +229,8 @@ class Provider:
                     result.append({"provider": self.name, "policy": f"{scope}[{i}]"})
         return result
 
-    def resolve_injections(self, flow: http.HTTPFlow, original_headers=None) -> list[tuple[str, str]]:
-        headers = original_headers if original_headers is not None else flow.request.headers.copy()
+    def resolve_injections(self, flow: http.HTTPFlow) -> list[tuple[str, str]]:
+        headers = flow.request.headers
         resolved = []
         for policy in self._injection_policies:
             if policy.matches(headers):
@@ -260,12 +260,11 @@ def _commit_injections(flow: http.HTTPFlow, resolved: list[tuple[str, str]]) -> 
 
 
 def inject_matching_providers(providers: list[Provider], flow: http.HTTPFlow) -> list[str]:
-    original_headers = flow.request.headers.copy()
     injected: list[str] = []
     resolved = []
     for provider in providers:
         if provider.matches(flow):
-            pending = provider.resolve_injections(flow, original_headers)
+            pending = provider.resolve_injections(flow)
             if pending:
                 resolved.extend(pending)
                 injected.append(provider.name)

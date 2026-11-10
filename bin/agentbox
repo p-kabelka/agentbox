@@ -116,11 +116,9 @@ def require_session(project_dir: Path, name: str | None) -> Path:
     sessions = get_sessions(project_dir)
     if len(sessions) == 1:
         return AGENTBOX_STATE / "sessions" / _session_id(sessions[0], project_dir)
-    elif not sessions:
+    if not sessions:
         die("No sessions. Run: agentbox init --name <name>")
-    else:
-        die(f"Multiple sessions ({', '.join(sessions)}) — specify: --name <name>")
-    raise AssertionError  # unreachable
+    die(f"Multiple sessions ({', '.join(sessions)}) — specify: --name <name>")
 
 
 def resolve_session(args) -> tuple[Path, Path]:
