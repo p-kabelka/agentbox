@@ -196,7 +196,7 @@ class Provider:
             self._rule_injection_policies.append((rule, rule_policies))
 
     def matches(self, flow: http.HTTPFlow) -> bool:
-        host = flow.request.pretty_host
+        host = flow.request.host
         port = flow.request.port
         path = flow.request.path.split("?", 1)[0]
         method = flow.request.method.upper()
@@ -236,7 +236,7 @@ class Provider:
             if policy.matches(headers):
                 resolved.append(policy.resolve())
 
-        host = flow.request.pretty_host
+        host = flow.request.host
         port = flow.request.port
         path = flow.request.path.split("?", 1)[0]
         method = flow.request.method.upper()

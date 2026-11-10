@@ -108,7 +108,7 @@ def _build_allowed_rules(providers: list[Provider], cfg: dict) -> list[CompiledR
 
 def _blocked_request_entry(flow: http.HTTPFlow) -> dict:
     request = flow.request
-    host = request.pretty_host
+    host = request.host
     path = request.path.split("?", 1)[0]
     method = request.method.upper()
 
@@ -131,7 +131,7 @@ def _blocked_request_entry(flow: http.HTTPFlow) -> dict:
 
 
 def _deny_request(flow: http.HTTPFlow) -> None:
-    host = flow.request.pretty_host
+    host = flow.request.host
     flow.response = http.Response.make(
         403, f"Host '{host}' not allowed.\nTo allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {host}\n",
         {"Content-Type": "text/plain"},
@@ -278,7 +278,8 @@ class AgentboxAddon:
 
     def requestheaders(self, flow: http.HTTPFlow) -> None:
         cfg = self._cfg
-        host = flow.request.pretty_host
+        # Match the destination, not the client-controlled Host header.
+        host = flow.request.host
         port = flow.request.port
         path = flow.request.path.split("?", 1)[0]
         method = flow.request.method.upper()

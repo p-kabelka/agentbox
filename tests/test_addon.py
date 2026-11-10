@@ -44,6 +44,7 @@ from test_provider import Headers
 
 def make_flow(body="denied body"):
     request = types.SimpleNamespace(
+        host="denied.example.com",
         pretty_host="denied.example.com",
         pretty_url="https://denied.example.com/private?value=1",
         port=443,
@@ -53,6 +54,41 @@ def make_flow(body="denied body"):
         get_text=lambda strict=False: body,
     )
     return types.SimpleNamespace(request=request, response=None, metadata={})
+
+
+class RequestHostPolicyTest(unittest.TestCase):
+    def setUp(self):
+        self.addon = addon_module.AgentboxAddon.__new__(addon_module.AgentboxAddon)
+        self.addon._apply_candidate(self.addon._build_candidate({
+            "extra_request_policy": [{"host": r"allowed\.example\.com"}],
+        }))
+
+    def test_host_header_cannot_allow_a_denied_destination(self):
+        flow = make_flow()
+        flow.request.pretty_host = "allowed.example.com"
+        flow.request.pretty_url = "https://allowed.example.com/private?value=1"
+        flow.request.headers["Host"] = "allowed.example.com"
+        with (patch.object(addon_module.log, "info") as log_info,
+              patch.object(addon_module, "inject_matching_providers") as inject):
+            self.addon.requestheaders(flow)
+
+        self.assertIsNotNone(flow.response)
+        self.assertEqual(flow.response.status_code, 403)
+        self.assertTrue(flow.metadata["agentbox_blocked"])
+        inject.assert_not_called()
+        self.assertEqual(log_info.call_args.args[0]["request_host"], "denied.example.com")
+        self.assertIn("Host 'denied.example.com' not allowed", flow.response.content)
+        self.assertIn(" denied.example.com\n", flow.response.content)
+        self.assertNotIn("allowed.example.com", flow.response.content)
+
+    def test_allowed_destination_does_not_depend_on_host_header(self):
+        flow = make_flow()
+        flow.request.host = "allowed.example.com"
+        flow.request.headers["Host"] = flow.request.pretty_host
+        self.addon.requestheaders(flow)
+
+        self.assertIsNone(flow.response)
+        self.assertNotIn("agentbox_blocked", flow.metadata)
 
 
 class DeniedRequestLoggingTest(unittest.TestCase):
@@ -168,7 +204,8 @@ class ForceHTTP1Test(unittest.TestCase):
         self.assertEqual(data.server.alpn_offers, (b"http/1.1",))
         self.assertEqual(data.client.alpn, b"h2")
         flow = make_flow()
-        flow.request.pretty_host, flow.request.port = "api.example", 8443
+        flow.request.host = flow.request.pretty_host = "api.example"
+        flow.request.port = 8443
         flow.request.path = "/blocked"
         with patch.object(addon_module.log, "info"):
             self.addon.requestheaders(flow)
@@ -243,7 +280,7 @@ class ReloadTest(unittest.IsolatedAsyncioTestCase):
         return int(header.split()[1]), json.loads(body)
 
     def flow(self, host="api.example", path="/private", headers=None):
-        request = types.SimpleNamespace(pretty_host=host, port=443, path=path, method="POST",
+        request = types.SimpleNamespace(host=host, pretty_host=host, port=443, path=path, method="POST",
                                         pretty_url=f"https://{host}{path}", timestamp_start=time.time(),
                                         headers=Headers(headers or {}), get_text=lambda **kw: "")
         return types.SimpleNamespace(request=request, response=None, metadata={})

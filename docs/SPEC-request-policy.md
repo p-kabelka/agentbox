@@ -91,7 +91,7 @@ Each rule in the `request_policy` list has the following fields:
 
 All regex patterns use Python `re` syntax. Patterns support environment variable expansion via `os.path.expandvars()` before compilation (preserving existing behavior for Vertex-style `${VERTEX_PROJECT_ID}` patterns).
 
-**Host patterns** are matched against `flow.request.pretty_host` (the hostname as seen on the wire, after SNI/Host-header resolution by mitmproxy). The match is **full-match** (implicit `^...$` anchoring).
+**Host patterns** are matched against `flow.request.host` (mitmproxy's request destination), not `pretty_host`, which can prefer a client-controlled `Host` header or HTTP/2 `:authority`. Both egress allowlisting and credential injection use the destination so an allowed header value cannot authorize a different host. The match is **full-match** (implicit `^...$` anchoring).
 
 **Port** is matched against `flow.request.port` (integer). When `port` is an integer in YAML, it is compared with `==`. When `port` is a string, it is treated as a regex applied to the string representation of the port number (full match). This allows patterns like `"8[0-9]{3}"` to match a range of ports.
 
@@ -273,7 +273,7 @@ Compilation happens once at startup (and on hot-reload). Runtime matching is pur
 
 ```python
 def matches(self, flow: http.HTTPFlow) -> bool:
-    host = flow.request.pretty_host
+    host = flow.request.host
     port = flow.request.port
     path = flow.request.path.split("?", 1)[0]
     method = flow.request.method.upper()
@@ -306,7 +306,7 @@ class _Config:
 # In requestheaders():
 def requestheaders(self, flow: http.HTTPFlow) -> None:
     cfg = self._cfg
-    host = flow.request.pretty_host
+    host = flow.request.host
     port = flow.request.port
     path = flow.request.path.split("?", 1)[0]
     method = flow.request.method.upper()

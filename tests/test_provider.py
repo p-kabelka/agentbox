@@ -53,6 +53,7 @@ class Headers(dict):
 
 def make_flow(headers, path="/v1/responses", method="POST"):
     request = types.SimpleNamespace(
+        host="api.openai.com",
         pretty_host="api.openai.com",
         port=443,
         path=path,
@@ -76,6 +77,45 @@ def provider_config(**overrides):
 
 
 class ProviderTest(unittest.TestCase):
+    def test_provider_matching_uses_destination_host(self):
+        provider = Provider(provider_config(
+            inject_header="Authorization", inject_prefix="Bearer ",
+            replace_token="dummy", test_value="auth-token",
+        ), FakeResolver)
+        for host, pretty_host, expected in (
+            ("other.example.com", "api.openai.com", False),
+            ("api.openai.com", "other.example.com", True),
+        ):
+            with self.subTest(host=host, pretty_host=pretty_host):
+                flow = make_flow({"Host": pretty_host, "Authorization": "Bearer dummy"})
+                flow.request.host, flow.request.pretty_host = host, pretty_host
+                self.assertEqual(provider.matches(flow), expected)
+                self.assertEqual(inject_matching_providers([provider], flow),
+                                 ["openai"] if expected else [])
+                self.assertEqual(flow.request.headers["Authorization"],
+                                 "Bearer auth-token" if expected else "Bearer dummy")
+
+    def test_rule_scoped_injection_uses_destination_host(self):
+        provider = Provider(provider_config(injection_policy=[], request_policy=[
+            {"host": r"other\.example\.com"},
+            {"host": r"api\.openai\.com", "injection_policy": [{
+                "inject_header": "Authorization", "inject_prefix": "Bearer ",
+                "replace_token": "dummy", "test_value": "auth-token",
+            }]},
+        ]), FakeResolver)
+        for host, pretty_host, expected in (
+            ("other.example.com", "api.openai.com", False),
+            ("api.openai.com", "other.example.com", True),
+        ):
+            with self.subTest(host=host, pretty_host=pretty_host):
+                flow = make_flow({"Host": pretty_host, "Authorization": "Bearer dummy"})
+                flow.request.host, flow.request.pretty_host = host, pretty_host
+                self.assertTrue(provider.matches(flow))
+                self.assertEqual(inject_matching_providers([provider], flow),
+                                 ["openai"] if expected else [])
+                self.assertEqual(flow.request.headers["Authorization"],
+                                 "Bearer auth-token" if expected else "Bearer dummy")
+
     def test_unavailable_policy_never_partially_injects_across_policies_or_providers(self):
         healthy = Provider(provider_config(injection_policy=[{
             "inject_header": "x-key", "test_value": "healthy", "replace_token": "dummy",
