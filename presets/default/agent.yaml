@@ -1,4 +1,4 @@
-agent_image: localhost/agentbox-agent-base:latest
+agent_image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
 
 # OCI annotations applied to the agent container.
 # Useful for setting krun resource limits (memory, CPUs).

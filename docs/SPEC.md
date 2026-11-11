@@ -124,7 +124,7 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 
 | Group | Commands |
 |-------|----------|
-| Setup | `build [HARNESS...]`, `update [HARNESS...]`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
+| Setup | `build [HARNESS...] [--tag TAG]`, `update [HARNESS...] [--tag TAG]`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
 | Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--persist] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
 | Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
 | Egress control | `allow <host> [-n NAME \| -s ID]`, `deny <host> [-n NAME \| -s ID]` |
@@ -144,7 +144,7 @@ With `init --persist`, the first `start` creates the named `agent` Compose servi
 
 These edits use fast `/reload`, which never rebuilds providers. If the provider fingerprint differs from the active snapshot, the edit is saved but not activated; the CLI instructs the user to run `proxy-reload` to apply both changes. `proxy-reload` requires a running proxy and always synchronizes all provider files and rebuilds resolvers, even with unchanged YAML. `proxy-restart` preflights before restarting, then repopulates tmpfs and verifies the reload.
 
-`agentbox build` and `agentbox update` build container images. Both accept optional harness names to build specific harness images (e.g., `agentbox build claude opencode`). `update` rebuilds without cache.
+`agentbox build` and `agentbox update` build container images. Both accept optional harness names to build specific harness images (e.g., `agentbox build claude opencode`). `update` rebuilds without cache. The tag defaults to `AGENTBOX_IMAGE_TAG` (`latest` when unset or empty); `--tag TAG` / `-t TAG` overrides it for the build. Harness builds receive the same tag through the `AGENTBOX_IMAGE_TAG` build argument so they use the matching base image. Build the base image for a new tag before building individual harnesses.
 
 `agentbox remote-cleanup` removes stale `agentbox-*` git remotes that no longer have a corresponding session directory.
 
@@ -182,6 +182,18 @@ Presets are stored at `$AGENTBOX_HOME/presets/<name>/` (built-in) or `$AGENTBOX_
 Custom presets in `custom/presets/` override built-in presets of the same name. When a preset file is not found in the selected preset directory, the `default` preset is used as fallback.
 
 The agent harness is determined by the preset: the `agent_image` field specifies the container image (which has the harness binary installed), and `AGENT_HARNESS` in the environment specifies which binary to exec. Each harness has a dedicated container image built from its own Containerfile.
+
+The shared Compose template and built-in presets use `${AGENTBOX_IMAGE_TAG:-latest}`
+in image references. After applying the preset's `agent_image` override, `init`
+passes only service image fields to `podman compose config` over stdin, using the
+provider's native interpolation rather than implementing substitution itself.
+`--env-file /dev/null` ensures this uses exported environment variables, not a
+local `.env` file, consistent with `build` and `update`. The resolved images are
+saved in the session's `compose.yaml`; subsequent starts do not depend on the
+shell's tag setting. Re-initialization resolves the current tag again. Custom
+images can use the same syntax to inherit the tag or reference other variables;
+literal images, including pinned tags and digests, remain unchanged. Other
+session fields are not passed through this interpolation step.
 
 ### 6.3 Provider Configuration (`proxy.yaml`)
 
@@ -352,7 +364,7 @@ namespaced target for each configured source.
 ### 6.4 Agent Configuration (`agent.yaml`)
 
 ```yaml
-agent_image: localhost/agentbox-agent-claude:latest
+agent_image: localhost/agentbox-agent-claude:${AGENTBOX_IMAGE_TAG:-latest}
 
 environment:
   AGENT_HARNESS: claude

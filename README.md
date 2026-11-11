@@ -201,6 +201,63 @@ agentbox remote-cleanup   # remove stale agentbox-* git remotes with no matching
 
 ## Configuration
 
+### Image tags
+
+`AGENTBOX_IMAGE_TAG` selects the proxy, base agent, and built-in harness image tags.
+It defaults to `latest` when unset or empty:
+
+```bash
+export AGENTBOX_IMAGE_TAG=stage
+agentbox build
+agentbox init --name testing --preset claude-vertex
+agentbox start --name testing
+```
+
+Both `build` and `update` use this setting by default; an explicit `--tag TAG` (or
+`-t TAG`) overrides it for that build, including the base image used by harnesses.
+Build `base` for a new tag before building individual harnesses with that tag.
+`--tag` does not change the tag used by a later `init`.
+
+`init` uses `podman compose config` to resolve image references using the Compose
+provider's native variable interpolation, then saves concrete references in the
+session's `compose.yaml`. Only image fields are passed to this command; other
+session settings retain their placeholders. Image interpolation uses exported
+environment variables, not a local `.env` file, matching `build` and `update`.
+Starting an existing session from another shell keeps
+those references; re-running `init` regenerates them using the current setting
+(subject to the persistent-session restrictions above).
+
+Presets still override the agent image through `agent_image`. Custom presets can
+inherit the selected tag using `my-registry/my-agent:${AGENTBOX_IMAGE_TAG:-latest}`.
+Other image variables and interpolation forms are handled by the Compose provider.
+Explicit image references, including pinned tags and
+digests, are left unchanged. Update existing custom presets to use the placeholder
+if they should follow this setting.
+
+#### Separate stage installation
+
+With a `stage` branch, create a separate worktree:
+
+```bash
+git -C ~/.local/share/agentbox worktree add ~/.local/share/agentbox-stage stage
+```
+
+Save this wrapper as `~/.local/bin/agentbox-stage` and make it executable:
+
+```bash
+#!/usr/bin/env bash
+export AGENTBOX_HOME="$HOME/.local/share/agentbox-stage"
+export AGENTBOX_STATE="$HOME/.local/state/agentbox-stage"
+export AGENTBOX_IMAGE_TAG=stage
+exec "$AGENTBOX_HOME/bin/agentbox" "$@"
+```
+
+Use `agentbox-stage build`, `agentbox-stage init --name testing`, and
+`agentbox-stage start --name testing` to build and test independently. Merge
+`stage` into `main` normally, then run `agentbox build` with the default `latest`
+tag for the main installation. The wrapper selects the tag and separate session
+state; no branch-specific image-tag edits are needed.
+
 ### Providers
 
 Each session has its own `$AGENTBOX_STATE/sessions/<session-id>/proxy-config/proxy.yaml`, copied from the preset on `agentbox init`. The default state directory is `~/.local/state/agentbox`. Edit the session file to enable providers:
@@ -277,7 +334,7 @@ The agent harness is configured via the preset's `agent.yaml`. Each harness has 
 Set the harness in `agent.yaml`:
 
 ```yaml
-agent_image: localhost/agentbox-agent-claude:latest
+agent_image: localhost/agentbox-agent-claude:${AGENTBOX_IMAGE_TAG:-latest}
 
 environment:
   AGENT_HARNESS: claude
@@ -287,7 +344,8 @@ environment:
 To add a harness not already supported, create a `Containerfile.<name>` in the `agent/` directory:
 
 ```dockerfile
-FROM localhost/agentbox-agent-base:latest
+ARG AGENTBOX_IMAGE_TAG=latest
+FROM localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG}
 RUN npm install -g my-agent
 ```
 
@@ -306,7 +364,7 @@ agentbox update claude       # rebuild only the claude harness image
 ## Verification
 
 Run `python3 -m unittest discover -s tests -v` with PyYAML installed. Installing
-`podman-compose==1.5.0` enables the Compose tmpfs argument check; installing the proxy's
+`podman-compose==1.5.0` enables native image-interpolation and Compose argument checks; installing the proxy's
 mitmproxy dependency enables the real TLS/ALPN and HTTP streaming/reload regressions.
 TLS negotiation runs in memory without sockets. The streaming regression requires
 working local TCP listeners and reports a skip when the environment cannot provide them.

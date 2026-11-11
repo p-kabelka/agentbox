@@ -180,6 +180,10 @@ validation, canonical fingerprints, and framing with the host; no additional hos
 - `Containerfile.opencode` — Multi-stage build: downloads the newest stable `v2.*` OpenCode release from GitHub by default (rather than GitHub's `latest`, which tracks v1). Set `--build-arg AGENTBOX_BUILD_OPENCODE_VERSION=v2.2.4` to pin a release; versions with or without the `v` prefix are accepted, including older v1 releases. Attestation verification uses the selected release tag via `gh release verify-asset` (requires the `gh_token` build secret; can be skipped with `AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1`). Use `agentbox update opencode` or `podman build --no-cache` to refresh the default version instead of reusing a cached download.
 - `Containerfile.cursor` — Installs Cursor via the official install script.
 
+Harness Containerfiles accept an `AGENTBOX_IMAGE_TAG` build argument (default
+`latest`) to select the base image tag. The CLI passes the selected output tag,
+so stage harnesses extend the stage base rather than the latest base.
+
 **`start.sh`** — Agent entrypoint. Performs in order:
 1. Waits for the mitmproxy CA certificate to appear, then appends it to the system PEM bundle only when the anchor changes and exports `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `REQUESTS_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS` so all common TLS libraries trust the proxy's certificate.
 2. If `/source/project.bundle` is present and `/workspace/.git` does not yet exist, clones the bundle to `/workspace`, renames the bundle remote from `origin` to `source`, adds the output bare repository as `origin`, and enables `push.autoSetupRemote` so the agent can push with just `git push`.

@@ -1,3 +1,4 @@
-FROM localhost/agentbox-agent-base:latest
+ARG AGENTBOX_IMAGE_TAG=latest
+FROM localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG}
 
 RUN curl -fsSL https://chatgpt.com/codex/install.sh | bash

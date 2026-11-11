@@ -1,6 +1,6 @@
 # Agent preset — copied to .agentbox/sessions/<name>/config/agent.yaml on 'agentbox init --name <name>'.
 
-agent_image: localhost/agentbox-agent-claude:latest
+agent_image: localhost/agentbox-agent-claude:${AGENTBOX_IMAGE_TAG:-latest}
 
 # OCI annotations applied to the agent container.
 # Useful for setting krun resource limits (memory, CPUs).

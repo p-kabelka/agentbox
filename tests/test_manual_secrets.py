@@ -164,6 +164,7 @@ class HostSecretsTest(unittest.TestCase):
         self.agentbox = runpy.run_path(str(ROOT / "bin" / "agentbox"))
         self.g = self.agentbox["_launch"].__globals__
         self.g["AGENTBOX_HOME"] = ROOT
+        self.g["_resolve_images"] = lambda images: images
         self.agentbox["generate_compose"](self.session, self.project, "test", 1234, self.cfg, {}, [])
         self.args = types.SimpleNamespace()
         self.patches = patch.dict(self.g, resolve_session=lambda args: (self.session, self.project))

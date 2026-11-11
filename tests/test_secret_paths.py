@@ -56,10 +56,13 @@ class SecretPathTest(unittest.TestCase):
 
             generated = {}
             generate_compose = self.agentbox["generate_compose"]
+            generate_compose.__globals__["_resolve_images"] = lambda images: images
             generate_compose.__globals__["load_yaml"] = lambda path: {
                 "services": {
-                    "proxy": {"volumes": [], "environment": {}},
-                    "agent": {"volumes": [], "environment": {}},
+                    "proxy": {"image": "localhost/agentbox-proxy:${AGENTBOX_IMAGE_TAG:-latest}",
+                              "volumes": [], "environment": {}},
+                    "agent": {"image": "localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}",
+                              "volumes": [], "environment": {}},
                 },
             }
             generate_compose.__globals__["save_yaml"] = (

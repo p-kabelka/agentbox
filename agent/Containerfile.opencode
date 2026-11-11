@@ -1,3 +1,4 @@
+ARG AGENTBOX_IMAGE_TAG=latest
 FROM fedora:44 AS verifier
 
 ARG AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=0
@@ -34,5 +35,5 @@ RUN --mount=type=secret,id=gh_token \
     tar -xzf /tmp/opencode.tar.gz -C /tmp && \
     chmod +x /tmp/opencode
 
-FROM localhost/agentbox-agent-base:latest
+FROM localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG}
 COPY --from=verifier /tmp/opencode /usr/local/bin/opencode

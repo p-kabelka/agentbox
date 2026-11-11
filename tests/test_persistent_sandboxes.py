@@ -28,7 +28,8 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.agentbox = runpy.run_path(str(ROOT / "bin" / "agentbox"))
         self.g = self.agentbox["_launch"].__globals__
         p = patch.dict(self.g, AGENTBOX_HOME=ROOT, AGENTBOX_STATE=self.root / "state", compose=self.compose,
-                       resolve_session=lambda args: (self.session, self.project))
+                       resolve_session=lambda args: (self.session, self.project),
+                       _resolve_images=lambda images: images)
         p.start()
         self.addCleanup(p.stop)
         self.session = self.root / "state" / "sessions" / self.agentbox["_session_id"]("feature", self.project)

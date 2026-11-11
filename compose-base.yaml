@@ -12,7 +12,7 @@ networks:
 services:
 
   proxy:
-    image: localhost/agentbox-proxy:latest
+    image: localhost/agentbox-proxy:${AGENTBOX_IMAGE_TAG:-latest}
     networks:
       - agent-net
       - proxy-net
@@ -34,7 +34,7 @@ services:
     restart: unless-stopped
 
   agent:
-    image: localhost/agentbox-agent-base:latest
+    image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
     networks:
       - agent-net          # internal only — no direct internet access
     depends_on:

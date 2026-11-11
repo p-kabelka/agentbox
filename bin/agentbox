@@ -25,6 +25,8 @@ from secret_contract import fingerprint, injection_secret_name, synchronization_
 
 AGENTBOX_HOME   = Path(os.environ.get("AGENTBOX_HOME", Path.home() / ".local" / "share" / "agentbox"))
 AGENTBOX_PRESET = os.environ.get("AGENTBOX_PRESET", "default")
+# Match Compose's ${AGENTBOX_IMAGE_TAG:-latest}: empty also means latest.
+AGENTBOX_IMAGE_TAG = os.environ.get("AGENTBOX_IMAGE_TAG") or "latest"
 
 _state_home = Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local" / "state"))
 AGENTBOX_STATE = Path(os.environ.get("AGENTBOX_STATE", _state_home / "agentbox"))
@@ -229,6 +231,18 @@ def save_yaml(path: Path, cfg: dict) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
 
+def _resolve_images(images: dict[str, str]) -> dict[str, str]:
+    """Use native Compose interpolation without expanding session environments."""
+    config = {"services": {name: {"image": image} for name, image in images.items()}}
+    result = subprocess.run(
+        ["podman", "compose", "--env-file", os.devnull,
+         "--project-name", "agentbox-images", "-f", "-", "config"],
+        input=yaml.safe_dump(config), stdout=subprocess.PIPE, text=True, check=True,
+    )
+    resolved = yaml.safe_load(result.stdout)["services"]
+    return {name: resolved[name]["image"] for name in images}
+
+
 def _container_running(container: dict | None) -> bool:
     return bool(container and container["state"] == "running")
 
@@ -401,6 +415,13 @@ def generate_compose(
     """Build a unified compose.yaml from compose-base.yaml and preset config."""
     base = load_yaml(AGENTBOX_HOME / "compose-base.yaml")
 
+    # Resolve only image references, after the preset has selected the agent image.
+    agent = base["services"]["agent"]
+    agent["image"] = agent_cfg.get("agent_image", agent["image"])
+    images = _resolve_images({name: base["services"][name]["image"] for name in ("proxy", "agent")})
+    for service, image in images.items():
+        base["services"][service]["image"] = image
+
     # --- Session metadata (Compose extension field) ---
     base["x-metadata"] = {
         "project-dir": str(project_dir.resolve()),
@@ -467,9 +488,6 @@ def generate_compose(
         agent_volumes.append(f"{src}:/context/{dst}:{opts}")
     agent["volumes"] = agent_volumes
 
-    agent_image = agent_cfg.get("agent_image", "localhost/agentbox-agent-base:latest")
-    agent["image"] = agent_image
-
     agent_preset_env = agent_cfg.get("environment") or {}
     agent_env: dict = agent.get("environment", {})
     agent_env.update(agent_preset_env)
@@ -498,18 +516,18 @@ def _resolve_gh_token() -> str | None:
     return None
 
 
-def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, tag="latest") -> None:
+def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, tag: str | None = None) -> None:
+    tag = tag or AGENTBOX_IMAGE_TAG
     extra = ["--no-cache"] if no_cache else []
-    agent_ctx = AGENTBOX_HOME / "agent"
 
     targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
     build_env = dict(os.environ)
 
     for name in targets:
+        agent_ctx = AGENTBOX_HOME / ("proxy" if name == "proxy" else "agent")
         image_tag = f"localhost/agentbox-agent-{name}:{tag}"
 
         if name == "proxy":
-            agent_ctx = AGENTBOX_HOME / "proxy"
             image_tag = f"localhost/agentbox-proxy:{tag}"
 
         containerfile = HARNESS_CONTAINERFILES[name]
@@ -523,12 +541,13 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
                 f"         curl -fsSLo {agent_ctx / 'keys' / 'claude-code.asc'} https://downloads.claude.ai/keys/claude-code.asc\n"
                 f"         gpg --show-keys --fingerprint {agent_ctx / 'keys' / 'claude-code.asc'}")
 
+        build_args = [] if name in ("base", "proxy") else ["--build-arg", f"AGENTBOX_IMAGE_TAG={tag}"]
         secret_args: list[str] = []
         if name == "opencode":
             skip_opencode_verify = os.environ.get("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION", "")
             gh_token = None if skip_opencode_verify else _resolve_gh_token()
             if skip_opencode_verify:
-                extra += ["--build-arg", "AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1"]
+                build_args += ["--build-arg", "AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1"]
             elif gh_token:
                 secret_args = ["--secret", f"id=gh_token,env=_AGENTBOX_GH_TOKEN"]
             else:
@@ -539,7 +558,7 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
 
         print(f"==> Building {name} agent image...")
         subprocess.run(
-            ["podman", "build", *extra, *secret_args, "-f", str(cf_path), "-t", image_tag, str(agent_ctx)],
+            ["podman", "build", *extra, *build_args, *secret_args, "-f", str(cf_path), "-t", image_tag, str(agent_ctx)],
             check=True,
             env=build_env,
         )
@@ -555,7 +574,7 @@ def cmd_build(args) -> None:
     if args.harnesses:
         _validate_harnesses(args.harnesses)
     print("==> Building images...")
-    _build_images(harnesses=args.harnesses or None, tag=args.tag or "latest")
+    _build_images(harnesses=args.harnesses or None, tag=args.tag or AGENTBOX_IMAGE_TAG)
     print("==> Done. Run 'agentbox update' after pulling a new version.")
 
 
@@ -563,7 +582,7 @@ def cmd_update(args) -> None:
     if args.harnesses:
         _validate_harnesses(args.harnesses)
     print("==> Rebuilding images without cache...")
-    _build_images(no_cache=True, harnesses=args.harnesses or None, tag=args.tag or "latest")
+    _build_images(no_cache=True, harnesses=args.harnesses or None, tag=args.tag or AGENTBOX_IMAGE_TAG)
     print("==> Done.")
 
 
@@ -1141,11 +1160,11 @@ def main() -> None:
 
     build_subcommand = subcommand.add_parser("build", help="Build proxy + agent images")
     build_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to build (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
-    build_subcommand.add_argument("-t", "--tag", default="latest", help="Custom image tag (default: %(default)s).")
+    build_subcommand.add_argument("-t", "--tag", default=AGENTBOX_IMAGE_TAG, help="Image tag (AGENTBOX_IMAGE_TAG, default: %(default)s).")
 
     update_subcommand = subcommand.add_parser("update", help="Rebuild images without cache")
     update_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to rebuild (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
-    update_subcommand.add_argument("-t", "--tag", default="latest", help="Custom image tag (default: %(default)s).")
+    update_subcommand.add_argument("-t", "--tag", default=AGENTBOX_IMAGE_TAG, help="Image tag (AGENTBOX_IMAGE_TAG, default: %(default)s).")
 
     list_subcommand = subcommand.add_parser("list", aliases=["ls"], help="List sessions for the current project")
     list_subcommand.add_argument("--all", "-a", action="store_true", help="List sessions across all projects")
