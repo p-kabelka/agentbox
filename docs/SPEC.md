@@ -129,7 +129,7 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 | Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
 | Egress control | `allow <host> [-n NAME \| -s ID]`, `deny <host> [-n NAME \| -s ID]` |
 | Proxy management | `proxy-reload [-n NAME \| -s ID]`, `proxy-restart [-n NAME \| -s ID]` |
-| Observation | `status`, `list [--all] [--json]` / `ls [--all] [--json]`, `containers [-n NAME \| -s ID] [--json]` |
+| Observation | `status`, `list [--all] [--json]` / `ls [--all] [--json]`, `containers [-n NAME \| -s ID] [--json]`, `stats [-n NAME \| -s ID] [--json]` |
 | Maintenance | `remote-cleanup` |
 
 ### 5.2 Key Command Behaviors
@@ -148,9 +148,13 @@ These edits use fast `/reload`, which never rebuilds providers. If the provider 
 
 `agentbox remote-cleanup` removes stale `agentbox-*` git remotes that no longer have a corresponding session directory.
 
-All commands that operate on a specific session accept `--name <name>` (project-relative lookup) or `--session <session_id>` (global lookup by full session ID, works from any directory). The two flags are mutually exclusive. If the project has exactly one session, both are optional and the session is auto-detected. Session IDs are shown in the `list` output and can be used to manage sessions from any working directory.
+All commands that operate on a specific session accept `--name <name>` (project-relative lookup) or `--session <session_id>` (global lookup by full session ID, works from any directory). The two flags are mutually exclusive. For single-session commands, if the project has exactly one session, both are optional and the session is auto-detected. `stats` instead defaults to all registered sessions across all projects. Session IDs are shown in the `list` output and can be used to manage sessions from any working directory.
 
-`agentbox list` and `agentbox ls` output a formatted table. With `--all`, sessions from all projects are shown with their project directory. With `--json`, the output is a JSON array for machine parsing, with a `persistent` boolean per session. A retained stopped agent and a proxy running alone are not reported as an active agent. `agentbox containers` shows each container's state in both session modes.
+`agentbox list` and `agentbox ls` output a formatted table. With `--all`, sessions from all projects are shown with their project directory. With `--json`, the output is a JSON array for machine parsing, with a `persistent` boolean per session. A retained stopped agent and a proxy running alone are not reported as an active agent. `agentbox containers` shows each container's full ID, numeric PID, name, Compose service, and state in both session modes. Session activity and container discovery use exact Compose labels, not container-name substrings.
+
+`agentbox stats` prints one read-only snapshot of all registered sessions in the active state directory, grouped by session name, project, and full session ID. `--name`/`--session` select just one session. Every existing session container has a CPU, RAM, and writable-layer disk row; each session has summed totals. Live CPU is sampled over approximately one second, where 100% means one logical CPU and totals can exceed 100%. RAM uses Podman's byte accounting. Disk is `SizeRw` only: shared images, volumes, host bind mounts, and host session files are excluded. Paused containers retain RAM; stopped containers retain disk and contribute zero live CPU/RAM to session totals. Unknown metrics and affected totals are unavailable, never fabricated zeroes. Empty sessions have zero totals.
+
+`stats --json` emits one versioned object (`schema_version: 1`) with `collected_at` (UTC RFC 3339), `complete`, `sessions`, and `errors`. Sessions contain identity, persistence mode, container measurements, and `totals`; container IDs are full, CPU is numeric percent, and byte values are integers. Applicable unavailable measurements and totals use `null` and structured errors; expected stopped-container live nulls are not errors. Incomplete collection exits 1 while preserving successful results, with diagnostics only on stderr. Both formats exit after collection, without a streaming mode. These are host/runtime metrics, not in-guest microVM telemetry. See [SPEC-stats.md](SPEC-stats.md) for the full output and failure contract.
 
 ---
 
@@ -430,6 +434,8 @@ agentbox web                             # print the mitmweb traffic-monitor URL
 
 agentbox list                            # list all sessions for this project with status
 agentbox status                          # list all running agentbox containers across projects
+agentbox stats                           # snapshot CPU/RAM/writable-layer disk, grouped by session
+agentbox stats --name feature --json     # one session, structured measurements and totals
 ```
 
 ### 8.3 Retrieving Agent Output

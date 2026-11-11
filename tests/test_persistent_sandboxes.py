@@ -56,7 +56,7 @@ class PersistentSandboxesTest(unittest.TestCase):
     def container(self, service, status="created", project=None):
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())["services"][service]
         name = cfg["container_name"]
-        labels = {**cfg.get("labels", {}), "com.docker.compose.project": project or self.agentbox["_project"](self.session),
+        labels = {**cfg.get("labels", {}), "com.docker.compose.project": project or self.agentbox["_project_name"](self.session),
                   "com.docker.compose.service": service}
         c = {"Id": service + "-id", "Name": name,
              "Config": {"Labels": labels, "Image": cfg["image"], "Env": dict(cfg.get("environment", {})),
@@ -110,10 +110,10 @@ class PersistentSandboxesTest(unittest.TestCase):
                 project = args[args.index("--filter") + 1].rsplit("=", 1)[1]
                 containers = [c for c in self.containers.values()
                               if c["Config"]["Labels"].get("com.docker.compose.project") == project]
-                if "{{.Names}}" in args[args.index("--format") + 1]:
-                    return subprocess.CompletedProcess(args, 0, stdout="\n".join(
-                        f"{c['Id']}\t{c['Name']}" for c in containers))
-                return subprocess.CompletedProcess(args, 0, stdout="\n".join(c["Id"] for c in containers))
+                return subprocess.CompletedProcess(args, 0, stdout="\n".join(json.dumps({
+                    "id": c["Id"], "name": c["Name"], "state": c["State"]["Status"], "pid": c["State"]["Pid"],
+                    "project": project, "service": c["Config"]["Labels"].get("com.docker.compose.service"),
+                }) for c in containers))
             return subprocess.CompletedProcess(args, 0, stdout="\n".join(
                 c["Name"] for c in self.containers.values() if c["State"]["Running"]))
         if args[:3] == ["podman", "inspect", "--format"]:
@@ -233,11 +233,11 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual(self.agentbox["_list_session_containers"](self.session)[0]["name"], other["Name"])
 
     def test_compose_project_name_is_unique_in_both_modes(self):
-        persistent_project = self.agentbox["_project"](self.session)
+        persistent_project = self.agentbox["_project_name"](self.session)
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
         cfg["x-metadata"]["persist"] = False
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
-        self.assertEqual(self.agentbox["_project"](self.session), persistent_project)
+        self.assertEqual(self.agentbox["_project_name"](self.session), persistent_project)
 
         other_project = self.root / "other" / "project"
         other_project.mkdir(parents=True)
@@ -245,7 +245,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         other_session.mkdir()
         cfg["x-metadata"]["project-dir"] = str(other_project)
         (other_session / "compose.yaml").write_text(yaml.safe_dump(cfg))
-        self.assertNotEqual(self.agentbox["_project"](other_session), persistent_project)
+        self.assertNotEqual(self.agentbox["_project_name"](other_session), persistent_project)
 
     def test_stop_remove_and_listing_distinguish_retained_agent(self):
         self.start()
@@ -349,10 +349,10 @@ class PersistentSandboxesTest(unittest.TestCase):
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         name = "agentbox-project-feature_agent_run_1"
         self.containers[name] = {"Id": "ephemeral-id", "Name": name,
-                                 "Config": {"Labels": {"com.docker.compose.project": self.agentbox["_project"](self.session)}},
+                                 "Config": {"Labels": {"com.docker.compose.project": self.agentbox["_project_name"](self.session)}},
                                  "State": {"Status": "exited", "Pid": 0, "Running": False}}
         self.assertEqual(self.agentbox["_list_session_containers"](self.session),
-                         [{"id": "ephemeral-id", "pid": "0", "name": name, "state": "exited"}])
+                         [{"id": "ephemeral-id", "pid": 0, "name": name, "state": "exited", "service": None}])
         with redirect_stdout(io.StringIO()) as listing:
             self.agentbox["cmd_containers"](types.SimpleNamespace(json=False))
         self.assertIn("STATE", listing.getvalue())
@@ -380,7 +380,7 @@ class PodmanComposeCompatibilityTest(unittest.TestCase):
         try:
             import podman_compose
         except ImportError:
-            self.skipTest("Install podman-compose==1.5.0 to verify persistent service creation")
+            self.skipTest("Install podman-compose to verify persistent service creation")
 
         args = podman_compose.podman_compose._parse_args(
             ["up", "--no-start", "--no-deps", "--no-recreate", "agent"])
@@ -392,12 +392,15 @@ class PodmanComposeCompatibilityTest(unittest.TestCase):
                 "Names": ["proxy"], "Labels": {"io.podman.compose.config-hash": "old"}
             }]).encode()),
             run=AsyncMock(return_value=0),
+            existing_containers=AsyncMock(return_value={
+                "proxy": types.SimpleNamespace(service_name="proxy", exited=False, config_hash="old")
+            }),
         )
         compose = types.SimpleNamespace(
             services={"proxy": {"_deps": []}, "agent": {"_deps": []}},
             containers=[{"_service": "proxy", "name": "proxy"},
                         {"_service": "agent", "name": "agent"}],
-            yaml_hash="new", project_name="test", podman=podman,
+            yaml_hash="new", project_name="test", podman=podman, podman_version=None,
             commands={"build": AsyncMock(return_value=0), "down": AsyncMock()},
         )
         with patch.object(podman_compose, "create_pods", new=AsyncMock()), \

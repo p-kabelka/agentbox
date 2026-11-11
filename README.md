@@ -113,8 +113,27 @@ agentbox logs [--name NAME] [--tail LAST_N_LINES]   # tail structured JSON acces
 agentbox web  [--name NAME]                         # print the mitmweb traffic-monitor URL
 agentbox list [--all]                               # list sessions (optionally across all projects)
 agentbox containers [--name NAME] [--json]          # list session containers and their states
+agentbox stats [--name NAME | --session ID] [--json] # snapshot CPU, RAM, and disk usage by session
 agentbox status                                     # list all running agentbox containers
 ```
+
+`stats` defaults to **all sessions across all projects** in the active `AGENTBOX_STATE`,
+not just the current project. Select one with project-relative `--name` (`-n`) or a full
+global `--session` (`-s`) ID. The report includes each container and a `TOTAL` row per
+session, including stopped containers. It prints once and exits; use `watch agentbox stats`
+for repeated observation. Live CPU sampling takes approximately one second.
+
+Disk usage is **container writable-layer space**, excluding images, volumes, bind-mounted
+workspaces, and host session files. Stopped containers retain their disk measurements;
+their live CPU/RAM fields are unavailable and contribute zero to those session totals.
+Metrics use Podman's host/runtime accounting, not in-guest krun telemetry.
+
+`stats --json` emits one versioned object containing session/container measurements,
+session totals, a UTC collection timestamp, `complete`, and structured `errors`. CPU is
+numeric percent (100 means one logical CPU); RAM/disk are integer bytes. Unknown metrics
+and affected totals are `null`, not zero. Collection errors preserve partial output and
+exit with status 1; diagnostics go to stderr. See [the stats specification](docs/SPEC-stats.md)
+for the schema and examples.
 
 ### Egress control
 
