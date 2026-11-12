@@ -1,5 +1,5 @@
 # Copied to $AGENTBOX_STATE/sessions/<session-id>/proxy-config/proxy.yaml at init.
-# Apply session config/key changes with agentbox proxy-reload (or the next start).
+# Apply session config/key changes with agentbox proxy reload (or the next start).
 
 providers:
 

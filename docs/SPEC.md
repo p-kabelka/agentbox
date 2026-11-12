@@ -128,7 +128,7 @@ A host-side git remote is registered pointing to the bare repo. When the agent c
 | Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--persist] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
 | Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
 | Egress control | `allow <host> [-n NAME \| -s ID]`, `deny <host> [-n NAME \| -s ID]` |
-| Proxy management | `proxy-reload [-n NAME \| -s ID]`, `proxy-restart [-n NAME \| -s ID]` |
+| Proxy management | `proxy reload [-n NAME \| -s ID]`, `proxy restart [-n NAME \| -s ID]`, `proxy provider list [-n NAME \| -s ID] [--json]`, `proxy provider enable <provider> [<provider>...] [-n NAME \| -s ID]`, `proxy provider disable <provider> [<provider>...] [-n NAME \| -s ID]` |
 | Observation | `status`, `list [--all] [--json]` / `ls [--all] [--json]`, `containers [-n NAME \| -s ID] [--json]` |
 | Maintenance | `remote-cleanup` |
 
@@ -142,7 +142,9 @@ With `init --persist`, the first `start` creates the named `agent` Compose servi
 
 `agentbox allow` and `agentbox deny` append or remove rules in `extra_request_policy` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections. Hostnames are automatically escaped for regex safety. The `host:port` syntax is supported (e.g., `agentbox allow registry.internal.com:8443`).
 
-These edits use fast `/reload`, which never rebuilds providers. If the provider fingerprint differs from the active snapshot, the edit is saved but not activated; the CLI instructs the user to run `proxy-reload` to apply both changes. `proxy-reload` requires a running proxy and always synchronizes all provider files and rebuilds resolvers, even with unchanged YAML. `proxy-restart` preflights before restarting, then repopulates tmpfs and verifies the reload.
+These edits use fast `/reload`, which never rebuilds providers. If the provider fingerprint differs from the active snapshot, the edit is saved but not activated; the CLI instructs the user to run `proxy reload` to apply both changes. `proxy reload` requires a running proxy and always synchronizes all provider files and rebuilds resolvers, even with unchanged YAML. `proxy restart` preflights before restarting, then repopulates tmpfs and verifies the reload.
+
+`agentbox proxy provider list` reports provider names and saved enabled/disabled settings from the session's `proxy-config/proxy.yaml`, not live runtime status. `--json` outputs an array of objects containing `name` and `enabled`. `proxy provider enable <provider> [<provider>...]` and `proxy provider disable <provider> [<provider>...]` update only the named providers' `enabled` flags under the session's synchronization lock, saving once per invocation. All names are validated before any edits; an unknown name rejects the whole batch without modifying the configuration. Repeated names are processed once. They work for stopped sessions and do not synchronize credentials or reload the proxy; apply the saved edit with `proxy reload` or the next `start`. Presets are not changed. The old top-level `proxy-reload` and `proxy-restart` commands are replaced by the nested commands.
 
 `agentbox build` and `agentbox update` build container images. Both accept optional harness names to build specific harness images (e.g., `agentbox build claude opencode`). `update` rebuilds without cache. The tag defaults to `AGENTBOX_IMAGE_TAG` (`latest` when unset or empty); `--tag TAG` / `-t TAG` overrides it for the build. Harness builds receive the same tag through the `AGENTBOX_IMAGE_TAG` build argument so they use the matching base image. Build the base image for a new tag before building individual harnesses.
 
@@ -242,7 +244,7 @@ providers:
 # trusted_certificates:
 #   - my-internal-ca.crt
 
-# Additional egress rules. Apply edits with allow/deny or proxy-reload.
+# Additional egress rules. Apply edits with allow/deny or proxy reload.
 extra_request_policy: []
 
 # Proxy container environment variables
@@ -272,7 +274,7 @@ logging:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `api_key_env` | No | Environment variable holding the source API key |
-| `api_key_file` | No | Host source synchronized only at `start`, `proxy-reload`, or `proxy-restart`. `~` expands on the host; relative paths use `x-metadata.project-dir`. A usable file takes precedence over the environment fallback. |
+| `api_key_file` | No | Host source synchronized only at `start`, `proxy reload`, or `proxy restart`. `~` expands on the host; relative paths use `x-metadata.project-dir`. A usable file takes precedence over the environment fallback. |
 | `inject_header` | No | HTTP header to inject; defaults to `Authorization` |
 | `inject_prefix` | No | String prepended to the credential value (e.g., `"Bearer "`) |
 | `replace_token` | No | Only inject when the original header exactly equals `inject_prefix + replace_token` |
@@ -311,7 +313,7 @@ Only `host` and `port` are accepted in each entry. Invalid types or regexes reje
 the configuration rather than silently leaving a destination on HTTP/2.
 
 The set of forced host/port patterns is fixed for one proxy process. Changing it
-requires `proxy-restart`; both reload endpoints return HTTP 409 with
+requires `proxy restart`; both reload endpoints return HTTP 409 with
 `restart_required: true` and retain the previous runtime if it changes. Reordering
 or duplicating entries does not require a restart. Changes that leave the set
 unchanged, such as request-policy edits or credential rotation, remain reloadable.
@@ -456,8 +458,11 @@ agentbox remove                          # delete containers, session dir, outpu
 
 ```bash
 agentbox remote-cleanup                  # remove stale agentbox-* git remotes with no matching session
-agentbox proxy-reload                    # synchronize keys and reload providers in place
-agentbox proxy-restart                   # restart, repopulate tmpfs, and reload providers
+agentbox proxy reload                    # synchronize keys and reload providers in place
+agentbox proxy restart                   # restart, repopulate tmpfs, and reload providers
+agentbox proxy provider list             # show saved provider settings
+agentbox proxy provider enable openai anthropic   # save enabled: true; apply with proxy reload/start
+agentbox proxy provider disable openai anthropic  # save enabled: false; apply with proxy reload/start
 ```
 
 ---

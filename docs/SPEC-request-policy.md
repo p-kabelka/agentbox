@@ -129,7 +129,7 @@ client-facing HTTP/2 and TLS verification remain unchanged. No mitmproxy interna
 are modified. Entries accept only `host` and `port`; invalid types or regexes
 reject the configuration. This setting does not belong inside request rules.
 
-Changes to the set require `agentbox proxy-restart`, because existing pooled
+Changes to the set require `agentbox proxy restart`, because existing pooled
 connections retain their negotiated protocols. Both reload endpoints reject
 such changes with HTTP 409 and `restart_required: true`, retaining the old runtime.
 Reordering/duplicates or edits that leave this set unchanged remain reloadable.
@@ -333,7 +333,7 @@ The hot-reload mechanism is updated to reload **both** the allowlist rules and t
 
 **Fast path (allowlist-only reload):** When only `extra_request_policy` has changed (the `agentbox allow`/`deny` case), rebuild the combined allowlist using the existing providers' compiled rules plus the new `extra_request_policy` rules. No resolver re-initialization. This is the path triggered by `agentbox allow`/`deny`.
 
-**Full reload:** When provider configuration has changed, re-build providers including resolver initialization. This path is triggered by `agentbox proxy-reload` (explicit full reload). To avoid stalling the event loop, `OAuthResolver.__init__()` should be run in an executor (`loop.run_in_executor()`) so the credential chain scan does not block request processing.
+**Full reload:** When provider configuration has changed, re-build providers including resolver initialization. This path is triggered by `agentbox proxy reload` (explicit full reload). To avoid stalling the event loop, `OAuthResolver.__init__()` should be run in an executor (`loop.run_in_executor()`) so the credential chain scan does not block request processing.
 
 On reload (both paths):
 1. Re-read `proxy.yaml`.
@@ -558,7 +558,7 @@ Ordered list of changes to implement this feature:
 - Change `_Config.allowed` from `list[str]` to `list[CompiledRule]` (rename to `allowed_rules`).
 - Replace `_load_allowed_hosts()` with `_load_allowed_rules()`: build the combined allowlist from all enabled providers' compiled rules plus `extra_request_policy` rules.
 - Update `requestheaders()` to use `rule_matches()` for the allowlist check.
-- Update `_handle_reload_conn()` to support two reload paths: fast path (allowlist-only, reuses existing providers) for `agentbox allow`/`deny`, and full reload (re-builds providers with `run_in_executor` for blocking resolver init) for `agentbox proxy-reload`.
+- Update `_handle_reload_conn()` to support two reload paths: fast path (allowlist-only, reuses existing providers) for `agentbox allow`/`deny`, and full reload (re-builds providers with `run_in_executor` for blocking resolver init) for `agentbox proxy reload`.
 - Implement provider config change detection (compare raw provider YAML sections) to determine which reload path to use.
 
 ### Step 4: Update `agentbox` CLI

@@ -471,7 +471,7 @@ class HostSecretsTest(unittest.TestCase):
         with patch.dict(self.g, compose=conflict), redirect_stdout(output), redirect_stderr(output), self.assertRaises(SystemExit):
             self.agentbox["_update_allowlist"]("new.example", True, self.args)
         self.assertIn("saved but not active", output.getvalue())
-        self.assertIn("proxy-reload", output.getvalue())
+        self.assertIn("proxy reload", output.getvalue())
         cfg = yaml.safe_load((self.session / "proxy-config" / "proxy.yaml").read_text())
         self.assertEqual(cfg["extra_request_policy"], [{"host": r"new\.example"}])
         self.assertEqual(len(self.events), 1)
@@ -485,7 +485,7 @@ class HostSecretsTest(unittest.TestCase):
         with patch.dict(self.g, compose=conflict), redirect_stderr(output), redirect_stdout(output), self.assertRaises(SystemExit):
             self.agentbox["_update_allowlist"]("new.example", True, self.args)
         self.assertIn("saved but not active", output.getvalue())
-        self.assertIn("proxy-restart", output.getvalue())
+        self.assertIn("proxy restart", output.getvalue())
         self.assertEqual(len(self.events), 1)
 
     def test_synchronization_protocol_conflict_requests_restart(self):
@@ -496,7 +496,7 @@ class HostSecretsTest(unittest.TestCase):
         output = io.StringIO()
         with patch.dict(self.g, compose=conflict), redirect_stderr(output), self.assertRaises(SystemExit):
             self.agentbox["_synchronize_proxy"](self.session, full, providers, sources)
-        self.assertIn("proxy-restart", output.getvalue())
+        self.assertIn("proxy restart", output.getvalue())
 
 
 class ComposeCompatibilityTest(unittest.TestCase):

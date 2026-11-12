@@ -341,9 +341,9 @@ def _reload_proxy(session_dir: Path) -> dict:
             restart_required = False
         if restart_required:
             die("Allowlist edit saved but not active: HTTP protocol policy changed. "
-                "Run agentbox proxy-restart to apply it")
+                "Run agentbox proxy restart to apply it")
         die("Allowlist edit saved but not active: provider changes are pending. "
-            "Run agentbox proxy-reload to apply both changes")
+            "Run agentbox proxy reload to apply both changes")
     if status != "200":
         die("Proxy rejected the configuration; fix proxy.yaml and rerun")
     try:
@@ -374,7 +374,7 @@ def _synchronize_proxy(session_dir: Path, full: str, providers: str,
         die("Invalid proxy synchronization response; rerun the command")
     if status == 409:
         if applied.get("restart_required") is True:
-            die("HTTP protocol policy changed; run agentbox proxy-restart to apply it")
+            die("HTTP protocol policy changed; run agentbox proxy restart to apply it")
         die("Concurrent configuration change; rerun the synchronization command")
     if status != 200:
         die("Proxy rejected the configuration; fix proxy.yaml and rerun")
@@ -911,6 +911,81 @@ def cmd_proxy_restart(args) -> None:
         del sources
 
 
+def _load_provider_config(session_dir: Path) -> dict:
+    try:
+        with (session_dir / "proxy-config" / "proxy.yaml").open() as stream:
+            cfg = yaml.safe_load(stream)
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("providers", []), list):
+            raise ValueError
+        names = set()
+        for provider in cfg.get("providers", []):
+            if not isinstance(provider, dict):
+                raise ValueError
+            name = provider.get("name")
+            if not isinstance(name, str) or not name.strip() or name in names:
+                raise ValueError
+            if not isinstance(provider.get("enabled", False), bool):
+                raise ValueError
+            names.add(name)
+    except (OSError, ValueError, yaml.YAMLError):
+        die("Invalid session provider configuration; check provider names and enabled flags in proxy.yaml")
+    return cfg
+
+
+def cmd_proxy_provider_list(args) -> None:
+    session_dir, _ = resolve_session(args)
+    with _secret_sync_lock(session_dir):
+        cfg = _load_provider_config(session_dir)
+    entries = [{"name": p["name"], "enabled": p.get("enabled", False)}
+               for p in cfg.get("providers", [])]
+    if args.json:
+        print(json.dumps(entries, indent=2))
+    elif entries:
+        _print_table([[p["name"], "enabled" if p["enabled"] else "disabled"] for p in entries],
+                     ["NAME", "STATUS"])
+    else:
+        print("No providers configured.")
+
+
+def _set_providers_enabled(args, enabled: bool) -> None:
+    session_dir, _ = resolve_session(args)
+    state = "enabled" if enabled else "disabled"
+    with _secret_sync_lock(session_dir):
+        cfg = _load_provider_config(session_dir)
+        providers = {p["name"]: p for p in cfg.get("providers", [])}
+        names = list(dict.fromkeys(args.providers))
+        for name in names:
+            if name not in providers:
+                die(f"provider '{name}' not found — run: agentbox proxy provider list")
+        changed = {name for name in names if providers[name].get("enabled", False) != enabled}
+        for name in changed:
+            providers[name]["enabled"] = enabled
+        if changed:
+            save_yaml(session_dir / "proxy-config" / "proxy.yaml", cfg)
+        for name in names:
+            if name in changed:
+                print(f"Provider '{name}' {state} in the saved configuration.")
+            else:
+                print(f"Provider '{name}' already {state} in the saved configuration.")
+    print("Run agentbox proxy reload for this session to apply it, or start the session later.")
+
+
+def cmd_proxy(args) -> None:
+    sub = args.subcmd
+
+    if sub == "reload":
+        cmd_proxy_reload(args)
+    elif sub == "restart":
+        cmd_proxy_restart(args)
+    elif sub == "provider":
+        if args.provider_cmd == "list":
+            cmd_proxy_provider_list(args)
+        elif args.provider_cmd == "enable":
+            _set_providers_enabled(args, enabled=True)
+        elif args.provider_cmd == "disable":
+            _set_providers_enabled(args, enabled=False)
+
+
 def cmd_remove(args) -> None:
     session_dir, project_dir = resolve_session(args)
     meta = read_compose_metadata(session_dir)
@@ -1196,8 +1271,23 @@ def main() -> None:
     allow_subcommand.add_argument("host")
     deny_subcommand = subparser_with_name(subcommand.add_parser("deny", help="Remove a host from the egress allowlist"))
     deny_subcommand.add_argument("host")
-    subparser_with_name(subcommand.add_parser("proxy-reload", help="Reload the proxy config without restarting"))
-    subparser_with_name(subcommand.add_parser("proxy-restart", help="Restart the proxy container"))
+    proxy_subcommand = subcommand.add_parser("proxy", help="Manage the session proxy and providers")
+    proxy_subparser = proxy_subcommand.add_subparsers(dest="subcmd", required=True)
+    subparser_with_name(proxy_subparser.add_parser(
+        "reload", help="Synchronize keys and reload the proxy config without restarting"))
+    subparser_with_name(proxy_subparser.add_parser(
+        "restart", help="Restart the proxy container and synchronize keys"))
+    provider_subcommand = proxy_subparser.add_parser("provider", help="Manage providers in the saved session configuration")
+    provider_subparser = provider_subcommand.add_subparsers(dest="provider_cmd", required=True)
+    provider_list = subparser_with_name(provider_subparser.add_parser(
+        "list", help="List configured providers and their enabled status"))
+    provider_list.add_argument("--json", action="store_true", help="Output in JSON format")
+    provider_enable = subparser_with_name(provider_subparser.add_parser(
+        "enable", help="Enable providers in the saved configuration"))
+    provider_enable.add_argument("providers", nargs="+", metavar="PROVIDER", help="Provider names from 'agentbox proxy provider list'")
+    provider_disable = subparser_with_name(provider_subparser.add_parser(
+        "disable", help="Disable providers in the saved configuration"))
+    provider_disable.add_argument("providers", nargs="+", metavar="PROVIDER", help="Provider names from 'agentbox proxy provider list'")
     subcommand.add_parser("remote-cleanup", help="Remove agentbox-* git remotes with no matching session")
 
     preset_subcommand = subcommand.add_parser("preset", help="Manage presets")
@@ -1225,8 +1315,7 @@ def main() -> None:
         "web": cmd_web,
         "allow": cmd_allow,
         "deny": cmd_deny,
-        "proxy-reload": cmd_proxy_reload,
-        "proxy-restart": cmd_proxy_restart,
+        "proxy": cmd_proxy,
         "status": cmd_status,
         "list": cmd_list,
         "ls": cmd_list,

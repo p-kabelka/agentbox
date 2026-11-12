@@ -5,10 +5,10 @@
 Provider credential bind mounts are replaced with a proxy-local tmpfs populated by explicit `agentbox` commands. Synchronization runs only during:
 
 1. `agentbox start`
-2. `agentbox proxy-reload`
-3. `agentbox proxy-restart`
+2. `agentbox proxy reload`
+3. `agentbox proxy restart`
 
-The current session's `proxy-config/proxy.yaml` is the only source of provider secret declarations. While a session is running, users apply provider configuration or credential-file changes with `proxy-reload` or `proxy-restart`. If no session is running, the next `start` applies them.
+The current session's `proxy-config/proxy.yaml` is the only source of provider secret declarations. While a session is running, users apply provider configuration or credential-file changes with `proxy reload` or `proxy restart`. `proxy provider enable` and `proxy provider disable` only edit the saved configuration; they do not synchronize credentials. If no session is running, the next `start` applies them.
 
 There is no watcher, polling loop, event listener, daemon, background retry, or automatic response to host file changes. The feature is limited to provider credentials selected by `api_key_file`; environment updates, OAuth discovery, and arbitrary file synchronization retain their existing behavior.
 
@@ -109,7 +109,7 @@ With the synchronization lock held as defined in Section 6, each invocation perf
 8. Call `/reload/providers` exactly once with the expected full-configuration fingerprint.
 9. Verify the applied fingerprint and report unavailable policies.
 
-Steps 1-3 are host preflight and occur before a command starts or restarts a proxy. Invalid YAML, invalid target names, and target collisions therefore cannot destroy a working proxy; structural checks performed only by the proxy can still fail after `proxy-restart`, as defined in Section 7.
+Steps 1-3 are host preflight and occur before a command starts or restarts a proxy. Invalid YAML, invalid target names, and target collisions therefore cannot destroy a working proxy; structural checks performed only by the proxy can still fail after `proxy restart`, as defined in Section 7.
 
 There is no delta detection or persistent synchronization state. An interrupted transaction is recovered by rerunning any synchronization command, which resets and transfers the complete set.
 
@@ -199,9 +199,10 @@ Unavailable policies do not block healthy providers or ordinary `extra_request_p
 | Operation | Required behavior |
 |-----------|-------------------|
 | `start` | After host preflight, start or reuse the proxy, then enter one exec that waits for the reload endpoint. Report unavailable-policy warnings, release the lock after verification, then launch the agent. Do not launch on transaction failure. |
-| `proxy-reload` | Require a running proxy, perform one complete transaction, and rebuild providers even when YAML is unchanged. |
-| `proxy-restart` | Complete host preflight before restarting the proxy, then hold the lock through tmpfs repopulation, endpoint readiness, reload, and verification. |
-| `allow` / `deny` | Save the allowlist edit, then use fast `/reload`; do not synchronize or rebuild providers. If provider changes are pending, report that the edit is saved but not active and instruct the user to run `proxy-reload`, which applies both changes. The user does not rerun `allow` or `deny`. |
+| `proxy reload` | Require a running proxy, perform one complete transaction, and rebuild providers even when YAML is unchanged. |
+| `proxy restart` | Complete host preflight before restarting the proxy, then hold the lock through tmpfs repopulation, endpoint readiness, reload, and verification. |
+| `proxy provider list` / `enable` / `disable` | Read or edit saved provider settings under the sync lock; do not synchronize credentials or reload the proxy. Apply edits with `proxy reload` or the next `start`. |
+| `allow` / `deny` | Save the allowlist edit, then use fast `/reload`; do not synchronize or rebuild providers. If provider changes are pending, report that the edit is saved but not active and instruct the user to run `proxy reload`, which applies both changes. The user does not rerun `allow` or `deny`. |
 | Automatic proxy restart | File policies without usable environment fallbacks are unavailable until the next synchronization command; only matching requests receive HTTP 503. |
 | Raw `podman compose up` | Does not synchronize. File-backed policies without usable environment fallbacks are unavailable until an `agentbox` synchronization command runs. |
 
@@ -215,7 +216,7 @@ The exclusive lock is:
 
 It is held from before any CLI-managed proxy lifecycle action through configuration snapshot, target reset, transfer, and reload. It contains no secret data.
 
-`compose()`, `_proxy_lifetime()`, `_launch()`, and the relevant CLI commands already provide the lifecycle structure at `bin/agentbox:122-171,417-423,564-659`. Add one-shot synchronization only to `_launch()`, `proxy-reload`, and `proxy-restart`; keep `allow` and `deny` on fast reload. Add the synchronization lock to those operations, final lifetime teardown, `stop`, and `remove` rather than creating a second lifecycle manager.
+`compose()`, `_proxy_lifetime()`, `_launch()`, and the relevant CLI commands already provide the lifecycle structure at `bin/agentbox:122-171,417-423,564-659`. Add one-shot synchronization only to `_launch()`, `proxy reload`, and `proxy restart`; keep `allow` and `deny` on fast reload. Add the synchronization lock to those operations, final lifetime teardown, `stop`, and `remove` rather than creating a second lifecycle manager.
 
 ---
 
@@ -227,7 +228,7 @@ It is held from before any CLI-managed proxy lifecycle action through configurat
 | Managed-target reset failure | Abort before installing any target or invoking reload. |
 | Malformed, incomplete, mismatched, or unwritable transfer | Remove its temporary file, skip reload, and retain the old active resolver set when one exists. |
 | Process exit during synchronization | Leave any old in-memory resolver set active; the next command resets partial staging and retries the complete set. |
-| `proxy-restart` transfer or structural failure | Exit nonzero; the old process is gone, so providers have the availability established by the new process's last successful configuration load. |
+| `proxy restart` transfer or structural failure | Exit nonzero; the old process is gone, so providers have the availability established by the new process's last successful configuration load. |
 
 ---
 

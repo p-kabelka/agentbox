@@ -145,17 +145,30 @@ verification remain unchanged. Native gRPC or HTTP/2-only services must not be f
 ### Proxy management
 
 ```bash
-agentbox proxy-reload  [--name NAME]    # synchronize keys and reload providers in place
-agentbox proxy-restart [--name NAME]    # restart proxy, repopulate keys, and reload
+agentbox proxy reload  [--name NAME]   # synchronize keys and reload providers in place
+agentbox proxy restart [--name NAME]   # restart proxy, repopulate keys, and reload
+agentbox proxy provider list [--name NAME] [--json]
+agentbox proxy provider enable  PROVIDER [PROVIDER ...] [--name NAME]
+agentbox proxy provider disable PROVIDER [PROVIDER ...] [--name NAME]
 ```
 
-Provider files are synchronized **only** by `start`, `proxy-reload`, and `proxy-restart`.
+Provider commands manage the current session's configuration, not its preset.
+`provider list` shows saved enabled/disabled settings, not live runtime status.
+`provider enable` and `provider disable` accept one or more provider names and save
+the settings without restarting the proxy or synchronizing credentials. All names
+are checked before saving, so an unknown name leaves the configuration unchanged.
+Run `agentbox proxy reload` for that session to apply
+the edit immediately, or let the next `start` apply it. These commands also work
+while the session is stopped. The old `proxy-reload` and `proxy-restart` commands
+are replaced by `proxy reload` and `proxy restart`.
+
+Provider files are synchronized **only** by `start`, `proxy reload`, and `proxy restart`.
 Edit the current session's `proxy-config/proxy.yaml` or replace a host key file, then run
-`proxy-reload` to apply the change without interrupting active requests. Every `start`
+`proxy reload` to apply the change without interrupting active requests. Every `start`
 synchronizes, including when it shares an existing proxy. One Compose exec transfers all
 provider secrets and applies the reload. There is no file watcher.
 
-Changes to `force_http1_hosts` destinations require `agentbox proxy-restart --name NAME`:
+Changes to `force_http1_hosts` destinations require `agentbox proxy restart --name NAME`:
 existing pooled TLS connections cannot renegotiate. A reload detects such changes,
 keeps the previous runtime configuration, and reports that a restart is required.
 Path/method changes or credential rotation that leave those destinations unchanged
@@ -167,7 +180,7 @@ until a synchronization command runs; healthy providers and ordinary allowlist r
 continue working. A non-empty `api_key_env` is used as a fallback when configured.
 
 `allow` and `deny` save the edit and reload only non-provider settings. If provider changes
-are pending, the CLI reports that the saved edit is not active: run `proxy-reload` once to
+are pending, the CLI reports that the saved edit is not active: run `proxy reload` once to
 apply both changes. You do not need to repeat `allow` or `deny`.
 
 ### Reference mounts

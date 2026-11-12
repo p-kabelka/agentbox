@@ -149,7 +149,7 @@ The proxy container is attached to both networks and is the sole egress point fo
   list (hostname regex plus optional integer/regex port, default 443). The addon's
   public `server_connect` hook restricts upstream ALPN to HTTP/1.1 for matches,
   without changing request policies, client-facing HTTP/2, or certificate checks.
-  Changes to the destination set require `proxy-restart`; reload rejects them with
+  Changes to the destination set require `proxy restart`; reload rejects them with
   HTTP 409 and retains the previous runtime so existing pooled connections cannot
   silently keep an outdated protocol policy.
 
@@ -312,7 +312,7 @@ Credential injection uses a `CredentialResolver` abstraction with implementation
 
 ### 6.9 Explicit one-shot secret transactions
 
-Only `start`, `proxy-reload`, and `proxy-restart` synchronize provider files. With
+Only `start`, `proxy reload`, and `proxy restart` synchronize provider files. With
 `<session-dir>/.secret-sync.lock` held, the host reads the current `proxy-config/proxy.yaml`,
 computes full/provider fingerprints, discovers enabled top-level/provider/rule references,
 validates targets/collisions, and opens and reads each source once.

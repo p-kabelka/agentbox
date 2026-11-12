@@ -422,7 +422,7 @@ class ReloadTest(unittest.IsolatedAsyncioTestCase):
             status, body = await self.reload(path)
             self.assertEqual(status, 409)
             self.assertIs(body["restart_required"], True)
-            self.assertIn("proxy-restart", body["error"])
+            self.assertIn("proxy restart", body["error"])
             self.assertIs(self.addon._cfg, previous)
             self.assertFalse(addon_module._log_bodies)
         self.addon = addon_module.AgentboxAddon()  # restart reads the new transport policy

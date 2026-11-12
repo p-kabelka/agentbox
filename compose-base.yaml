@@ -16,7 +16,7 @@ services:
     networks:
       - agent-net
       - proxy-net
-    # Populated only by agentbox start / proxy-reload / proxy-restart.
+    # Populated only by agentbox start / proxy reload / proxy restart.
     tmpfs:
       - /run/secrets:rw,noexec,nosuid,nodev,mode=0700
     volumes:

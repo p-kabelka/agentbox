@@ -263,7 +263,7 @@ class AgentboxAddon:
                         body, status = {"error": "Expected configuration fingerprint required"}, b"400 Bad Request"
                     elif ((path == "/reload/providers" and expected != full)
                           or (path == "/reload" and provider_fp != self._cfg.provider_fingerprint)):
-                        body = {"error": "Concurrent configuration change; run agentbox proxy-reload"}
+                        body = {"error": "Concurrent configuration change; run agentbox proxy reload"}
                         status = b"409 Conflict"
                     else:
                         providers = self._cfg.providers if path == "/reload" else None
@@ -272,7 +272,7 @@ class AgentboxAddon:
                         if candidate.http1_destinations != self._cfg.http1_destinations:
                             # Public connection hooks cannot renegotiate pooled TLS
                             # connections. Retain the entire previous configuration.
-                            body = {"error": "HTTP protocol policy changed; run agentbox proxy-restart",
+                            body = {"error": "HTTP protocol policy changed; run agentbox proxy restart",
                                     "restart_required": True}
                             status = b"409 Conflict"
                         else:
@@ -333,7 +333,7 @@ class AgentboxAddon:
         except CredentialUnavailable:
             flow.metadata["agentbox_blocked"] = True
             flow.response = http.Response.make(
-                503, "Provider credential unavailable; run agentbox proxy-reload outside the sandbox.\n",
+                503, "Provider credential unavailable; run agentbox proxy reload outside the sandbox.\n",
                 {"Content-Type": "text/plain"})
             log.warning({"message": "Provider credential unavailable", "status": 503})
             return
