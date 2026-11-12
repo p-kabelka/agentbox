@@ -130,6 +130,39 @@ def _blocked_request_entry(flow: http.HTTPFlow) -> dict:
     return entry
 
 
+def _access_log_entry(flow: http.HTTPFlow) -> dict:
+    request, resp, error = flow.request, flow.response, flow.error
+    timestamp_end = error.timestamp if error else resp.timestamp_end if resp else None
+    entry: dict = {
+        "method": request.method if request else None,
+        "url": request.pretty_url if request else None,
+        "status": resp.status_code if resp else None,
+        "duration_ms": (
+            round((timestamp_end - request.timestamp_start) * 1000)
+            if timestamp_end is not None and request and request.timestamp_start is not None else None
+        ),
+    }
+    if error:
+        entry["level"] = "error"
+        entry["error"] = error.msg
+    provider = flow.metadata.get("agentbox_provider")
+    if provider:
+        entry["provider"] = provider
+    providers = flow.metadata.get("agentbox_providers", [])
+    if len(providers) > 1:
+        entry["providers"] = providers
+    if _log_req_hdr and request:
+        redacted = flow.metadata.get("agentbox_injected_headers", set())
+        entry["req_headers"] = {key: "[redacted]" if key.lower() in redacted else value
+                                for key, value in request.headers.items()}
+    if _log_resp_hdr and resp:
+        entry["resp_headers"] = dict(resp.headers)
+    if _log_bodies:
+        entry["req_body"] = request.get_text(strict=False) if request else None
+        entry["resp_body"] = resp.get_text(strict=False) if resp else None
+    return entry
+
+
 def _deny_request(flow: http.HTTPFlow) -> None:
     host = flow.request.host
     flow.response = http.Response.make(
@@ -143,7 +176,9 @@ def _log_failed_blocked_request(flow: http.HTTPFlow) -> None:
     entry = _blocked_request_entry(flow)
     entry["status"] = None
     entry["blocked_reason"] = "no matching policy rule; request body failed"
-    log.info(entry)
+    entry["level"] = "error"
+    entry["error"] = flow.error.msg
+    log.error(entry)
 
 
 class AgentboxAddon:
@@ -315,9 +350,11 @@ class AgentboxAddon:
             _deny_request(flow)
 
     def error(self, flow: http.HTTPFlow) -> None:
-        """Log a deferred denial when an incomplete request body prevents request()."""
+        """Log proxy failures, including requests that never receive a response."""
         if flow.metadata.pop("agentbox_block_pending", False):
             _log_failed_blocked_request(flow)
+        elif not flow.metadata.get("agentbox_blocked"):
+            log.error(_access_log_entry(flow))
 
     def responseheaders(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("agentbox_blocked"):
@@ -338,32 +375,7 @@ class AgentboxAddon:
     def response(self, flow: http.HTTPFlow) -> None:
         if flow.metadata.get("agentbox_blocked"):
             return
-        resp = flow.response
-        entry: dict = {
-            "method": flow.request.method,
-            "url": flow.request.pretty_url,
-            "status": resp.status_code if resp else None,
-            "duration_ms": (
-                round((resp.timestamp_end - flow.request.timestamp_start) * 1000)
-                if resp and resp.timestamp_end else None
-            ),
-        }
-        provider = flow.metadata.get("agentbox_provider")
-        if provider:
-            entry["provider"] = provider
-        providers = flow.metadata.get("agentbox_providers", [])
-        if len(providers) > 1:
-            entry["providers"] = providers
-        if _log_req_hdr:
-            redacted = flow.metadata.get("agentbox_injected_headers", set())
-            entry["req_headers"] = {key: "[redacted]" if key.lower() in redacted else value
-                                    for key, value in flow.request.headers.items()}
-        if _log_resp_hdr and resp:
-            entry["resp_headers"] = dict(resp.headers)
-        if _log_bodies:
-            entry["req_body"]  = flow.request.get_text(strict=False)
-            entry["resp_body"] = resp.get_text(strict=False) if resp else None
-        log.info(entry)
+        log.info(_access_log_entry(flow))
 
 
 addons = [AgentboxAddon()]

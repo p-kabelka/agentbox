@@ -486,6 +486,30 @@ When a provider matches and injects credentials, the log entry includes which pr
 }
 ```
 
+### 7.3 Proxy Error Logging
+
+HTTP flow failures (such as DNS resolution, connection, TLS, or streaming errors)
+are logged even when no response is received:
+
+```json
+{
+  "ts": "2026-11-12T08:53:39Z",
+  "source": "proxy",
+  "level": "error",
+  "method": "POST",
+  "url": "https://api.anthropic.com/v1/messages",
+  "status": null,
+  "duration_ms": 1250,
+  "error": "[Errno -3] Temporary failure in name resolution"
+}
+```
+
+Error entries use the same provider context, optional header/body logging, and
+injected-header redaction as response entries. If response headers were received
+before a failure, their status is retained. Duration is measured to the error
+timestamp. Failed deferred denials retain their blocking reason and include the
+error without logging the denial twice.
+
 ---
 
 ## 8. Security Considerations

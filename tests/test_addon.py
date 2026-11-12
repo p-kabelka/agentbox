@@ -9,7 +9,7 @@ import types
 import unittest
 import yaml
 from pathlib import Path
-from unittest.mock import mock_open, patch
+from unittest.mock import Mock, mock_open, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,10 +50,11 @@ def make_flow(body="denied body"):
         port=443,
         path="/private?value=1",
         method="POST",
+        timestamp_start=100.0,
         headers={"Content-Type": "text/plain", "X-Test": "denied"},
         get_text=lambda strict=False: body,
     )
-    return types.SimpleNamespace(request=request, response=None, metadata={})
+    return types.SimpleNamespace(request=request, response=None, error=None, metadata={})
 
 
 class RequestHostPolicyTest(unittest.TestCase):
@@ -134,18 +135,24 @@ class DeniedRequestLoggingTest(unittest.TestCase):
     def test_logs_failed_deferred_request_once_from_error_hook(self):
         addon_module._log_bodies = True
         flow = make_flow("partial body")
+        flow.error = types.SimpleNamespace(msg="Client disconnected", timestamp=101.25)
 
-        with patch.object(addon_module.log, "info") as log_info:
+        with (patch.object(addon_module.log, "info") as log_info,
+              patch.object(addon_module.log, "error") as log_error):
             self.addon.requestheaders(flow)
+            self.addon.error(flow)
             self.addon.error(flow)
 
         self.assertIsNone(flow.response)
         self.assertNotIn("agentbox_block_pending", flow.metadata)
-        log_info.assert_called_once()
-        entry = log_info.call_args.args[0]
+        log_info.assert_not_called()
+        log_error.assert_called_once()
+        entry = log_error.call_args.args[0]
         self.assertIsNone(entry["status"])
         self.assertEqual(entry["req_body"], "partial body")
         self.assertIn("request body failed", entry["blocked_reason"])
+        self.assertEqual(entry["level"], "error")
+        self.assertEqual(entry["error"], "Client disconnected")
 
     def test_reload_updates_logging_flags(self):
         class Reader:
@@ -180,6 +187,128 @@ class DeniedRequestLoggingTest(unittest.TestCase):
         self.assertFalse(addon_module._log_req_hdr)
         self.assertTrue(addon_module._log_resp_hdr)
         self.assertTrue(addon_module._log_bodies)
+
+
+class ProxyErrorLoggingTest(unittest.TestCase):
+    def setUp(self):
+        self.addon = addon_module.AgentboxAddon.__new__(addon_module.AgentboxAddon)
+        self.addon._apply_candidate(self.addon._build_candidate({
+            "extra_request_policy": [{"host": r"denied\.example\.com"}],
+        }))
+        for name in ("_log_req_hdr", "_log_resp_hdr", "_log_bodies"):
+            flag_patch = patch.object(addon_module, name, getattr(addon_module, name))
+            flag_patch.start()
+            self.addCleanup(flag_patch.stop)
+
+    def failed_flow(self, message="[Errno -3] Temporary failure in name resolution"):
+        flow = make_flow()
+        self.addon.requestheaders(flow)
+        self.assertIsNone(flow.response)
+        flow.error = types.SimpleNamespace(msg=message, timestamp=101.25)
+        return flow
+
+    def test_logs_dns_and_other_proxy_failures_without_response(self):
+        for message in ("[Errno -3] Temporary failure in name resolution",
+                        "Connection refused", "TLS handshake failed", "Connection timed out"):
+            with self.subTest(message=message):
+                flow = self.failed_flow(message)
+                with (patch.object(addon_module.log, "info") as log_info,
+                      patch.object(addon_module.log, "error") as log_error):
+                    self.addon.error(flow)
+                log_info.assert_not_called()
+                log_error.assert_called_once()
+                entry = log_error.call_args.args[0]
+                self.assertEqual(entry["level"], "error")
+                self.assertEqual(entry["error"], message)
+                self.assertEqual(entry["method"], "POST")
+                self.assertEqual(entry["url"], flow.request.pretty_url)
+                self.assertIsNone(entry["status"])
+                self.assertEqual(entry["duration_ms"], 1250)
+                self.assertEqual(entry["req_headers"], flow.request.headers)
+                self.assertNotIn("resp_headers", entry)
+                self.assertNotIn("req_body", entry)
+                self.assertNotIn("resp_body", entry)
+
+    def test_redacts_injected_headers_and_keeps_provider_context(self):
+        flow = self.failed_flow()
+        flow.request.headers.update({"Authorization": "Bearer secret", "X-Api-Key": "other-secret"})
+        flow.metadata.update(agentbox_injected_headers=["authorization", "x-api-key"],
+                             agentbox_provider="second", agentbox_providers=["first", "second"])
+        with patch.object(addon_module.log, "error") as log_error:
+            self.addon.error(flow)
+        entry = log_error.call_args.args[0]
+        self.assertEqual(entry["provider"], "second")
+        self.assertEqual(entry["providers"], ["first", "second"])
+        self.assertEqual(entry["req_headers"]["Authorization"], "[redacted]")
+        self.assertEqual(entry["req_headers"]["X-Api-Key"], "[redacted]")
+        self.assertNotIn("secret", json.dumps(entry))
+
+    def test_disabled_headers_and_bodies_are_not_read(self):
+        addon_module._log_req_hdr = False
+        flow = self.failed_flow()
+        flow.request.headers = Mock()
+        flow.request.get_text = Mock(side_effect=AssertionError("body logging disabled"))
+        with patch.object(addon_module.log, "error") as log_error:
+            self.addon.error(flow)
+        self.assertNotIn("req_headers", log_error.call_args.args[0])
+        flow.request.headers.items.assert_not_called()
+        flow.request.get_text.assert_not_called()
+
+    def test_partial_response_includes_enabled_headers_and_bodies(self):
+        addon_module._log_resp_hdr = addon_module._log_bodies = True
+        flow = self.failed_flow("Server disconnected")
+        flow.response = types.SimpleNamespace(status_code=200, timestamp_end=None,
+                                              headers={"Content-Type": "text/plain"},
+                                              get_text=lambda **kw: "partial response")
+        with patch.object(addon_module.log, "error") as log_error:
+            self.addon.error(flow)
+        entry = log_error.call_args.args[0]
+        self.assertEqual(entry["status"], 200)
+        self.assertEqual(entry["duration_ms"], 1250)
+        self.assertEqual(entry["resp_headers"], flow.response.headers)
+        self.assertEqual(entry["req_body"], "denied body")
+        self.assertEqual(entry["resp_body"], "partial response")
+
+    def test_body_logging_handles_missing_response(self):
+        addon_module._log_bodies = True
+        flow = self.failed_flow()
+        with patch.object(addon_module.log, "error") as log_error:
+            self.addon.error(flow)
+        entry = log_error.call_args.args[0]
+        self.assertEqual(entry["req_body"], "denied body")
+        self.assertIsNone(entry["resp_body"])
+
+    def test_error_before_request_is_available(self):
+        flow = self.failed_flow("Invalid HTTP request")
+        flow.request = None
+        with patch.object(addon_module.log, "error") as log_error:
+            self.addon.error(flow)
+        entry = log_error.call_args.args[0]
+        self.assertEqual(entry["error"], "Invalid HTTP request")
+        for key in ("method", "url", "status", "duration_ms"):
+            self.assertIsNone(entry[key])
+
+    def test_already_logged_denial_does_not_log_again(self):
+        flow = make_flow()
+        flow.metadata["agentbox_blocked"] = True
+        flow.error = types.SimpleNamespace(msg="Client disconnected", timestamp=101.25)
+        with (patch.object(addon_module.log, "info") as log_info,
+              patch.object(addon_module.log, "error") as log_error):
+            self.addon.error(flow)
+        log_info.assert_not_called()
+        log_error.assert_not_called()
+
+    def test_successful_response_keeps_access_log_format(self):
+        flow = make_flow()
+        flow.response = types.SimpleNamespace(status_code=200, timestamp_end=101.0)
+        with (patch.object(addon_module.log, "info") as log_info,
+              patch.object(addon_module.log, "error") as log_error):
+            self.addon.response(flow)
+        log_error.assert_not_called()
+        self.assertEqual(log_info.call_args.args[0], {
+            "method": "POST", "url": flow.request.pretty_url, "status": 200,
+            "duration_ms": 1000, "req_headers": flow.request.headers,
+        })
 
 
 class ForceHTTP1Test(unittest.TestCase):
@@ -283,7 +412,7 @@ class ReloadTest(unittest.IsolatedAsyncioTestCase):
         request = types.SimpleNamespace(host=host, pretty_host=host, port=443, path=path, method="POST",
                                         pretty_url=f"https://{host}{path}", timestamp_start=time.time(),
                                         headers=Headers(headers or {}), get_text=lambda **kw: "")
-        return types.SimpleNamespace(request=request, response=None, metadata={})
+        return types.SimpleNamespace(request=request, response=None, error=None, metadata={})
 
     async def test_protocol_changes_require_restart_and_keep_entire_runtime(self):
         previous = self.addon._cfg
