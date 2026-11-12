@@ -855,10 +855,10 @@ def _update_allowlist(host: str, add: bool, args) -> None:
             host = parts[0]
             port = int(parts[1])
 
-    escaped_host = re.escape(host)
+    host_pattern = host if getattr(args, "regex", False) else re.escape(host)
 
     def _rule_matches(r: dict) -> bool:
-        if r.get("host") != escaped_host:
+        if r.get("host") != host_pattern:
             return False
         if port is not None:
             return r.get("port") == port
@@ -866,7 +866,7 @@ def _update_allowlist(host: str, add: bool, args) -> None:
 
     if add:
         if not any(_rule_matches(r) for r in rules):
-            new_rule: dict = {"host": escaped_host}
+            new_rule: dict = {"host": host_pattern}
             if port is not None:
                 new_rule["port"] = port
             rules.append(new_rule)
@@ -1194,8 +1194,10 @@ def main() -> None:
     subparser_with_name(subcommand.add_parser("remove", help="Stop and delete a session (containers, volumes, git remote, output repo)"))
     allow_subcommand = subparser_with_name(subcommand.add_parser("allow", help="Add a host to the egress allowlist"))
     allow_subcommand.add_argument("host")
+    allow_subcommand.add_argument("-r", "--regex", action="store_true", help="Treat the host as a regex without escaping it")
     deny_subcommand = subparser_with_name(subcommand.add_parser("deny", help="Remove a host from the egress allowlist"))
     deny_subcommand.add_argument("host")
+    deny_subcommand.add_argument("-r", "--regex", action="store_true", help="Treat the host as a regex without escaping it")
     subparser_with_name(subcommand.add_parser("proxy-reload", help="Reload the proxy config without restarting"))
     subparser_with_name(subcommand.add_parser("proxy-restart", help="Restart the proxy container"))
     subcommand.add_parser("remote-cleanup", help="Remove agentbox-* git remotes with no matching session")
