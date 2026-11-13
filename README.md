@@ -121,7 +121,12 @@ agentbox status                                     # list all running agentbox 
 ```bash
 agentbox allow pypi.org [--name NAME]   # add host to allowlist (hot-reloads proxy config)
 agentbox deny  pypi.org [--name NAME]   # remove host from allowlist
+agentbox allow -r '.*\.example\.com'   # add a host regex verbatim (--regex also works)
+agentbox deny  -r '.*\.example\.com'   # remove that exact regex rule
 ```
+
+Hosts are escaped by default. Use `-r` / `--regex` to preserve the host regex
+verbatim. Both modes support a `:port` suffix (default: 443).
 
 To force HTTP/1.1 upstream for a destination, add the optional top-level
 `force_http1_hosts` list, separate from request policies:
