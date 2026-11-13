@@ -1273,8 +1273,6 @@ def main() -> None:
     deny_subcommand = subparser_with_name(subcommand.add_parser("deny", help="Remove a host from the egress allowlist"))
     deny_subcommand.add_argument("host")
     deny_subcommand.add_argument("-r", "--regex", action="store_true", help="Treat the host as a regex without escaping it")
-    subparser_with_name(subcommand.add_parser("proxy-reload", help="Reload the proxy config without restarting"))
-    subparser_with_name(subcommand.add_parser("proxy-restart", help="Restart the proxy container"))
     proxy_subcommand = subcommand.add_parser("proxy", help="Manage the session proxy and providers")
     proxy_subparser = proxy_subcommand.add_subparsers(dest="subcmd", required=True)
     subparser_with_name(proxy_subparser.add_parser(
