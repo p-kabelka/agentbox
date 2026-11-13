@@ -61,6 +61,16 @@ framework instead. Alternatively, copy `completions/zsh/_agentbox` into an
 existing directory on your `fpath`. Restart zsh; if an existing completion cache
 does not discover the new file, run `compinit -D` to rescan for the current shell.
 
+If you symlink `bin/agentbox` under another name, such as `~/.local/bin/ax`,
+register that name **after** `compinit` (or after loading your framework):
+
+```zsh
+compdef _agentbox ax
+```
+
+Keep the same `fpath` setup above. This enables all completions, including live
+session IDs, for `ax` as well.
+
 The script is packaged, not generated, so there is no `agentbox completions`
 command. Live candidates are queried when you press Tab; nothing is built,
 started, enabled, or reloaded. It uses Python 3 / PyYAML (already required by
