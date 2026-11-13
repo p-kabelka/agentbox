@@ -40,12 +40,14 @@ agentbox build base proxy claude
 ### Zsh completion
 
 The checked-in completion file covers all commands, nested subcommands, aliases,
-and options. Session IDs (`--session` / `-s`) are looked up across all projects;
-session names (`--name` / `-n`) are scoped to the current project. Presets,
-harnesses, providers, saved host rules, image tags, git references, and paths are
-completed where applicable. New session/preset names and other arbitrary values
-remain free-form. After `agentbox start --`, zsh completes the command and its
-arguments using the host's installed completions (the container may differ).
+and options. Session IDs (`--session` / `-s`) are read directly from session
+directories across all projects, without invoking agentbox, Python, or Podman or
+parsing Compose files. Session names (`--name` / `-n`) are scoped to the current
+project. Presets, harnesses, providers, saved host rules, image tags, git
+references, and paths are completed where applicable. New session/preset names
+and other arbitrary values remain free-form. After `agentbox start --`, zsh
+completes the command and its arguments using the host's installed completions
+(the container may differ).
 
 Add the completion directory to `fpath` **before** initializing completions in
 `~/.zshrc`:

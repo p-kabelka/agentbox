@@ -202,6 +202,12 @@ print -r -- '__COMPLETION_READY__'
         self.assertNotIn("bad ", output)
         return set(filter(None, self.matches_file.read_text().split("\0")))
 
+    def configure_shell(self, commands):
+        script = self.root / "configure.zsh"
+        script.write_text(commands + "\nprint -r -- '__CONFIGURED__'\n")
+        os.write(self.master, f"\x15source {shlex.quote(str(script))}\n".encode())
+        self.read_until(b"__CONFIGURED__")
+
     def test_commands_and_nested_commands(self):
         self.assertIn("init", self.complete("agentbox "))
         self.assertEqual(self.complete("agentbox proxy "), {"reload", "restart", "provider"})
@@ -234,6 +240,49 @@ print -r -- '__COMPLETION_READY__'
         self.assertEqual(self.complete("agentbox proxy restart --session "), {self.session_id, self.foreign_id})
         new_id = self.session("new", self.project)
         self.assertIn(new_id, self.complete("agentbox stop --session "))
+
+    def test_session_ids_do_not_invoke_agentbox_python_or_podman(self):
+        calls = self.root / "unexpected-commands"
+        for name in ("agentbox", "python3", "podman"):
+            executable = self.bin / name
+            executable.unlink(missing_ok=True)
+            executable.write_text(f"#!/bin/sh\necho {name} >> {shlex.quote(str(calls))}\nexit 1\n")
+            executable.chmod(0o755)
+        self.configure_shell(f"export PATH={shlex.quote(str(self.bin))}")
+        self.assertEqual(self.complete("agentbox stop --session "), {self.session_id, self.foreign_id})
+        self.assertEqual(self.complete("agentbox stop --session feat"), {self.session_id})
+        self.assertEqual(self.complete("agentbox stop --session unknown"), set())
+        self.assertFalse(calls.exists())
+
+    def test_session_id_lookup_checks_files_but_does_not_parse_them(self):
+        sessions = self.state / "sessions"
+        (sessions / "unfinished").mkdir()
+        invalid_file = sessions / "not-a-file" / "compose.yaml"
+        invalid_file.mkdir(parents=True)
+        compose = sessions / self.session_id / "compose.yaml"
+        compose.write_text("not: [valid YAML")
+        self.assertEqual(self.complete("agentbox stop --session "), {self.session_id, self.foreign_id})
+        compose.unlink()
+        self.assertEqual(self.complete("agentbox stop --session "), {self.foreign_id})
+        new_id = self.session("added", self.project)
+        self.assertEqual(self.complete("agentbox stop --session "), {new_id, self.foreign_id})
+        sessions.rename(self.root / "saved-sessions")
+        self.assertEqual(self.complete("agentbox stop --session "), set())
+
+    def test_session_ids_honor_state_directory_precedence_and_defaults(self):
+        xdg = self.root / "xdg state"
+        home = self.root / "home"
+        for directory, sid in ((xdg / "agentbox", "xdg-session"),
+                               (home / ".local" / "state" / "agentbox", "home-session")):
+            compose = directory / "sessions" / sid / "compose.yaml"
+            compose.parent.mkdir(parents=True)
+            compose.touch()
+        self.configure_shell(f"export HOME={shlex.quote(str(home))} XDG_STATE_HOME={shlex.quote(str(xdg))}")
+        self.assertEqual(self.complete("agentbox stop --session "), {self.session_id, self.foreign_id})
+        self.configure_shell("unset AGENTBOX_STATE")
+        self.assertEqual(self.complete("agentbox stop --session "), {"xdg-session"})
+        self.configure_shell("unset XDG_STATE_HOME")
+        self.assertEqual(self.complete("agentbox stop --session "), {"home-session"})
 
     def test_presets_and_harnesses_are_live(self):
         presets = {"default", "custom", "personal setup"}
@@ -311,7 +360,7 @@ print -r -- '__COMPLETION_READY__'
         for body in ("echo invalid-json", "echo query-failed >&2; exit 1", "echo '[]'"):
             executable.write_text("#!/bin/sh\n" + body + "\n")
             executable.chmod(0o755)
-            self.assertEqual(self.complete("agentbox stop --session "), set())
+            self.assertEqual(self.complete("agentbox proxy provider enable op"), set())
 
 
 if __name__ == "__main__":

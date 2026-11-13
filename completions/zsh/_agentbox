@@ -1,6 +1,6 @@
 #compdef agentbox
 
-# Static command/option definitions; live values come from read-only CLI queries.
+# Static definitions; live values come from CLI queries and filesystem lookups.
 # Keep these definitions in sync with bin/agentbox (tests/test_completions.py).
 
 _agentbox_json_values() {
@@ -26,9 +26,12 @@ except (ValueError, TypeError, AttributeError):
 
 _agentbox_sessions() {
   local -a values
-  local expl label
+  local expl label state_home
   if [[ $1 == id ]]; then
-    values=("${(@0)$(_agentbox_json_values session_id list --all --json)}")
+    state_home=${AGENTBOX_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agentbox}
+    # The parent directory is already the full ID. Only check that the Compose
+    # file exists; do not parse it or query container status on every Tab press.
+    values=("$state_home"/sessions/*/compose.yaml(N-.:h:t))
     label='session ID'
   else
     values=("${(@0)$(_agentbox_json_values name list --json)}")
