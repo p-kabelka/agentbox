@@ -62,9 +62,8 @@ def _session_id(name: str, project_dir: Path) -> str:
     return f"{name}-{h}"
 
 
-def _project_name(session_dir: Path) -> str:
+def _project_name(session_dir: Path, meta: dict) -> str:
     """Give each session its own Compose project, even if directories share a basename."""
-    meta = read_compose_metadata(session_dir)
     name = f"agentbox-{_base_project_name(Path(meta['project-dir']))}-{meta['name']}"
     return f"{name}-{hashlib.sha256(session_dir.name.encode()).hexdigest()[:12]}"
 
@@ -74,8 +73,8 @@ def _persistent_name(session_dir: Path, service: str) -> str:
     return f"agentbox-{digest}-{service}"
 
 
-def _persistent(session_dir: Path) -> bool:
-    value = read_compose_metadata(session_dir).get("persist", False)
+def _persistent(meta: dict) -> bool:
+    value = meta.get("persist", False)
     if not isinstance(value, bool):
         die("x-metadata.persist must be true or false")
     return value
@@ -148,7 +147,7 @@ def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProc
     }
     cmd = [
         "podman", "compose",
-        "--project-name", _project_name(session_dir),
+        "--project-name", _project_name(session_dir, read_compose_metadata(session_dir)),
         "-f", str((session_dir / "compose.yaml").resolve()),
         *args,
     ]
@@ -212,8 +211,7 @@ def read_compose_metadata(session_dir: Path) -> dict:
     return compose_cfg.get("x-metadata", {})
 
 
-def read_port(session_dir: Path) -> int | None:
-    compose_cfg = load_yaml(session_dir / "compose.yaml") if (session_dir / "compose.yaml").is_file() else {}
+def _proxy_port(compose_cfg: dict) -> int | None:
     ports = compose_cfg.get("services", {}).get("proxy", {}).get("ports", [])
     if ports:
         # "127.0.0.1:<port>:8081"
@@ -249,7 +247,7 @@ def _container_running(container: dict | None) -> bool:
 
 def _stop_persistent(session_dir: Path) -> None:
     result = compose(session_dir, "stop")
-    containers = _list_session_containers(session_dir)
+    containers = _list_session_containers(_project_name(session_dir, read_compose_metadata(session_dir)))
     if result.returncode or any(_container_running(c) for c in containers):
         die("could not stop both session containers; run agentbox stop and inspect the session")
 
@@ -609,7 +607,8 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
     with ExitStack() as lifetime:
         with _secret_sync_lock(session_dir):
             lifetime.enter_context(_persistent_lifetime(session_dir))
-            containers = {c["name"]: c for c in _list_session_containers(session_dir)}
+            project_name = _project_name(session_dir, read_compose_metadata(session_dir))
+            containers = {c["name"]: c for c in _list_session_containers(project_name)}
             agent = containers.get(name)
             if _container_running(agent):
                 die("session already running; use agentbox stop to recover an unattached agent")
@@ -633,7 +632,7 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
                     # only the agent service, without restarting the proxy or
                     # recreating an existing container after a YAML change.
                     compose(session_dir, "up", "--no-start", "--no-deps", "--no-recreate", "agent", check=True)
-                    if not any(c["name"] == name for c in _list_session_containers(session_dir)):
+                    if not any(c["name"] == name for c in _list_session_containers(project_name)):
                         die("Compose did not create the persistent agent service container")
             except BaseException:
                 if proxy_started_here:
@@ -649,7 +648,7 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
             with _secret_sync_lock(session_dir, if_exists=True) as exists:
                 if exists:
                     try:
-                        agent = next((c for c in _list_session_containers(session_dir) if c["name"] == name), None)
+                        agent = next((c for c in _list_session_containers(project_name) if c["name"] == name), None)
                         if agent and agent["state"] == "exited":
                             result = subprocess.run(["podman", "inspect", "--format", "{{.State.ExitCode}}", agent["id"]],
                                                     capture_output=True, text=True, check=True)
@@ -661,7 +660,7 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
 
 
 def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
-    if _persistent(session_dir):
+    if _persistent(read_compose_metadata(session_dir)):
         sys.exit(_launch_persistent(session_dir, cmd))
     with ExitStack() as lifetime:
         with _secret_sync_lock(session_dir):
@@ -686,10 +685,11 @@ def cmd_init(args) -> None:
 
     if (session_dir / "compose.yaml").is_file():
         with _secret_sync_lock(session_dir):
-            if _persistent(session_dir) != args.persist:
+            meta = read_compose_metadata(session_dir)
+            if _persistent(meta) != args.persist:
                 die("cannot change a session's persistence mode; create a new named session")
             if args.persist and any(c["name"] == _persistent_name(session_dir, "agent")
-                                    for c in _list_session_containers(session_dir)):
+                                    for c in _list_session_containers(_project_name(session_dir, meta))):
                 die("persistent agent already exists; use start or create a new session")
             _init_session(session_dir, project_dir, name, args)
     else:
@@ -796,7 +796,8 @@ def _init_session(session_dir: Path, project_dir: Path, name: str, args) -> None
             seen_dsts.add(dst)
 
     # Read existing port from compose.yaml if re-initializing, otherwise pick a free port
-    web_port = read_port(session_dir) or free_port()
+    compose_path = session_dir / "compose.yaml"
+    web_port = _proxy_port(load_yaml(compose_path) if compose_path.is_file() else {}) or free_port()
 
     generate_compose(
         session_dir=session_dir,
@@ -819,7 +820,7 @@ def cmd_start(args) -> None:
 def cmd_stop(args) -> None:
     session_dir, _ = resolve_session(args)
     with _secret_sync_lock(session_dir):
-        if _persistent(session_dir):
+        if _persistent(read_compose_metadata(session_dir)):
             _stop_persistent(session_dir)
         else:
             compose(session_dir, "down", check=True)
@@ -834,7 +835,8 @@ def cmd_logs(args) -> None:
 
 def cmd_web(args) -> None:
     session_dir, _ = resolve_session(args)
-    web_port = read_port(session_dir)
+    compose_path = session_dir / "compose.yaml"
+    web_port = _proxy_port(load_yaml(compose_path) if compose_path.is_file() else {})
     if not web_port:
         die("proxy port not found in session compose.yaml")
     print(f"http://localhost:{web_port}")
@@ -1052,14 +1054,15 @@ def _read_context_mounts(session_dir: Path) -> list[tuple[str, str, bool]]:
     return mounts
 
 
-def _session_activity(session_dir: Path, running: str) -> tuple[bool, bool, bool]:
-    persistent = _persistent(session_dir)
+def _session_activity(session_dir: Path, meta: dict, running: str) -> tuple[bool, bool, bool]:
+    persistent = _persistent(meta)
+    project_name = _project_name(session_dir, meta)
     if persistent:
-        containers = {c["name"]: c for c in _list_session_containers(session_dir)}
+        containers = {c["name"]: c for c in _list_session_containers(project_name)}
         agent = containers.get(_persistent_name(session_dir, "agent"))
         proxy = containers.get(_persistent_name(session_dir, "proxy"))
         return True, _container_running(agent), _container_running(proxy)
-    active = f"{_project_name(session_dir)}_" in running
+    active = f"{project_name}_" in running
     return False, active, active
 
 
@@ -1068,54 +1071,38 @@ def _list_sessions(show_all: bool) -> list[dict]:
     running = subprocess.run(["podman", "ps", "--filter", "label=com.docker.compose.project", "--format", "{{.Names}}"], capture_output=True, text=True).stdout.lower()
 
     entries: list[dict] = []
-
-    if show_all:
-        sessions_dir = AGENTBOX_STATE / "sessions"
-        if not sessions_dir.is_dir():
-            return []
-        for d in sorted(sessions_dir.iterdir()):
-            if not d.is_dir():
-                continue
-            meta = read_compose_metadata(d)
-            if not meta:
-                continue
-            name = meta["name"]
-            proj_dir = Path(meta["project-dir"])
-            port = read_port(d)
-            persistent, active, proxy_active = _session_activity(d, running)
-            url = f"http://localhost:{port}" if port and active and proxy_active else ""
-            entries.append({
-                "name": name,
-                "status": "running" if active else "stopped",
-                "url": url,
-                "project": str(proj_dir),
-                "session_id": d.name,
-                "persistent": persistent,
-            })
-    else:
-        project_dir = find_project_dir()
-        sessions = get_sessions(project_dir)
-        for s in sessions:
-            sid = _session_id(s, project_dir)
-            session_dir = AGENTBOX_STATE / "sessions" / sid
-            port = read_port(session_dir)
-            persistent, active, proxy_active = _session_activity(session_dir, running)
-            url = f"http://localhost:{port}" if port and active and proxy_active else ""
-            entries.append({
-                "name": s,
-                "status": "running" if active else "stopped",
-                "url": url,
-                "session_id": sid,
-                "persistent": persistent,
-            })
-
+    sessions_dir = AGENTBOX_STATE / "sessions"
+    if not sessions_dir.is_dir():
+        return entries
+    project_dir = None if show_all else str(find_project_dir().resolve())
+    for session_dir in sorted(sessions_dir.iterdir()):
+        compose_path = session_dir / "compose.yaml"
+        if not session_dir.is_dir() or not compose_path.is_file():
+            continue
+        cfg = load_yaml(compose_path)
+        meta = cfg.get("x-metadata", {})
+        if not meta or (not show_all and meta.get("project-dir") != project_dir):
+            continue
+        port = _proxy_port(cfg)
+        persistent, active, proxy_active = _session_activity(session_dir, meta, running)
+        entry = {
+            "name": meta["name"],
+            "status": "running" if active else "stopped",
+            "url": f"http://localhost:{port}" if port and active and proxy_active else "",
+        }
+        if show_all:
+            entry["project"] = meta["project-dir"]
+        entry.update(session_id=session_dir.name, persistent=persistent)
+        entries.append(entry)
+    if not show_all:
+        entries.sort(key=lambda entry: entry["name"])
     return entries
 
 
-def _list_session_containers(session_dir: Path) -> list[dict]:
+def _list_session_containers(project_name: str) -> list[dict]:
     """Collect container info dicts for listing."""
     result = subprocess.run(
-        ["podman", "ps", "-a", "--filter", f"label=com.docker.compose.project={_project_name(session_dir)}", "--format", "{{.ID}}\t{{.Names}}"],
+        ["podman", "ps", "-a", "--filter", f"label=com.docker.compose.project={project_name}", "--format", "{{.ID}}\t{{.Names}}"],
         capture_output=True, text=True, check=True,
     )
 
@@ -1172,7 +1159,7 @@ def cmd_list(args) -> None:
 def cmd_containers(args) -> None:
     session_dir, _ = resolve_session(args)
     as_json = getattr(args, "json", False)
-    entries = _list_session_containers(session_dir)
+    entries = _list_session_containers(_project_name(session_dir, read_compose_metadata(session_dir)))
 
     if as_json:
         print(json.dumps(entries, indent=2))

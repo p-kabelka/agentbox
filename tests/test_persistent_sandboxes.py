@@ -37,6 +37,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         (self.session / "proxy-config").mkdir()
         (self.session / "proxy-config" / "proxy.yaml").write_text("providers: []\n")
         self.agentbox["generate_compose"](self.session, self.project, "feature", 9876, {}, {}, [], persist=True)
+        self.project_name = self.agentbox["_project_name"](self.session, self.agentbox["read_compose_metadata"](self.session))
         self.args = types.SimpleNamespace(name="feature", session=None, exec_cmd=[])
         self.events = []
         self.starts = []
@@ -227,10 +228,10 @@ class PersistentSandboxesTest(unittest.TestCase):
 
     def test_container_listing_filters_compose_project(self):
         self.container("agent", project="other-project")
-        self.assertEqual(self.agentbox["_list_session_containers"](self.session), [])
+        self.assertEqual(self.agentbox["_list_session_containers"](self.project_name), [])
         self.containers.clear()
         other = self.container("agent")
-        self.assertEqual(self.agentbox["_list_session_containers"](self.session)[0]["name"], other["Name"])
+        self.assertEqual(self.agentbox["_list_session_containers"](self.project_name)[0]["name"], other["Name"])
 
     def test_compose_project_name_is_unique_in_both_modes(self):
         persistent_project = self.agentbox["_project"](self.session)
@@ -252,7 +253,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         with patch.dict(self.g, find_project_dir=lambda: self.project):
             entry = self.agentbox["_list_sessions"](False)[0]
         self.assertEqual((entry["status"], entry["persistent"], entry["url"]), ("stopped", True, ""))
-        self.assertEqual({c["state"] for c in self.agentbox["_list_session_containers"](self.session)}, {"exited"})
+        self.assertEqual({c["state"] for c in self.agentbox["_list_session_containers"](self.project_name)}, {"exited"})
         with redirect_stdout(io.StringIO()) as listing:
             self.agentbox["cmd_containers"](types.SimpleNamespace(json=False))
         self.assertIn("STATE", listing.getvalue())
@@ -330,14 +331,14 @@ class PersistentSandboxesTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()), self.assertRaises(SystemExit) as result:
             self.agentbox["cmd_init"](init)
         self.assertEqual(result.exception.code, 7)
-        self.assertTrue(self.agentbox["_persistent"](self.session))
+        self.assertTrue(self.agentbox["_persistent"](self.agentbox["read_compose_metadata"](self.session)))
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
         self.assertNotIn("command", cfg["services"]["agent"])
         self.assertIn(f"{self.project}:/context/reference:ro,Z", cfg["services"]["agent"]["volumes"])
         self.containers.clear()
         cfg["x-metadata"].pop("persist")
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
-        self.assertFalse(self.agentbox["_persistent"](self.session))
+        self.assertFalse(self.agentbox["_persistent"](self.agentbox["read_compose_metadata"](self.session)))
         original = (self.session / "compose.yaml").read_bytes()
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.agentbox["cmd_init"](init)
@@ -351,7 +352,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.containers[name] = {"Id": "ephemeral-id", "Name": name,
                                  "Config": {"Labels": {"com.docker.compose.project": self.agentbox["_project"](self.session)}},
                                  "State": {"Status": "exited", "Pid": 0, "Running": False}}
-        self.assertEqual(self.agentbox["_list_session_containers"](self.session),
+        self.assertEqual(self.agentbox["_list_session_containers"](self.project_name),
                          [{"id": "ephemeral-id", "pid": "0", "name": name, "state": "exited"}])
         with redirect_stdout(io.StringIO()) as listing:
             self.agentbox["cmd_containers"](types.SimpleNamespace(json=False))
