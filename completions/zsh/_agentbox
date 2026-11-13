@@ -1,0 +1,294 @@
+#compdef agentbox
+
+# Static command/option definitions; live values come from read-only CLI queries.
+# Keep these definitions in sync with bin/agentbox (tests/test_completions.py).
+
+_agentbox_json_values() {
+  local field=$1 data
+  shift
+  data=$(command "$agentbox_command" "$@" 2>/dev/null) || return 1
+  command python3 -c '
+import json, sys
+try:
+    rows = json.load(sys.stdin)
+    values = []
+    for row in rows:
+        if sys.argv[2] and row.get("name") != sys.argv[2]:
+            continue
+        value = row.get(sys.argv[1])
+        if isinstance(value, str) and value:
+            values.append(value.encode())
+    sys.stdout.buffer.write(b"\0".join(values))
+except (ValueError, TypeError, AttributeError):
+    pass
+' "$field" "${agentbox_filter_name:-}" <<< "$data" 2>/dev/null
+}
+
+_agentbox_sessions() {
+  local -a values
+  local expl label
+  if [[ $1 == id ]]; then
+    values=("${(@0)$(_agentbox_json_values session_id list --all --json)}")
+    label='session ID'
+  else
+    values=("${(@0)$(_agentbox_json_values name list --json)}")
+    label='session name'
+  fi
+  values=("${(@)values:#}")
+  _wanted sessions expl "$label" compadd -a values
+}
+
+# _arguments parses the whole line, including selectors after the cursor, and
+# normalizes attached values and grouped short options for us.
+_agentbox_selector() {
+  local name=${opt_args[--name]:-${opt_args[-n]}}
+  local session=${opt_args[--session]:-${opt_args[-s]}}
+  local word
+  # Zsh 5.9 keeps the entire clump as the value in e.g. -rnNAME / -rsID.
+  if (( $+opt_args[-r] )); then
+    for word in "${words[@]}"; do
+      [[ $word == -- ]] && break
+      case $word in
+        -r##n?*) name=${word#-r##n} ;;
+        -r##s?*) session=${word#-r##s} ;;
+      esac
+    done
+  fi
+  selector=()
+  if [[ -n $session ]]; then
+    selector=(--session "$session")
+  elif [[ -n $name ]]; then
+    selector=(--name "$name")
+  fi
+}
+
+_agentbox_providers() {
+  local -a selector values selected=("${(@b)${(@Q)line}}")
+  local expl
+  _agentbox_selector
+  values=("${(@0)$(_agentbox_json_values name proxy provider list "${selector[@]}" --json)}")
+  values=("${(@)values:#}")
+  _wanted providers expl provider compadd -F selected -a values
+}
+
+_agentbox_presets() {
+  local -a values
+  local expl
+  values=("${(@f)$(command "$agentbox_command" preset list 2>/dev/null)}")
+  values=("${(@)values:#}")
+  _wanted presets expl preset compadd -a values
+}
+
+_agentbox_harnesses() {
+  local home=${AGENTBOX_HOME:-$HOME/.local/share/agentbox} expl
+  local -a values selected=("${(@b)${(@Q)line}}")
+  values=("$home"/agent/Containerfile.*(N:t))
+  values=("${values[@]#Containerfile.}" proxy)
+  _wanted harnesses expl harness compadd -F selected -a values
+}
+
+_agentbox_tags() {
+  local expl
+  local -a values
+  values=(latest "${AGENTBOX_IMAGE_TAG:-latest}"
+    "${(@f)$(command podman images --filter 'reference=localhost/agentbox-*' --format '{{.Tag}}' 2>/dev/null)}")
+  values=("${(@u)values:#<none>}")
+  values=("${(@)values:#}")
+  _wanted image-tags expl 'image tag' compadd -a values
+}
+
+_agentbox_branches() {
+  local project=${(Q)${line[1]:-.}} expl
+  local -a values
+  values=(HEAD "${(@f)$(command git -C "$project" for-each-ref --format='%(refname:short)' refs/heads refs/remotes refs/tags 2>/dev/null)}")
+  _wanted git-references expl 'branch, tag or commit' compadd -a values
+}
+
+_agentbox_mounts() {
+  if [[ $PREFIX == *:* ]]; then
+    _message 'mount destination name'
+  else
+    _files
+  fi
+}
+
+_agentbox_exec() {
+  # Before an executable is chosen, offer agentbox options, not a literal '-'.
+  (( CURRENT == 1 )) && [[ $PREFIX == -* ]] && return 1
+  _normal
+}
+
+# deny needs the saved rule, not DNS's idea of the host. Literal mode only offers
+# rules that round-trip through re.escape; regex mode preserves the exact regex.
+_agentbox_rules() {
+  local -a selector ids values
+  local agentbox_filter_name='' regex=0 state_home expl
+  _agentbox_selector
+  if [[ $selector[1] == (--session|-s) ]]; then
+    ids=("$selector[2]")
+  else
+    agentbox_filter_name=$selector[2]
+    ids=("${(@0)$(_agentbox_json_values session_id list --json)}")
+  fi
+  (( $#ids == 1 )) && [[ -n $ids[1] ]] || return 1
+  (( $+opt_args[-r] || $+opt_args[--regex] )) && regex=1
+  state_home=${AGENTBOX_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/agentbox}
+  values=("${(@0)$(command python3 -c '
+import re, sys
+from pathlib import Path
+import yaml
+try:
+    state, session, regex = sys.argv[1:]
+    # Session IDs are directory names, never paths outside the state directory.
+    if Path(session).name != session or session in (".", ".."):
+        sys.exit()
+    cfg = yaml.safe_load((Path(state) / "sessions" / session / "proxy-config" / "proxy.yaml").read_text())
+    values = []
+    for rule in cfg.get("extra_request_policy", []):
+        host, port = rule.get("host"), rule.get("port", 443)
+        if not isinstance(host, str) or not isinstance(port, int):
+            continue
+        value = host
+        if regex == "0":
+            value = re.sub(r"\\(.)", r"\1", host)
+            if re.escape(value) != host:
+                continue
+        if port != 443:
+            value += ":" + str(port)
+        values.append(value.encode())
+    sys.stdout.buffer.write(b"\0".join(values))
+except (OSError, ValueError, TypeError, AttributeError, yaml.YAMLError):
+    pass
+' "$state_home" "$ids[1]" "$regex" 2>/dev/null)}")
+  values=("${(@)values:#}")
+  _wanted rules expl 'saved host rule' compadd -a values
+}
+
+_agentbox_hosts() {
+  if (( $+opt_args[-r] || $+opt_args[--regex] )); then
+    _agentbox_rules || _message 'host regex (optionally :port)'
+  else
+    _alternative 'rules:saved host rule:_agentbox_rules' 'hosts:host:_hosts'
+  fi
+}
+
+_agentbox() {
+  local curcontext=$curcontext state line
+  local -A opt_args
+  local agentbox_command=${(Q)words[1]} command_path=agentbox
+  local -a help session_options subcommands
+  help=('(-h --help)'{-h,--help}'[show help]')
+  session_options=(
+    '(-n --name -s --session)'{-n+,--name=}'[select a session in the current project]:session name: _agentbox_sessions name'
+    '(-n --name -s --session)'{-s+,--session=}'[select a session from any project]:session ID: _agentbox_sessions id'
+  )
+
+  # Each group only accepts its subcommand (and --help). Shift to the selected
+  # leaf so _arguments can handle options, = values, aliases and -- normally.
+  while (( CURRENT > 2 )); do
+    case $command_path in
+      agentbox|agentbox/proxy|agentbox/proxy/provider|agentbox/preset)
+        command_path+=/$words[2]
+        shift words
+        (( CURRENT-- )) ;;
+      *) break ;;
+    esac
+  done
+
+  case $command_path in
+    agentbox)
+      subcommands=(
+        'build:Build proxy and agent images'
+        'update:Rebuild images without cache'
+        'init:Initialize a session'
+        'start:Launch a session'
+        'stop:Stop a session'
+        'remove:Delete a session'
+        'logs:Follow the proxy log'
+        'web:Print the traffic-monitor URL'
+        'list:List sessions'
+        'ls:List sessions'
+        'containers:List session containers'
+        'status:List running containers'
+        'allow:Add an egress host rule'
+        'deny:Remove an egress host rule'
+        'proxy:Manage the proxy and providers'
+        'preset:Manage presets'
+        'remote-cleanup:Remove stale git remotes'
+      ) ;;
+    agentbox/proxy)
+      subcommands=(
+        'reload:Synchronize keys and reload configuration'
+        'restart:Restart the proxy and synchronize keys'
+        'provider:Manage saved provider settings'
+      ) ;;
+    agentbox/proxy/provider)
+      subcommands=(
+        'list:List configured providers'
+        'enable:Enable providers'
+        'disable:Disable providers'
+      ) ;;
+    agentbox/preset)
+      subcommands=('list:List presets' 'edit:Edit a preset' 'copy:Copy a preset') ;;
+    agentbox/build|agentbox/update)
+      _arguments -s -S "$help[@]" \
+        '(-t --tag)'{-t+,--tag=}'[set the image tag]:image tag:_agentbox_tags' \
+        '*:harness:_agentbox_harnesses'
+      return ;;
+    agentbox/init)
+      _arguments -s -S "$help[@]" \
+        '(-n --name)'{-n+,--name=}'[name the new session]:new session name:' \
+        '(-p --preset)'{-p+,--preset=}'[select a preset]:preset:_agentbox_presets' \
+        '--branch=[select the source git revision]:git revision:_agentbox_branches' \
+        '--no-git[skip git bundle and output repository setup]' \
+        '--persist[retain the agent container between starts]' \
+        '*--ro-mount=[add a read-only reference mount]:source path (optionally \:destination):_agentbox_mounts' \
+        '*--rw-mount=[add a writable reference mount]:source path (optionally \:destination):_agentbox_mounts' \
+        '--start[start the session after initialization]' \
+        '1:project directory:_files -/'
+      return ;;
+    agentbox/start)
+      _arguments -s -S "$help[@]" "$session_options[@]" '*:::command: _agentbox_exec'
+      return ;;
+    agentbox/stop|agentbox/remove|agentbox/web|agentbox/proxy/reload|agentbox/proxy/restart)
+      _arguments -s -S "$help[@]" "$session_options[@]"
+      return ;;
+    agentbox/logs)
+      _arguments -s -S "$help[@]" "$session_options[@]" \
+        '(-l --tail)'{-l+,--tail=}'[show only the last N lines]:number of lines:'
+      return ;;
+    agentbox/list|agentbox/ls)
+      _arguments -s -S "$help[@]" \
+        '(-a --all)'{-a,--all}'[list sessions across all projects]' \
+        '--json[output JSON]'
+      return ;;
+    agentbox/containers|agentbox/proxy/provider/list)
+      _arguments -s -S "$help[@]" "$session_options[@]" '--json[output JSON]'
+      return ;;
+    agentbox/allow|agentbox/deny)
+      _arguments -s -S "$help[@]" "$session_options[@]" \
+        '(-r --regex)'{-r,--regex}'[treat the host as a regex]' \
+        '1:host (optionally \:port):_agentbox_hosts'
+      return ;;
+    agentbox/proxy/provider/enable|agentbox/proxy/provider/disable)
+      _arguments -s -S "$help[@]" "$session_options[@]" '*:provider:_agentbox_providers'
+      return ;;
+    agentbox/preset/edit)
+      _arguments -s -S "$help[@]" '1:configuration:(proxy agent)' '2:preset:_agentbox_presets'
+      return ;;
+    agentbox/preset/copy)
+      _arguments -s -S "$help[@]" '1:source preset:_agentbox_presets' '2:new preset name:'
+      return ;;
+    agentbox/status|agentbox/remote-cleanup|agentbox/preset/list)
+      _arguments -s -S "$help[@]"
+      return ;;
+    *) return 1 ;;
+  esac
+
+  _arguments -s -S "$help[@]" '1:subcommand:->subcommand'
+  if [[ $state == subcommand ]]; then
+    _describe -t commands 'subcommand' subcommands
+  fi
+}
+
+_agentbox "$@"

@@ -1224,7 +1224,7 @@ def cmd_preset(args) -> None:
         print(f"Created preset '{args.dst}' from '{args.src}'. Edit: agentbox preset edit <proxy|agent> {args.dst}")
 
 
-def main() -> None:
+def build_parser() -> argparse.ArgumentParser:
     def subparser_with_name(p: argparse.ArgumentParser) -> argparse.ArgumentParser:
         p.add_argument("--name", "-n", metavar="NAME", help="Session name (auto-detected if only one session exists)")
         p.add_argument("--session", "-s", metavar="SESSION_ID", help="Full session ID (from 'agentbox list --all'); works from any directory")
@@ -1302,6 +1302,11 @@ def main() -> None:
     preset_copy.add_argument("src")
     preset_copy.add_argument("dst")
 
+    return parser
+
+
+def main() -> None:
+    parser = build_parser()
     args = parser.parse_args()
     if not args.cmd:
         parser.print_help()

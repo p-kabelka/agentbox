@@ -37,6 +37,38 @@ agentbox build
 agentbox build base proxy claude
 ```
 
+### Zsh completion
+
+The checked-in completion file covers all commands, nested subcommands, aliases,
+and options. Session IDs (`--session` / `-s`) are looked up across all projects;
+session names (`--name` / `-n`) are scoped to the current project. Presets,
+harnesses, providers, saved host rules, image tags, git references, and paths are
+completed where applicable. New session/preset names and other arbitrary values
+remain free-form. After `agentbox start --`, zsh completes the command and its
+arguments using the host's installed completions (the container may differ).
+
+Add the completion directory to `fpath` **before** initializing completions in
+`~/.zshrc`:
+
+```zsh
+fpath=("${AGENTBOX_HOME:-$HOME/.local/share/agentbox}/completions/zsh" $fpath)
+autoload -Uz compinit
+compinit
+```
+
+If a framework already runs `compinit`, put the `fpath` line before loading the
+framework instead. Alternatively, copy `completions/zsh/_agentbox` into an
+existing directory on your `fpath`. Restart zsh; if an existing completion cache
+does not discover the new file, run `compinit -D` to rescan for the current shell.
+
+The script is packaged, not generated, so there is no `agentbox completions`
+command. Live candidates are queried when you press Tab; nothing is built,
+started, enabled, or reloaded. It uses Python 3 / PyYAML (already required by
+agentbox), not `jq`. Keep agentbox on `PATH` and preserve any `AGENTBOX_HOME`,
+`AGENTBOX_STATE`, or `XDG_STATE_HOME` overrides in your shell.
+
+### Preset configuration
+
 Create a configuration preset for an agentbox:
 
 ```bash
@@ -382,7 +414,9 @@ agentbox update claude       # rebuild only the claude harness image
 ## Verification
 
 Run `python3 -m unittest discover -s tests -v` with PyYAML installed. Installing
-`podman-compose==1.5.0` enables native image-interpolation and Compose argument checks; installing the proxy's
+`zsh` enables real interactive Tab-completion tests and checks that every CLI
+command, option, alias, and positional argument has a completion definition.
+Installing `podman-compose==1.5.0` enables native image-interpolation and Compose argument checks; installing the proxy's
 mitmproxy dependency enables the real TLS/ALPN and HTTP streaming/reload regressions.
 TLS negotiation runs in memory without sockets. The streaming regression requires
 working local TCP listeners and reports a skip when the environment cannot provide them.
