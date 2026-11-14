@@ -3,6 +3,7 @@ FROM fedora:44
 RUN dnf install -y \
         curl \
         git \
+        python3 \
         ca-certificates \
         proxychains-ng \
         vim \
@@ -12,6 +13,7 @@ RUN dnf install -y \
     && dnf clean all
 
 COPY start.sh /start.sh
+COPY --chmod=755 clone_repos.py /usr/local/bin/agentbox-clone
 
 WORKDIR /workspace
 ENTRYPOINT ["/start.sh"]

@@ -262,7 +262,7 @@ class HostSecretsTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as exit:
                 self.agentbox["_launch"](self.session)
         self.assertEqual(exit.exception.code, 0)
-        up_index = self.events.index(("up", "-d", "proxy"))
+        up_index = self.events.index(("up", "-d", "--no-recreate", "proxy", "git"))
         sync_index = next(i for i, e in enumerate(self.events) if e[-1] == "sync")
         run_index = next(i for i, e in enumerate(self.events) if e[0] == "run")
         self.assertTrue(up_index < sync_index < run_index)

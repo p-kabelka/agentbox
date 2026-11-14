@@ -290,7 +290,7 @@ print -r -- '__COMPLETION_READY__'
         self.assertEqual(self.complete("agentbox preset edit proxy "), presets)
         self.assertEqual(self.complete("agentbox preset copy "), presets)
         self.assertEqual(self.complete("agentbox preset edit "), {"proxy", "agent"})
-        self.assertEqual(self.complete("agentbox build "), {"base", "claude", "custom-harness", "proxy"})
+        self.assertEqual(self.complete("agentbox build "), {"base", "claude", "custom-harness", "proxy", "git"})
         self.assertNotIn("base", self.complete("agentbox update base "))
         self.assertIn("base", self.complete("agentbox build --tag base "))
         (self.home / "agent" / "Containerfile.added").touch()
@@ -336,6 +336,9 @@ print -r -- '__COMPLETION_READY__'
         self.assertTrue({"HEAD", "completion-branch", "completion-tag"} <= self.complete("agentbox init --branch "))
         self.assertIn("completion-branch", self.complete(f"agentbox init {shlex.quote(str(self.project))} --branch "))
         self.assertIn("completion-branch", self.complete("agentbox init --branch ", " " + shlex.quote(str(self.project))))
+        self.assertIn("reference directory", self.complete("agentbox mount "))
+        self.assertIn("completion-branch", self.complete("agentbox mount --branch "))
+        self.assertEqual(self.complete("agentbox mount --as "), set())
         self.assertEqual(self.complete("agentbox build --tag "), {"latest", "stage", "testing"})
 
     def test_free_form_values_and_start_command_forwarding(self):

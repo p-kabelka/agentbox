@@ -35,18 +35,19 @@ This means even a fully compromised agent — one that dumps its entire environm
 
 ### 2.3 The network is a one-way valve
 
-All agent traffic must pass through the proxy, which enforces an allowlist. The proxy can reach the internet; the agent cannot. This is structurally enforced by the container network topology, not by firewall rules the agent could potentially bypass.
+All external agent traffic must pass through the proxy, which enforces an allowlist. Internal Git/catalog traffic goes directly to the Git sidecar. Only the proxy can reach the internet, enforced by container network topology rather than agent-controlled firewall rules.
 
-The proxy acts as both a gateway and an inspection point. Every request is logged. Blocked requests are recorded. The developer can see everything the agent tried to do.
+The proxy acts as both a gateway and an inspection point. External HTTP requests, including denials, are logged; internal Git traffic is not part of the proxy access log.
 
 ### 2.4 Git state flows through content-addressed objects only
 
 The agent never has access to the host's `.git/` directory. Instead:
 
-- **Input** arrives as a git bundle — a portable, read-only snapshot.
-- **Output** leaves through a bare repository that the agent pushes to.
+- **Input and output** travel through bare repositories in a per-session Git sidecar.
+- The host pushes committed history; the agent clones and pushes over the internal network.
+- No repository directory or sidecar data volume is mounted into the agent.
 
-The host never executes anything from the bare repository automatically. Output is always fetched with hook execution explicitly disabled, and the developer reviews commits before merging.
+The host never executes anything from the bare repository automatically. The developer explicitly fetches output and reviews commits before merging; Git transfers do not copy hooks or repository configuration.
 
 This converts the git interface from an execution surface into a data transport.
 
@@ -92,9 +93,11 @@ The system has three distinct trust zones separated by explicit boundaries:
 
 **Proxy → Agent (inbound)**: The proxy's fake metadata server issues dummy tokens to satisfy the agent's GCP auth library initialization. For direct API providers, the proxy serves as a CONNECT-tunneling proxy. The agent receives only what it needs to make API calls — not the credentials that authorise those calls. Real credentials are injected by the proxy addon on intercepted requests, never issued to the agent directly.
 
-**Agent → Proxy (outbound)**: All agent network traffic is intercepted by the proxy. The proxy is the only entity that can reach the internet. The agent cannot bypass this without a path that does not exist in the network topology.
+**Agent → Proxy (outbound)**: External agent traffic is intercepted by the proxy, the only service with an internet route. Direct internal Git traffic does not create an external egress path.
 
-**Agent → Host (filesystem)**: The agent has no write-capable mount into the host filesystem. The git bundle is read-only. The output bare repository has its `hooks/` directory and `config` file bind-mounted read-only (kernel-enforced). Reference mounts default to read-only.
+**Agent → Git sidecar**: Only Git object/ref operations and a read-only repository catalog are exposed. The daemon disables hooks and checks incoming objects. Repository configuration and hooks are not writable through the Git protocol. The sidecar stores data in a named volume, not a host repository directory.
+
+**Agent → Host (filesystem)**: Git-backed sessions have no writable host-directory bind mounts. Read-only dotfiles and proxy config remain mounted. `--no-git` explicitly selects a writable host workspace; other reference/OAuth/certificate mounts remain opt-ins. Git transfers use Podman stdin/stdout; the agent has no host repository path or container-engine socket in the default Git mode.
 
 ---
 
@@ -104,7 +107,7 @@ The system has three distinct trust zones separated by explicit boundaries:
 
 Two Podman networks are created per agentbox:
 
-- **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent container is connected only to this network.
+- **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent and Git sidecar are connected only to this network. Git/catalog traffic stays here and does not pass through the egress proxy.
 - **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy container is attached to this network.
 
 The proxy container is attached to both networks and is the sole egress point for all agent traffic.
@@ -186,17 +189,24 @@ so stage harnesses extend the stage base rather than the latest base.
 
 **`start.sh`** — Agent entrypoint. Performs in order:
 1. Waits for the mitmproxy CA certificate to appear, then appends it to the system PEM bundle only when the anchor changes and exports `SSL_CERT_FILE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO`, `REQUESTS_CA_BUNDLE`, and `NODE_EXTRA_CA_CERTS` so all common TLS libraries trust the proxy's certificate.
-2. If `/source/project.bundle` is present and `/workspace/.git` does not yet exist, clones the bundle to `/workspace`, renames the bundle remote from `origin` to `source`, adds the output bare repository as `origin`, and enables `push.autoSetupRemote` so the agent can push with just `git push`.
-3. Copies preset dotfiles from `/agentbox-dotfiles` over image defaults (including `.bashrc`) on first boot; later starts preserve home-directory edits.
-4. If arguments were passed (`$# > 0`), execs them directly. Otherwise execs `AGENT_HARNESS` with `AGENT_HARNESS_ARGS`, or falls back to bash.
+2. Copies read-only preset dotfiles over image defaults once, then runs `agentbox-clone --wait 80`: a one-shot clone of the main repository at `/workspace` and reference repositories at `/context/git/<name>`, enabling `push.autoSetupRemote`. `origin` is the internal sidecar. The wait provides bounded startup-readiness retries, not ongoing polling.
+3. If arguments were passed (`$# > 0`), execs them directly. Otherwise execs `AGENT_HARNESS` with `AGENT_HARNESS_ARGS`, or falls back to bash. No Git watcher or background discovery process is started.
+
+**`clone_repos.py`** — Installed as `agentbox-clone` in the agent image. Inside a running sandbox, `agentbox-clone NAME` explicitly clones a later share; without names, it reads the catalog once and clones missing shares. Existing clones, branches, uncommitted work, and nonempty destinations are never overwritten or automatically pulled. Updates to existing clones use explicit Git commands.
 
 **Traffic interception:** proxychains4 is configured in `dynamic_chain` mode. All libc-level TCP connections to external hosts are intercepted via `LD_PRELOAD` and tunneled through the mitmproxy CONNECT endpoint at `proxy:8080`. Additionally, `HTTPS_PROXY` and `HTTP_PROXY` environment variables are set so that tools which respect them use the proxy directly. Tools that respect neither mechanism are caught by proxychains at the syscall level.
 
-### 4.4 Compose Configuration
+### 4.4 Git Sidecar
 
-`compose-base.yaml` defines the shared service template: two networks (`agent-net` internal, `proxy-net` external), one named volume (`proxy-ca` for the mitmproxy CA cert), and base service definitions for the proxy and agent.
+`git/Containerfile` builds a small Fedora image with Git and standard-library Python. It runs as an unprivileged user with a read-only root filesystem, dropped capabilities, and a writable named volume at `/srv/git`. `git/server.py` supervises Git's daemon on port 9418 and serves only the read-only repository catalog on port 8083. Neither port is published. Host-only exec operations create bare repositories and publish the catalog after successful pushes. Hooks are explicitly disabled for daemon and host pack services; incoming objects are checked. CLI sharing never force-pushes; explicit manual Git operations keep normal ref-update semantics.
 
-At `agentbox init` time, the CLI merges `compose-base.yaml` with the preset configuration to produce a single `compose.yaml` in the session directory. This includes the web port, mounts for config, source bundle, protected output repo, dotfiles, context, explicit OAuth directories, and certificates. Provider source paths and target names are absent. Compose provides `/run/secrets:rw,noexec,nosuid,nodev,mode=0700` as a root-owned tmpfs (verified with `podman-compose` 1.5.0), without a feature-specific size limit. The CLI and secret helper use this store directly.
+`bin/git-remote-agentbox` implements Git's `connect` helper protocol. Host remotes identify the session with a file URI but stream Git pack operations through `podman exec -i`, never through a local bare repository or published TCP endpoint. A normal host fetch can start only the sidecar after teardown. See [SPEC-git-sidecar.md](SPEC-git-sidecar.md) for the publication and synchronization contract.
+
+### 4.5 Compose Configuration
+
+`compose-base.yaml` defines two networks (`agent-net` internal, `proxy-net` external), two named volumes (`proxy-ca`, `git-data`), and service definitions for the proxy, Git sidecar, and agent.
+
+At `agentbox init` time, the CLI merges `compose-base.yaml` with the preset configuration into a session `compose.yaml`. It contains the web port, named volumes, read-only config/dotfile mounts, and explicit workspace/context/OAuth/certificate mounts. Git share registrations live separately in `git-repositories.json`, so sharing does not rewrite infrastructure configuration. Provider secret targets are absent. Compose provides `/run/secrets:rw,noexec,nosuid,nodev,mode=0700` as a root-owned tmpfs, without a feature-specific size limit. Only provider credentials are synchronized through stdin; repository data uses Git.
 
 ---
 
@@ -213,9 +223,9 @@ The system is structured in five layers, each with a distinct responsibility:
                                │
 ┌──────────────────────────────┴─────────────────────────┐
 │  4. WORKSPACE                                          │
-│     git bundle (read-only input snapshot)              │
-│     bare output repository (write-only, hooks locked)  │
-│     reference mounts (read-only or read-write, /context/*)│
+│     internal Git sidecar (bare repos, hooks disabled)  │
+│     isolated clones (/workspace, /context/git/*)        │
+│     explicit reference mounts (opt-in, /context/*)     │
 └──────────────────────────────┬─────────────────────────┘
                                │
 ┌──────────────────────────────┴─────────────────────────┐
@@ -272,13 +282,13 @@ The GCE metadata server protocol is Google's own mechanism for credential distri
 
 The `GCE_METADATA_HOST` environment variable, respected by all Google auth client libraries, redirects token requests to the fake server without requiring any modification to the agent harness.
 
-### 6.4 Git bundle over direct directory mount
+### 6.4 Git sidecar over direct directory mounts
 
 Mounting the project directory directly into the agent container gives the agent write access to `.git/` and all tracked files simultaneously. Even a read-only mount exposes the git history, configuration, and potential credentials stored there.
 
-A git bundle is a single portable file containing the complete history of a branch. When the agent clones from it, it gets a fresh git repository with no mount path back to the host. The agent can commit, branch, and rebase freely inside the container without any of those operations affecting the host repository.
+Git protocol transfers only objects and refs into independent repositories. Both the main project and additional references use the same sidecar. New context can be published while the agent is running without adding mounts; the developer or agent then runs `agentbox-clone NAME` inside its existing shell, rather than relying on host exec into a krun VM. The agent can commit, branch, and rebase freely without affecting host worktrees.
 
-The output bare repository provides the reverse channel. It accepts pushes from the agent but cannot be used to inject code that runs on the host: the `hooks/` directory and `config` file are bind-mounted read-only into the agent container (kernel-enforced, not just `chmod`), and the developer retrieves commits with hook execution explicitly disabled. The `config` bind-mount specifically prevents the agent from setting `core.hooksPath` to a writable directory to bypass the hooks protection.
+The same bare repository provides the reverse channel. Its filesystem is not exposed to the agent at all; Git services disable hooks explicitly. The host fetches published commits manually and the developer reviews before merging. Named volumes survive ordinary teardown; host Git restarts only the sidecar when needed. Session removal destroys the volume. `--no-git` remains an explicit opt-in to a writable host workspace instead of this Git boundary.
 
 ### 6.5 Centralized session storage
 
@@ -298,7 +308,7 @@ At `agentbox init` time, `compose-base.yaml` (the shared template defining image
 
 The `compose.yaml` is generated at init and then user-owned: edits persist across `agentbox start` calls. Running `agentbox init` again regenerates an ephemeral session, preserving its web port and context mounts. Persistent sessions may be re-initialized only before the agent container has been created.
 
-By default, each `start` launches a removable one-off agent; multiple starts can share the proxy. `init --persist` instead gives the agent and proxy fixed service names under a session-specific Compose project. The first start creates the agent service with `compose up --no-start --no-deps --no-recreate agent`, then runs it with `podman start -ai`; later starts run that same service container with `podman start -ai`. Persistent proxy startup uses `compose up -d --no-recreate proxy` so a Compose YAML edit cannot tear down the retained agent. A nonblocking exclusive lifetime lock prevents a second owner, while the existing secret-sync lock covers proxy synchronization and agent creation. Releasing that lock before the blocking start permits `stop` and proxy reload, but allows `stop` to stop the proxy immediately before the agent starts. Exit and `stop` use `compose stop` so the writable agent filesystem survives; `remove` uses `compose down -v`. Compose saves the agent's image, mounts, environment, and command when creating it; changing `services.agent` later does not reconfigure that container on restart.
+By default, each `start` launches a removable one-off agent; multiple starts share both sidecars. `init --persist` instead gives the agent and proxy fixed service names; the Git service always has a fixed session-specific name. First start creates the agent with `compose up --no-start --no-deps --no-recreate agent`, then attaches with `podman start -ai`; later starts reuse it. Sidecar startup uses `--no-recreate` to protect retained agents after user Compose edits; sharing updates only a separate registry. Lifetime and synchronization locks protect ownership, configuration, startup, and teardown. Git publication (including the initial workspace push) and host transfers run outside those locks, allowing proxy reload and stop/remove without waiting for large transfers; teardown may interrupt sharing. Persistent cleanup stops all services; ephemeral cleanup tears them down while retaining named volumes. Published output remains available for manual fetching after either form of shutdown. `remove` uses `compose down -v`. Saved agent image/environment/mounts/command remain unchanged on restart.
 
 ### 6.7 Hot-reload over proxy restart for allowlist changes
 
@@ -348,6 +358,7 @@ The architecture is designed so that the most common customisations require no c
 | Open additional egress | `agentbox allow <host>` | No |
 | Switch agent harness | Create or select a preset with the desired `agent_image` and `AGENT_HARNESS` | No |
 | Add a read-only reference project | `agentbox init --ro-mount` | No |
+| Share another isolated Git repository | `agentbox mount REPO --session ID` | No |
 | Use a different preset per project | `agentbox init --preset` | No |
 | Trust a custom CA certificate | Add cert to `custom/certs/`, list in `trusted_certificates` | No |
 | Enable VM-level isolation | Install `crun-vm` / `krun`; `runtime: krun` is always generated in the compose | No |
@@ -362,7 +373,7 @@ The proxy's addon interface (mitmproxy's Python API) is the primary extension po
 
 **Security.** The system is designed so that the tools required for the primary attack classes are structurally absent from the agent container, not merely restricted by policy that could be circumvented. The proxy's code surface is intentionally minimal — three Python modules (`addon.py`, `provider.py`, `resolvers.py`), a small HTTP server (`metadata_server.py`), and a shell entrypoint — to make auditing practical.
 
-**Transparency.** Every network request the agent makes is visible. The mitmweb interface shows live traffic. The JSON access log is persistent. Blocked requests are recorded. A developer running an agent for the first time can watch exactly what it does.
+**Transparency.** The mitmweb interface and JSON access log show external HTTP traffic, including blocked requests. Internal Git/catalog requests do not pass through mitmproxy.
 
 **Usability.** The target for starting a new project agentbox is a single command after one-time setup. Configuration is in files, not flags. Mounts, allowlist changes, and harness selection are all handled without stopping and recreating the agentbox from scratch.
 

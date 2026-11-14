@@ -73,6 +73,7 @@ class ImageTagsTest(unittest.TestCase):
                     agent_cfg = yaml.safe_load((ROOT / "presets" / preset / "agent.yaml").read_text()) if preset else {}
                     services = self.generate(agent_cfg, tag)["services"]
                     self.assertEqual(services["proxy"]["image"], f"localhost/agentbox-proxy:{tag}")
+                    self.assertEqual(services["git"]["image"], f"localhost/agentbox-git:{tag}")
                     self.assertEqual(services["agent"]["image"], f"localhost/agentbox-agent-{harness}:{tag}")
                     self.assertNotIn("${", services["agent"]["image"])
                     self.assertNotIn("${", services["proxy"]["image"])
@@ -121,6 +122,7 @@ class ImageTagsTest(unittest.TestCase):
 
     def test_compose_config_receives_only_image_fields(self):
         resolved = {"services": {"proxy": {"image": "localhost/agentbox-proxy:stage"},
+                                 "git": {"image": "localhost/agentbox-git:stage"},
                                  "agent": {"image": "custom:stage"}}}
         with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
                 [], 0, stdout=yaml.safe_dump(resolved))) as run:
@@ -175,11 +177,11 @@ class ImageTagsTest(unittest.TestCase):
             agentbox["main"]()
         self.assertEqual(result.exception.code, 0)
         self.assertEqual((session / "compose.yaml").read_bytes(), original)
-        self.assertEqual(run.call_args_list[0].args[0][-3:], ["up", "-d", "proxy"])
+        self.assertEqual(run.call_args_list[0].args[0][-5:], ["up", "-d", "--no-recreate", "proxy", "git"])
         self.assertEqual(run.call_args_list[1].args[0][-4:], ["run", "--rm", "--no-deps", "agent"])
 
     def test_build_update_defaults_and_explicit_tag_override(self):
-        harnesses = ["base", "proxy", "opencode", "claude", "codex", "cursor"]
+        harnesses = ["base", "proxy", "git", "opencode", "claude", "codex", "cursor"]
         for command in ("build", "update"):
             for env_tag in ("latest", "stage"):
                 for override in (None, "canary", "latest"):
@@ -196,15 +198,15 @@ class ImageTagsTest(unittest.TestCase):
                         self.assertEqual(run.call_count, len(harnesses))
                         for harness, call in zip(harnesses, run.call_args_list):
                             args = call.args[0]
-                            ctx = ROOT / ("proxy" if harness == "proxy" else "agent")
-                            image = "agentbox-proxy" if harness == "proxy" else f"agentbox-agent-{harness}"
+                            ctx = ROOT / (harness if harness in ("proxy", "git") else "agent")
+                            image = f"agentbox-{harness}" if harness in ("proxy", "git") else f"agentbox-agent-{harness}"
                             self.assertEqual(args[:2], ["podman", "build"])
                             self.assertEqual(args[args.index("-t") + 1], f"localhost/{image}:{tag}")
                             self.assertEqual(args[args.index("-f") + 1],
                                              str(ctx / self.g["HARNESS_CONTAINERFILES"][harness]))
                             self.assertEqual(args[-1], str(ctx))
                             self.assertEqual("--no-cache" in args, command == "update")
-                            if harness not in ("base", "proxy"):
+                            if harness not in ("base", "proxy", "git"):
                                 self.assertEqual(args[args.index("--build-arg") + 1], f"AGENTBOX_IMAGE_TAG={tag}")
                             self.assertEqual("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1" in args,
                                              harness == "opencode")
@@ -228,6 +230,7 @@ class ImageTagsTest(unittest.TestCase):
         expected = {f"localhost/agentbox-agent-{name}:stage"
                     for name in ("base", "claude", "codex", "cursor", "opencode")}
         expected.add("localhost/agentbox-proxy:stage")
+        expected.add("localhost/agentbox-git:stage")
         self.assertEqual(images[0], "localhost/agentbox-agent-base:stage")
         self.assertEqual(set(images), expected)
 

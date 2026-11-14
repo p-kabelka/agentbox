@@ -13,10 +13,12 @@ import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import ExitStack, contextmanager
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Iterator, NamedTuple, NoReturn
+from urllib.parse import unquote, urlsplit
 
 import yaml
 
@@ -35,7 +37,8 @@ HARNESS_CONTAINERFILES = {
     p.name.split(".", 1)[1]: p.name
     for p in sorted((AGENTBOX_HOME / "agent").glob("Containerfile.*"))
 }
-HARNESS_CONTAINERFILES.update({"proxy": "Containerfile"})
+HARNESS_CONTAINERFILES.update({"proxy": "Containerfile", "git": "Containerfile"})
+GIT_REPOSITORY_NAME = re.compile(r"(?=.{1,100}\Z)[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", re.ASCII)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -43,11 +46,6 @@ HARNESS_CONTAINERFILES.update({"proxy": "Containerfile"})
 def die(msg: str) -> NoReturn:
     print(f"error: {msg}", file=sys.stderr)
     sys.exit(1)
-
-
-def _base_project_name(path: Path) -> str:
-    name = re.sub(r"[^a-z0-9]+", "-", path.resolve().name.lower()).strip("-")
-    return name or "agentbox"
 
 
 def free_port() -> int:
@@ -63,9 +61,9 @@ def _session_id(name: str, project_dir: Path) -> str:
 
 
 def _project_name(session_dir: Path, meta: dict) -> str:
-    """Give each session its own Compose project, even if directories share a basename."""
-    name = f"agentbox-{_base_project_name(Path(meta['project-dir']))}-{meta['name']}"
-    return f"{name}-{hashlib.sha256(session_dir.name.encode()).hexdigest()[:12]}"
+    project = re.sub(r"[^a-z0-9]+", "-", Path(meta["project-dir"]).resolve().name.lower()).strip("-") or "agentbox"
+    digest = hashlib.sha256(session_dir.name.encode()).hexdigest()[:12]
+    return f"agentbox-{project}-{meta['name']}-{digest}"
 
 
 def _persistent_name(session_dir: Path, service: str) -> str:
@@ -155,7 +153,8 @@ def compose(session_dir: Path, *args: str, **kwargs) -> subprocess.CompletedProc
 
 
 @contextmanager
-def _secret_sync_lock(session_dir: Path, *, if_exists: bool = False) -> Iterator[bool]:
+def _secret_sync_lock(session_dir: Path, *, if_exists: bool = False, initializing: bool = False) -> Iterator[bool]:
+    """Serialize configuration, credential synchronization, and service lifecycle changes."""
     try:
         lock = (session_dir / ".secret-sync.lock").open("a")
     except FileNotFoundError:
@@ -166,7 +165,7 @@ def _secret_sync_lock(session_dir: Path, *, if_exists: bool = False) -> Iterator
     with lock:
         fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
         # A remove command may have deleted the session while we waited.
-        if not (session_dir / "compose.yaml").is_file():
+        if not initializing and not (session_dir / "compose.yaml").is_file():
             if if_exists:
                 yield False
                 return
@@ -206,9 +205,8 @@ def _persistent_lifetime(session_dir: Path) -> Iterator[None]:
 
 
 def read_compose_metadata(session_dir: Path) -> dict:
-    """Read x-metadata from the session's compose.yaml."""
-    compose_cfg = load_yaml(session_dir / "compose.yaml") if (session_dir / "compose.yaml").is_file() else {}
-    return compose_cfg.get("x-metadata", {})
+    path = session_dir / "compose.yaml"
+    return load_yaml(path).get("x-metadata", {}) if path.is_file() else {}
 
 
 def _proxy_port(compose_cfg: dict) -> int | None:
@@ -249,7 +247,7 @@ def _stop_persistent(session_dir: Path) -> None:
     result = compose(session_dir, "stop")
     containers = _list_session_containers(_project_name(session_dir, read_compose_metadata(session_dir)))
     if result.returncode or any(_container_running(c) for c in containers):
-        die("could not stop both session containers; run agentbox stop and inspect the session")
+        die("could not stop all session containers; run agentbox stop and inspect the session")
 
 
 class SecretReference(NamedTuple):
@@ -409,6 +407,7 @@ def generate_compose(
     agent_cfg: dict,
     context_mounts: list[tuple[str, str, bool]],
     persist: bool = False,
+    no_git: bool = False,
 ) -> None:
     """Build a unified compose.yaml from compose-base.yaml and preset config."""
     base = load_yaml(AGENTBOX_HOME / "compose-base.yaml")
@@ -416,7 +415,7 @@ def generate_compose(
     # Resolve only image references, after the preset has selected the agent image.
     agent = base["services"]["agent"]
     agent["image"] = agent_cfg.get("agent_image", agent["image"])
-    images = _resolve_images({name: base["services"][name]["image"] for name in ("proxy", "agent")})
+    images = _resolve_images({name: service["image"] for name, service in base["services"].items()})
     for service, image in images.items():
         base["services"][service]["image"] = image
 
@@ -425,8 +424,10 @@ def generate_compose(
         "project-dir": str(project_dir.resolve()),
         "name": name,
         "persist": persist,
+        "no-git": no_git,
     }
 
+    base["services"]["git"]["container_name"] = _persistent_name(session_dir, "git")
     if persist:
         for service in ("agent", "proxy"):
             base["services"][service]["container_name"] = _persistent_name(session_dir, service)
@@ -468,20 +469,10 @@ def generate_compose(
     agent_volumes: list = agent.get("volumes", [])
     if (session_dir / "dotfiles").is_dir():
         agent_volumes.append("./dotfiles:/agentbox-dotfiles:ro,Z")
-    has_bundle = (session_dir / "source.bundle").is_file()
-    output_dir = session_dir / "output.git"
-    if has_bundle:
-        agent_volumes.append("./source.bundle:/source/project.bundle:ro,Z")
-    if output_dir.is_dir():
-        agent_volumes.append("./output.git:/output/repo.git:Z")
-        # Read-only bind mount over hooks and git config — kernel-enforced, not just chmod.
-        # Without this the agent can chmod 755 the dir and write executable
-        # hooks or custom scripts in git config.
-        agent_volumes.append("./output.git/hooks:/output/repo.git/hooks:ro")
-        agent_volumes.append("./output.git/config:/output/repo.git/config:ro")
-    if not has_bundle and not output_dir.is_dir():
+    if no_git:
         agent_volumes.append(f"{project_dir}:/workspace:Z")
     for src, dst, writable in context_mounts:
+        _validate_context_destination(dst)
         opts = "Z" if writable else "ro,Z"
         agent_volumes.append(f"{src}:/context/{dst}:{opts}")
     agent["volumes"] = agent_volumes
@@ -522,11 +513,11 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
     build_env = dict(os.environ)
 
     for name in targets:
-        agent_ctx = AGENTBOX_HOME / ("proxy" if name == "proxy" else "agent")
+        agent_ctx = AGENTBOX_HOME / (name if name in ("proxy", "git") else "agent")
         image_tag = f"localhost/agentbox-agent-{name}:{tag}"
 
-        if name == "proxy":
-            image_tag = f"localhost/agentbox-proxy:{tag}"
+        if name in ("proxy", "git"):
+            image_tag = f"localhost/agentbox-{name}:{tag}"
 
         containerfile = HARNESS_CONTAINERFILES[name]
         cf_path = agent_ctx / containerfile
@@ -539,7 +530,7 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
                 f"         curl -fsSLo {agent_ctx / 'keys' / 'claude-code.asc'} https://downloads.claude.ai/keys/claude-code.asc\n"
                 f"         gpg --show-keys --fingerprint {agent_ctx / 'keys' / 'claude-code.asc'}")
 
-        build_args = [] if name in ("base", "proxy") else ["--build-arg", f"AGENTBOX_IMAGE_TAG={tag}"]
+        build_args = [] if name in ("base", "proxy", "git") else ["--build-arg", f"AGENTBOX_IMAGE_TAG={tag}"]
         secret_args: list[str] = []
         if name == "opencode":
             skip_opencode_verify = os.environ.get("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION", "")
@@ -554,7 +545,7 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
             if gh_token:
                 build_env["_AGENTBOX_GH_TOKEN"] = gh_token
 
-        print(f"==> Building {name} agent image...")
+        print(f"==> Building {name} image...")
         subprocess.run(
             ["podman", "build", *extra, *build_args, *secret_args, "-f", str(cf_path), "-t", image_tag, str(agent_ctx)],
             check=True,
@@ -584,22 +575,177 @@ def cmd_update(args) -> None:
     print("==> Done.")
 
 
-def _fetch_output(session_dir: Path) -> None:
-    output_git = session_dir / "output.git"
-    if not output_git.is_dir():
-        return
-    meta = read_compose_metadata(session_dir)
-    name = meta["name"]
-    project_dir = Path(meta["project-dir"])
-    print(f"\n==> Fetching agent output (agentbox-{name})...")
-    r = subprocess.run(["git", "-C", str(project_dir), "-c", "core.hooksPath=/dev/null", "fetch", f"agentbox-{name}"])
-    if r.returncode == 0:
-        ls = subprocess.run(["git", "-C", str(project_dir), "branch", "-r", "--list", f"agentbox-{name}/*"], capture_output=True, text=True)
-        branches = [b.strip() for b in ls.stdout.splitlines() if b.strip()]
-        for b in branches:
-            print(f"  {b}")
-        if branches:
-            print(f"  To apply: git merge {branches[0]}")
+def _git_repositories(session_dir: Path) -> dict[str, str]:
+    """Map sidecar names to host Git common directories, shared by linked worktrees."""
+    try:
+        repositories = json.loads((session_dir / "git-repositories.json").read_text())
+    except FileNotFoundError:
+        return {}
+    except ValueError:
+        die("Invalid git-repositories.json; expected a JSON object")
+    if not isinstance(repositories, dict) or any(
+        not GIT_REPOSITORY_NAME.fullmatch(name) or not isinstance(path, str) or not Path(path).is_absolute()
+        for name, path in repositories.items()
+    ):
+        die("Invalid git-repositories.json; expected repository names and absolute Git directories")
+    return repositories
+
+
+def _save_git_repositories(session_dir: Path, repositories: dict[str, str]) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".git-repositories-", dir=session_dir)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(repositories, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        os.replace(temporary, session_dir / "git-repositories.json")
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def _git_remote_name(session_dir: Path) -> str:
+    return f"agentbox-{session_dir.name}"
+
+
+def _git_url(session_dir: Path, name: str) -> str:
+    return f"agentbox::{session_dir.resolve().as_uri()}#{name}"
+
+
+def _parse_git_url(url: str) -> tuple[Path, str]:
+    parsed = urlsplit(url.removeprefix("agentbox::"))
+    if (parsed.scheme != "file" or parsed.netloc or parsed.query
+            or not GIT_REPOSITORY_NAME.fullmatch(parsed.fragment)):
+        raise ValueError("Invalid agentbox Git URL")
+    session_dir = Path(unquote(parsed.path))
+    if not session_dir.is_absolute():
+        raise ValueError("Invalid agentbox session path")
+    return session_dir, parsed.fragment
+
+
+def _start_git(session_dir: Path) -> None:
+    if not (session_dir / "compose.yaml").is_file():
+        die("session removed before starting Git")
+    # Never recreate a running or retained agent after user edits to Compose.
+    compose(session_dir, "up", "-d", "--no-deps", "--no-recreate", "git", check=True, stdout=sys.stderr)
+
+
+def _git_environment(session_dir: Path) -> dict[str, str]:
+    return {**os.environ,
+            "PATH": str(Path(__file__).resolve().parent) + os.pathsep + os.environ.get("PATH", ""),
+            # Sharing already started the sidecar. Do not restart it if stop or
+            # remove interrupted publication before the push connected.
+            "AGENTBOX_GIT_STARTED": str(session_dir.resolve())}
+
+
+def git_remote_helper(url: str) -> int:
+    """Git's connect-helper protocol; stream packs through Podman, never a host port."""
+    session_dir, repository = _parse_git_url(url)
+    while line := sys.stdin.buffer.readline():
+        command = line.rstrip(b"\n")
+        if command == b"capabilities":
+            sys.stdout.write("connect\n\n")
+            sys.stdout.flush()
+        elif command.startswith(b"option "):
+            sys.stdout.write("unsupported\n")
+            sys.stdout.flush()
+        elif command in (b"connect git-upload-pack", b"connect git-receive-pack"):
+            if repository not in _git_repositories(session_dir):
+                die("repository is not registered in this session")
+            if os.environ.get("AGENTBOX_GIT_STARTED") != str(session_dir.resolve()):
+                _start_git(session_dir)
+            # Transfers never hold the proxy/lifecycle lock: stop/remove may
+            # interrupt them, and proxy reload must not wait for large packs.
+            service = command.split()[1].decode().removeprefix("git-")
+            env_args = ["--env", "GIT_PROTOCOL"] if "GIT_PROTOCOL" in os.environ else []
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            return subprocess.run([
+                "podman", "exec", "-i", *env_args, _persistent_name(session_dir, "git"),
+                "git", "-c", "core.hooksPath=/dev/null", service,
+                f"/srv/git/repos/{repository}.git",
+            ]).returncode
+        else:
+            die("unsupported agentbox Git helper command")
+    return 0
+
+
+class RepositoryRevision(NamedTuple):
+    path: Path
+    git_dir: Path
+    branch: str
+    commit: str
+    object_format: str
+
+
+def _repository_revision(path: Path, revision: str) -> RepositoryRevision:
+    def git(*args, **kwargs):
+        return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True, **kwargs)
+
+    bare = git("rev-parse", "--is-bare-repository")
+    if bare.returncode:
+        die(f"not a Git repository: {path}")
+    root = git("rev-parse", "--absolute-git-dir" if bare.stdout.strip() == "true" else "--show-toplevel")
+    if root.returncode:
+        die(f"cannot resolve Git repository: {path}")
+    common = git("rev-parse", "--path-format=absolute", "--git-common-dir", check=True)
+    commit = git("rev-parse", "--verify", "--end-of-options", (revision or "HEAD") + "^{commit}")
+    if commit.returncode:
+        die(f"Git revision '{revision or 'HEAD'}' has no commit; commit your work before sharing it")
+    ref = git("rev-parse", "--symbolic-full-name", "--verify", "--end-of-options", revision or "HEAD")
+    full_ref = ref.stdout.strip()
+    branch = full_ref[len("refs/heads/"):] if full_ref.startswith("refs/heads/") else "snapshot-" + commit.stdout.strip()[:12]
+    object_format = git("rev-parse", "--show-object-format", check=True).stdout.strip()
+    return RepositoryRevision(Path(root.stdout.strip()).resolve(), Path(common.stdout.strip()).resolve(),
+                              branch, commit.stdout.strip(), object_format)
+
+
+def _mount_repository(session_dir: Path, path: Path, name: str | None = None, revision: str = "") -> None:
+    """Share without the lifecycle lock; publish the catalog only after pushing."""
+    repository = _repository_revision(path, revision)
+    path, git_dir, branch, commit, object_format = repository
+    entries = _git_repositories(session_dir)
+    shared_name = next((key for key, value in entries.items() if value == str(git_dir)), None)
+    if name is None:
+        name = shared_name or path.name.removesuffix(".git")
+        if name == "workspace" and shared_name is None:
+            die("'workspace' is reserved for agentbox init; choose --as NAME")
+    if shared_name and shared_name != name:
+        die(f"repository is already shared as '{shared_name}'; use git push {_git_remote_name(session_dir)} to publish other branches")
+    if not GIT_REPOSITORY_NAME.fullmatch(name):
+        die("invalid repository name — use 1–100 characters in slash-separated components of lowercase letters, digits, dots, underscores, or hyphens; start each component with a letter or digit")
+    if name in entries and entries[name] != str(git_dir):
+        die(f"repository name '{name}' is already shared from {entries[name]}")
+    remote = _git_remote_name(session_dir)
+    url = _git_url(session_dir, name)
+    previous = subprocess.run(["git", "-C", str(path), "remote", "get-url", remote],
+                              capture_output=True, text=True)
+    if previous.returncode == 0 and previous.stdout.strip() != url:
+        die(f"remote '{remote}' already points elsewhere; rename it before sharing this repository")
+
+    _start_git(session_dir)
+    compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "init", name, branch,
+            object_format, check=True)
+    if previous.returncode:
+        subprocess.run(["git", "-C", str(path), "remote", "add", remote, url], check=True)
+    entries[name] = str(git_dir)
+    _save_git_repositories(session_dir, entries)
+    # No force or mirror push: never overwrite commits already published by an agent.
+    subprocess.run(["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "push", "--follow-tags",
+                    remote, f"{commit}:refs/heads/{branch}"], check=True, env=_git_environment(session_dir))
+    compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "publish", name, branch, check=True)
+    destination = "/workspace" if name == "workspace" else f"/context/git/{name}"
+    print(f"==> Shared {path} for {destination} (branch: {branch}).")
+    print(f"==> Cloned at next agent start. In a running sandbox: agentbox-clone {name}")
+    print(f"==> Remote '{remote}' registered — git fetch {remote} to review output.")
+    if not shutil.which("git-remote-agentbox"):
+        print(f"    Add {Path(__file__).resolve().parent} to PATH (including git-remote-agentbox) for host git push/fetch.")
+
+
+def cmd_mount(args) -> None:
+    session_dir, _ = resolve_session(args)
+    path = Path(args.repo or ".").expanduser().resolve()
+    if args.repo_name == "workspace":
+        die("'workspace' is reserved for the repository shared by agentbox init; choose --as NAME")
+    _mount_repository(session_dir, path, args.repo_name, args.branch)
 
 
 def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
@@ -620,7 +766,7 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
             try:
                 # podman-compose's up otherwise tears down *all* services when
                 # the Compose YAML changes, including a retained agent.
-                compose(session_dir, "up", "-d", "--no-recreate", "proxy", check=True)
+                compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", check=True)
                 _synchronize_proxy(session_dir, full, providers, sources)
                 del sources
                 if agent is None:
@@ -653,9 +799,8 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
                             result = subprocess.run(["podman", "inspect", "--format", "{{.State.ExitCode}}", agent["id"]],
                                                     capture_output=True, text=True, check=True)
                             exit_code = int(result.stdout.strip())
-                        _stop_persistent(session_dir)
                     finally:
-                        _fetch_output(session_dir)
+                        _stop_persistent(session_dir)
         return exit_code if isinstance(exit_code, int) else attached
 
 
@@ -665,13 +810,12 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     with ExitStack() as lifetime:
         with _secret_sync_lock(session_dir):
             full, providers, sources = _secret_preflight(session_dir)
-            compose(session_dir, "up", "-d", "proxy", check=True)
+            compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", check=True)
             _synchronize_proxy(session_dir, full, providers, sources)
             del sources
             lifetime.enter_context(_proxy_lifetime(session_dir))
         # Dependency startup would be another proxy lifecycle action outside the lock.
         result = compose(session_dir, "run", "--rm", "--no-deps", "agent", *(cmd or []))
-    _fetch_output(session_dir)
     sys.exit(result.returncode)
 
 
@@ -683,17 +827,26 @@ def cmd_init(args) -> None:
     session_id = _session_id(name, project_dir)
     session_dir = AGENTBOX_STATE / "sessions" / session_id
 
-    if (session_dir / "compose.yaml").is_file():
-        with _secret_sync_lock(session_dir):
+    session_dir.mkdir(parents=True, exist_ok=True)
+    with _secret_sync_lock(session_dir, initializing=True):
+        if (session_dir / "compose.yaml").is_file():
             meta = read_compose_metadata(session_dir)
             if _persistent(meta) != args.persist:
                 die("cannot change a session's persistence mode; create a new named session")
+            if meta.get("no-git", False) != args.no_git:
+                die("cannot change a session's workspace transport; create a new named session")
             if args.persist and any(c["name"] == _persistent_name(session_dir, "agent")
                                     for c in _list_session_containers(_project_name(session_dir, meta))):
                 die("persistent agent already exists; use start or create a new session")
-            _init_session(session_dir, project_dir, name, args)
-    else:
         _init_session(session_dir, project_dir, name, args)
+
+    # Large initial pushes must not block stop/remove or proxy operations either.
+    if not args.no_git:
+        in_repo = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "--git-dir"], capture_output=True).returncode == 0
+        if in_repo:
+            _mount_repository(session_dir, project_dir, "workspace", args.branch)
+        else:
+            print("==> No Git repository found; /workspace will be empty (no host mount).")
 
     if args.start:
         _launch(session_dir)
@@ -731,47 +884,11 @@ def _init_session(session_dir: Path, project_dir: Path, name: str, args) -> None
         dotfiles_dir = session_dir / "dotfiles"
         for rel_path, content in dotfiles.items():
             clean = rel_path.lstrip("~").lstrip("/")
+            if not PurePosixPath(clean).parts or ".." in PurePosixPath(clean).parts:
+                die(f"invalid dotfile path: {rel_path}")
             dest = dotfiles_dir / clean
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_text(content or "")
-
-    use_git = not args.no_git
-    if use_git:
-        in_repo = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "--git-dir"], capture_output=True).returncode == 0
-
-        if in_repo:
-            branch = args.branch
-            if not branch:
-                branch = subprocess.run(["git", "-C", str(project_dir), "branch", "--show-current"], capture_output=True, text=True).stdout.strip()
-            if not branch:  # detached HEAD
-                branch = subprocess.run(["git", "-C", str(project_dir), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True).stdout.strip()
-                print(f"    Detached HEAD — snapshotting commit {branch}")
-
-            print(f"==> Creating source bundle (branch: {branch})...")
-            subprocess.run(
-                ["git", "-C", str(project_dir), "bundle", "create",
-                 str(session_dir / "source.bundle"), "HEAD", branch],
-                check=True,
-            )
-
-            output_git = session_dir / "output.git"
-            subprocess.run(["git", "init", "--bare", str(output_git), "--quiet"], check=True)
-            (output_git / "hooks").mkdir(exist_ok=True)
-            (output_git / "config").touch(exist_ok=True)
-
-            remote = f"agentbox-{name}"
-            has_remote = subprocess.run(
-                ["git", "-C", str(project_dir), "remote", "get-url", remote],
-                capture_output=True,
-            ).returncode == 0
-            if has_remote:
-                subprocess.run(["git", "-C", str(project_dir), "remote", "set-url", remote, str(output_git.resolve())], check=True)
-            else:
-                subprocess.run(["git", "-C", str(project_dir), "remote", "add", remote, str(output_git.resolve())], check=True)
-            print(f"==> Git remote '{remote}' registered — 'git fetch {remote}' to review output mid-session.")
-        else:
-            print("==> No git repo found; falling back to --no-git mode.")
-            use_git = False
 
     # Preserve existing context mounts from compose.yaml, then add any new ones from args
     context_mounts: list[tuple[str, str, bool]] = _read_context_mounts(session_dir)
@@ -780,6 +897,7 @@ def _init_session(session_dir: Path, project_dir: Path, name: str, args) -> None
         src_str, _, dst = spec.partition(":")
         src = str(Path(src_str).resolve())
         dst = dst or Path(src_str).name
+        _validate_context_destination(dst)
         if not Path(src).exists():
             die(f"mount source does not exist: {src}")
         if dst not in seen_dsts:
@@ -789,6 +907,7 @@ def _init_session(session_dir: Path, project_dir: Path, name: str, args) -> None
         src_str, _, dst = spec.partition(":")
         src = str(Path(src_str).resolve())
         dst = dst or Path(src_str).name
+        _validate_context_destination(dst)
         if not Path(src).exists():
             die(f"mount source does not exist: {src}")
         if dst not in seen_dsts:
@@ -808,6 +927,7 @@ def _init_session(session_dir: Path, project_dir: Path, name: str, args) -> None
         agent_cfg=agent_cfg,
         context_mounts=context_mounts,
         persist=args.persist,
+        no_git=args.no_git,
     )
 
 
@@ -989,14 +1109,19 @@ def cmd_proxy(args) -> None:
 
 
 def cmd_remove(args) -> None:
-    session_dir, project_dir = resolve_session(args)
+    session_dir, _ = resolve_session(args)
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
 
     with _secret_sync_lock(session_dir):
+        entries = _git_repositories(session_dir)
         compose(session_dir, "down", "-v", check=True)
-        remote = f"agentbox-{name}"
-        subprocess.run(["git", "-C", str(project_dir), "remote", "remove", remote], capture_output=True)
+        remote = _git_remote_name(session_dir)
+        for repository, git_dir in entries.items():
+            git = ["git", "--git-dir", git_dir, "remote"]
+            current = subprocess.run([*git, "get-url", remote], capture_output=True, text=True)
+            if current.returncode == 0 and current.stdout.strip() == _git_url(session_dir, repository):
+                subprocess.run([*git, "remove", remote], capture_output=True)
         shutil.rmtree(session_dir, ignore_errors=True)
 
     print(f"Removed session '{name}'.")
@@ -1021,9 +1146,18 @@ def cmd_remote_cleanup(args) -> None:
         print("No agentbox remotes found.")
         return
 
-    sessions = get_sessions(project_dir)
-    valid_remotes = {f"agentbox-{s}" for s in sessions}
-    stale = [r for r in agentbox_remotes if r not in valid_remotes]
+    stale = []
+    for remote in agentbox_remotes:
+        url = subprocess.run(["git", "-C", str(project_dir), "remote", "get-url", remote],
+                             capture_output=True, text=True, check=True).stdout.strip()
+        if not url.startswith("agentbox::"):
+            continue
+        try:
+            session_dir, repository = _parse_git_url(url)
+        except ValueError:
+            continue
+        if not (session_dir / "compose.yaml").is_file() or repository not in _git_repositories(session_dir):
+            stale.append(remote)
 
     if not stale:
         print("No stale agentbox remotes found.")
@@ -1038,6 +1172,13 @@ def cmd_remote_cleanup(args) -> None:
             print(f"  Warning: failed to remove remote '{remote}'")
 
     print(f"Cleaned up {removed} stale remote(s).")
+
+
+def _validate_context_destination(destination: str) -> None:
+    path = PurePosixPath(destination)
+    if (path.is_absolute() or not path.parts or ".." in path.parts
+            or path.parts[0] == "git"):
+        die("context mount destination must be relative; /context/git is reserved for shared Git repositories")
 
 
 def _read_context_mounts(session_dir: Path) -> list[tuple[str, str, bool]]:
@@ -1220,7 +1361,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentbox", description="Isolated agent workspace manager.")
     subcommand = parser.add_subparsers(dest="cmd")
 
-    build_subcommand = subcommand.add_parser("build", help="Build proxy + agent images")
+    build_subcommand = subcommand.add_parser("build", help="Build proxy, Git sidecar, and agent images")
     build_subcommand.add_argument("harnesses", nargs="*", metavar="HARNESS", help=f"Harness images to build (default: all). Choices: {', '.join(HARNESS_CONTAINERFILES)}")
     build_subcommand.add_argument("-t", "--tag", default=AGENTBOX_IMAGE_TAG, help="Image tag (AGENTBOX_IMAGE_TAG, default: %(default)s).")
 
@@ -1240,11 +1381,17 @@ def build_parser() -> argparse.ArgumentParser:
     init_subcommand.add_argument("--name", "-n", metavar="NAME", help="Session name (default: timestamp)")
     init_subcommand.add_argument("--preset", "-p", default=AGENTBOX_PRESET)
     init_subcommand.add_argument("--branch", default="")
-    init_subcommand.add_argument("--no-git", action="store_true")
+    init_subcommand.add_argument("--no-git", action="store_true", help="Bind-mount the project read/write at /workspace instead of using Git")
     init_subcommand.add_argument("--persist", action="store_true", help="Keep the agent container and its filesystem across starts")
     init_subcommand.add_argument("--ro-mount", action="append", default=[], dest="ro_mounts", metavar="SRC[:DST]", help="Mount read-only reference directory")
     init_subcommand.add_argument("--rw-mount", action="append", default=[], dest="rw_mounts", metavar="SRC[:DST]", help="Mount writable reference directory")
     init_subcommand.add_argument("--start", action="store_true", help="Also start the session after initializing")
+
+    mount_subcommand = subparser_with_name(subcommand.add_parser(
+        "mount", help="Share a Git repository through the session sidecar (no host filesystem mount)"))
+    mount_subcommand.add_argument("repo", nargs="?", metavar="REPO", help="Git repository directory (default: current repository)")
+    mount_subcommand.add_argument("--as", dest="repo_name", metavar="NAME", help="Clone into /context/git/NAME; accepts org/repo (default: repository basename)")
+    mount_subcommand.add_argument("--branch", default="", metavar="REF", help="Branch, tag, or commit to share (default: HEAD)")
 
     start_subcommand = subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)")
     subparser_with_name(start_subcommand).add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
@@ -1293,6 +1440,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> None:
+    # Private byte-stream entrypoint for Git, not an interactive CLI command.
+    if sys.argv[1:2] == ["_git-remote-helper"]:
+        if len(sys.argv) != 3:
+            die("usage: agentbox _git-remote-helper URL")
+        try:
+            sys.exit(git_remote_helper(sys.argv[2]))
+        except KeyboardInterrupt:
+            sys.exit(130)
+        except (OSError, ValueError, subprocess.CalledProcessError) as exc:
+            die(f"agentbox Git transport: {exc}")
+
     parser = build_parser()
     args = parser.parse_args()
     if not args.cmd:
@@ -1303,6 +1461,7 @@ def main() -> None:
         "build": cmd_build,
         "update": cmd_update,
         "init": cmd_init,
+        "mount": cmd_mount,
         "start": cmd_start,
         "stop": cmd_stop,
         "logs": cmd_logs,

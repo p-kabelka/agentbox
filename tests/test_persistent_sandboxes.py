@@ -57,7 +57,7 @@ class PersistentSandboxesTest(unittest.TestCase):
     def container(self, service, status="created", project=None):
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())["services"][service]
         name = cfg["container_name"]
-        labels = {**cfg.get("labels", {}), "com.docker.compose.project": project or self.agentbox["_project"](self.session),
+        labels = {**cfg.get("labels", {}), "com.docker.compose.project": project or self.project_name,
                   "com.docker.compose.service": service}
         c = {"Id": service + "-id", "Name": name,
              "Config": {"Labels": labels, "Image": cfg["image"], "Env": dict(cfg.get("environment", {})),
@@ -74,11 +74,12 @@ class PersistentSandboxesTest(unittest.TestCase):
             current_hash = (session / "compose.yaml").read_bytes()
             if self.containers and current_hash != self.compose_hash and "--no-recreate" not in args:
                 self.containers.clear()  # podman-compose's default up tears down the project
-            if args[-1] == "proxy":
-                proxy = self.containers.get(self.agentbox["_persistent_name"](session, "proxy"))
-                if proxy is None:
-                    proxy = self.container("proxy")
-                proxy["State"].update(Status="running", Running=True, Pid=12)
+            if args[-1] in ("proxy", "git"):
+                for service in (arg for arg in args if arg in ("proxy", "git")):
+                    container = self.containers.get(self.agentbox["_persistent_name"](session, service))
+                    if container is None:
+                        container = self.container(service)
+                    container["State"].update(Status="running", Running=True, Pid=12)
             elif args[-1] == "agent" and "--no-start" in args and "--no-deps" in args:
                 self.container("agent")
             else:
@@ -134,6 +135,8 @@ class PersistentSandboxesTest(unittest.TestCase):
             return subprocess.CompletedProcess(args, self.start_return or c["State"]["ExitCode"])
         if args[0] == "git":
             self.git_events.append(args)
+            if args[3:5] == ["remote", "get-url"]:
+                return subprocess.CompletedProcess(args, 0, stdout=self.agentbox["_git_url"](self.session, "workspace"))
             return subprocess.CompletedProcess(args, 0, stdout="")
         return subprocess.CompletedProcess(args, 0)
 
@@ -157,12 +160,13 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertIs(self.containers[name], agent)
         self.assertEqual([e for e in self.events if e[-1] == "agent"],
                          [("up", "--no-start", "--no-deps", "--no-recreate", "agent")])
-        self.assertEqual([e for e in self.events if e[-1] == "proxy"],
-                         [("up", "-d", "--no-recreate", "proxy")] * 2)
+        self.assertEqual([e for e in self.events if e[0] == "up" and "proxy" in e],
+                         [("up", "-d", "--no-recreate", "proxy", "git")] * 2)
         self.assertEqual(self.starts, [("podman", "start", "-ai", name)] * 2)
         self.assertEqual([e for e in self.events if e[0] == "stop"], [("stop",)] * 2)
         self.assertFalse(any(e[0] in ("run", "down") for e in self.events))
-        self.assertEqual([e[0] for e in self.events], ["up", "exec", "up", "stop", "up", "exec", "stop"])
+        self.assertEqual([e[0] for e in self.events],
+                         ["up", "exec", "up", "stop", "up", "exec", "stop"])
 
     def test_first_start_recovers_stopped_proxy_from_failed_creation(self):
         proxy = self.container("proxy", "exited")
@@ -194,7 +198,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertIs(self.containers[name], container)
         self.assertEqual(container["Config"], saved)
         self.assertEqual([e[0] for e in self.events], ["up", "exec", "stop"])
-        self.assertIn(("up", "-d", "--no-recreate", "proxy"), self.events)
+        self.assertIn(("up", "-d", "--no-recreate", "proxy", "git"), self.events)
 
     def test_failed_sync_does_not_create_agent_and_stops_new_proxy(self):
         self.sync_fails = True
@@ -219,12 +223,17 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertFalse(self.session.exists())
         self.assertEqual(self.containers, {})
 
-    def test_fetch_even_if_cleanup_fails(self):
-        (self.session / "output.git").mkdir()
+    def test_exit_and_cleanup_failure_never_fetch_or_delete_git_registration(self):
+        self.register_workspace()
+        registry = (self.session / "git-repositories.json").read_bytes()
+        self.assertEqual(self.start(), 7)
         self.stop_fails = True
         self.assertEqual(self.start(), 1)
-        self.assertEqual(self.git_events[0][0:5], ["git", "-C", str(self.project), "-c", "core.hooksPath=/dev/null"])
-        self.assertEqual(self.git_events[0][5:], ["fetch", "agentbox-feature"])
+        self.assertFalse(any("fetch" in args for args in self.git_events))
+        self.assertEqual((self.session / "git-repositories.json").read_bytes(), registry)
+
+    def register_workspace(self):
+        self.agentbox["_save_git_repositories"](self.session, {"workspace": str(self.project / ".git")})
 
     def test_container_listing_filters_compose_project(self):
         self.container("agent", project="other-project")
@@ -234,11 +243,11 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual(self.agentbox["_list_session_containers"](self.project_name)[0]["name"], other["Name"])
 
     def test_compose_project_name_is_unique_in_both_modes(self):
-        persistent_project = self.agentbox["_project"](self.session)
+        persistent_project = self.agentbox["_project_name"](self.session, self.agentbox["read_compose_metadata"](self.session))
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
         cfg["x-metadata"]["persist"] = False
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
-        self.assertEqual(self.agentbox["_project"](self.session), persistent_project)
+        self.assertEqual(self.agentbox["_project_name"](self.session, cfg["x-metadata"]), persistent_project)
 
         other_project = self.root / "other" / "project"
         other_project.mkdir(parents=True)
@@ -246,7 +255,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         other_session.mkdir()
         cfg["x-metadata"]["project-dir"] = str(other_project)
         (other_session / "compose.yaml").write_text(yaml.safe_dump(cfg))
-        self.assertNotEqual(self.agentbox["_project"](other_session), persistent_project)
+        self.assertNotEqual(self.agentbox["_project_name"](other_session, cfg["x-metadata"]), persistent_project)
 
     def test_stop_remove_and_listing_distinguish_retained_agent(self):
         self.start()
@@ -295,7 +304,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual([e for e in self.events if e[0] == "stop"], [("stop",)] * 2)
 
     def test_remove_stops_attached_start_and_skips_deleted_session_cleanup(self):
-        (self.session / "output.git").mkdir()
+        self.register_workspace()
         self.attaching = threading.Event()
         self.release_attach = threading.Event()
         exits = []
@@ -350,7 +359,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         name = "agentbox-project-feature_agent_run_1"
         self.containers[name] = {"Id": "ephemeral-id", "Name": name,
-                                 "Config": {"Labels": {"com.docker.compose.project": self.agentbox["_project"](self.session)}},
+                                 "Config": {"Labels": {"com.docker.compose.project": self.project_name}},
                                  "State": {"Status": "exited", "Pid": 0, "Running": False}}
         self.assertEqual(self.agentbox["_list_session_containers"](self.project_name),
                          [{"id": "ephemeral-id", "pid": "0", "name": name, "state": "exited"}])
@@ -389,19 +398,22 @@ class PodmanComposeCompatibilityTest(unittest.TestCase):
         self.assertTrue(args.no_start and args.no_deps and args.no_recreate)
 
         podman = types.SimpleNamespace(
+            existing_containers=AsyncMock(return_value={
+                "proxy": types.SimpleNamespace(service_name="proxy", exited=False, config_hash="old")}),
             output=AsyncMock(return_value=json.dumps([{
                 "Names": ["proxy"], "Labels": {"io.podman.compose.config-hash": "old"}
             }]).encode()),
             run=AsyncMock(return_value=0),
         )
         compose = types.SimpleNamespace(
-            services={"proxy": {"_deps": []}, "agent": {"_deps": []}},
+            services={"proxy": {"_deps": [], "_dependents": []}, "agent": {"_deps": [], "_dependents": []}},
             containers=[{"_service": "proxy", "name": "proxy"},
                         {"_service": "agent", "name": "agent"}],
             yaml_hash="new", project_name="test", podman=podman,
             commands={"build": AsyncMock(return_value=0), "down": AsyncMock()},
         )
-        with patch.object(podman_compose, "create_pods", new=AsyncMock()), \
+        with patch.object(podman_compose, "prepare_images", new=AsyncMock(return_value=0), create=True), \
+             patch.object(podman_compose, "create_pods", new=AsyncMock()), \
              patch.object(podman_compose, "container_to_args", new=AsyncMock(return_value=["--name", "agent"])):
             self.assertEqual(asyncio.run(podman_compose.compose_up(compose, args)), 0)
         podman.run.assert_awaited_once_with([], "create", ["--name", "agent"])

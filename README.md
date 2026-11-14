@@ -8,7 +8,7 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](d
 
 ## How it works
 
-Each session has a **proxy** (holds real credentials, enforces an egress allowlist, logs all traffic) and one or more **agents** (hold no credentials, have no internet route). All agent network traffic transits mitmproxy. Your project is delivered to the agent as a read-only git bundle; output comes back through a bare repository with immutable hooks.
+Each session has a **proxy** (holds real credentials and controls internet access), a **Git sidecar**, and one or more **agents** (hold no credentials and have no internet route). In Git-backed sessions, repositories travel through pushes and clones, not host filesystem mounts. The sidecar stores bare repositories in a named volume, uses only the session's internal network, and publishes no ports. There are no writable host-directory bind mounts by default; read-only dotfiles and proxy configuration mounts remain.
 
 ---
 
@@ -30,11 +30,12 @@ echo 'export PATH="$HOME/.local/share/agentbox/bin:$PATH"' >> ~/.bashrc
 source ~/.bashrc
 # or symlink the binary
 ln -s -r ~/.local/share/agentbox/bin/agentbox ~/.local/bin
+ln -s -r ~/.local/share/agentbox/bin/git-remote-agentbox ~/.local/bin
 
-# Build container images (builds proxy, base agent, and all harness images)
+# Build container images (proxy, Git sidecar, base agent, and all harnesses)
 agentbox build
 # Or build specific images only:
-agentbox build base proxy claude
+agentbox build base git proxy claude
 ```
 
 ### Zsh completion
@@ -103,13 +104,13 @@ cd ~/projects/my-app
 agentbox init
 agentbox start -- tmux -u new-session -s agent 'bash -l' ';' send-keys -t agent 'agent' Enter
 
-# The agent has access to your current branch (read-only bundle).
+# The agent clones your committed branch from the Git sidecar into /workspace.
 # When it's done, push its work:
 #   git push
 
-# When the agent container exits, output is fetched automatically:
-#   git fetch agentbox-<name>
-#   git merge agentbox-<name>/my-feature
+# On the host, fetch using the remote printed by init:
+#   git fetch agentbox-SESSION_ID
+#   git merge agentbox-SESSION_ID/my-feature
 ```
 
 Some caveats: the start command is entirely customizable on the command line. By default if you don't provide a command to run it will launch the agent harness configured in the preset. The presets usually have some configuration in .bashrc that pre-configures the agent harness to be usable from the sandbox right way. Therefore it is almost always more preferable to use the tmux session start command echoed by the init command.
@@ -121,11 +122,11 @@ agentbox init --name feature --persist
 agentbox start --name feature -- bash     # first start chooses the saved command
 # exit bash, then restart the same container and its filesystem
 agentbox start --name feature
-agentbox stop --name feature              # retain the stopped agent and proxy
-agentbox remove --name feature            # delete the container and unpublished work
+agentbox stop --name feature              # retain all three stopped services
+agentbox remove --name feature            # delete containers and the sidecar's repositories
 ```
 
-Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits to the output remote before removing the session; auto-fetch runs after each attached exit unless `remove` has deleted the session while it was running.
+Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits and fetch them manually on the host before removing the session: removal deletes the sidecar's repositories too. Ordinary exit/stop retains the Git volume; fetching afterward starts only the Git sidecar when needed.
 After the first start, edits to `services.agent` in `compose.yaml` do not reconfigure the retained agent on the next start. Create a new session for a different agent image, environment, mounts, or command.
 
 The default environment does not include any agent harness, so it can be used as a temporary sandbox.
@@ -142,13 +143,16 @@ Currently, for all provided agents you need to create your own preset (or modify
 agentbox init   [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] [--persist] \
                 [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]
 agentbox start  [--name NAME] [-- CMD]   # launch agent harness (or CMD, e.g. -- bash, -- tmux)
+agentbox mount  [REPO] [--as REPO_NAME] [--branch REF] [--session SESSION_ID]
 agentbox stop   [--name NAME]            # stop containers
-agentbox remove [--name NAME]            # stop, delete session, output repo, and git remote
+agentbox remove [--name NAME]            # delete session, sidecar repositories, and registered remotes
 ```
 
-`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. By default, `agentbox start` can run independent agent containers concurrently; the proxy stays up until the last one exits, then `compose down` tears the project down. With `init --persist`, the agent is one retained Compose service container; `start -- CMD` is only valid before its first creation, later starts use its saved command, and a second simultaneous start fails. `stop` retains both persistent service containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running container; use another ephemeral start or a separate session for parallel shells.
+`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. By default, `agentbox start` can run independent agents concurrently; both sidecars stay up until the last agent exits, then `compose down` tears the project down without deleting named volumes. With `init --persist`, the agent is one retained service container; `start -- CMD` is only valid before first creation, later starts use its saved command, and a second simultaneous start fails. `stop` retains all three persistent containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running agent; use another ephemeral start or separate session for parallel shells.
 
 Everywhere where `--name` can be used, the parameter `--session` can also be used when you provide the session global ID found in `agentbox list --all`.
+
+`init --no-git` explicitly opts into the existing writable project bind mount at `/workspace`, bypassing Git isolation. Without that flag, initialization outside a Git repository leaves `/workspace` empty rather than silently mounting the host directory. Explicit reference mounts also remain available.
 
 ### Monitoring
 
@@ -232,7 +236,67 @@ continue working. A non-empty `api_key_env` is used as a fallback when configure
 are pending, the CLI reports that the saved edit is not active: run `proxy reload` once to
 apply both changes. You do not need to repeat `allow` or `deny`.
 
-### Reference mounts
+### Sharing Git repositories
+
+Share another repository before or during a session, including a running persistent session:
+
+```bash
+agentbox list --all
+agentbox mount ~/libs/shared-lib --session SESSION_ID
+agentbox mount ~/projects/other --as reference --branch main --session SESSION_ID
+agentbox mount ~/git/org/repo --as org/repo --session SESSION_ID
+```
+
+Names may contain `/` to preserve namespaces: `--as org/repo` stores the share as
+`org/repo.git` in the sidecar and clones it into `/context/git/org/repo`.
+
+Shares are cloned automatically at agent startup, with the sidecar as `origin`.
+Nothing watches for new shares while the agent is running. After sharing another
+repository, run inside the sandbox (or ask the agent to run):
+
+```bash
+agentbox-clone shared-lib  # clone into /context/git/shared-lib
+agentbox-clone org/repo    # clone into /context/git/org/repo
+agentbox-clone            # one pass cloning any missing shared repositories
+```
+
+The helper never updates existing clones or overwrites nonempty directories.
+To update an existing clone, use normal Git explicitly, for example
+`git -C /context/git/shared-lib pull --ff-only`.
+
+The command adds the host Git remote `agentbox-<full-session-id>` and pushes the current committed branch (or `--branch REF`) and reachable annotated tags. Git worktrees share that same remote and sidecar repository; mounting from another worktree reuses the existing share name. Push additional branches manually from any worktree. Bare and SHA-256 repositories are also supported. Uncommitted/untracked files, submodule contents, and Git LFS objects are not transferred automatically.
+
+Inside the sandbox, commit and `git push` in either `/workspace` or a shared repository. On the host, `git fetch <printed-remote>` and review/merge normally. Later pushes are incremental. Existing sandbox working trees are **never** automatically pulled, reset, or switched; use `git pull` there when you want host updates. `init`/`mount` never force-push over existing work; manual Git operations retain normal push/force-push/delete semantics inside the isolated sidecar.
+
+Host push/fetch uses `git-remote-agentbox` through Podman stdin/stdout, not an exposed Git port. Keep it on `PATH` alongside `agentbox`. A host Git operation starts the Git sidecar if necessary, even after `stop`, without launching the agent or proxy, and leaves that sidecar running afterward. Session removal deletes all sidecar repositories and removes their registered host remotes; fetch anything you need to keep first.
+
+Git sharing and transfers do not take the proxy/lifecycle lock. Large pushes do
+not delay `proxy reload`, `stop`, or `remove`; stopping/removing may interrupt a
+transfer instead. An interrupted share may need rerunning, or `remote-cleanup`
+after removal to remove a leftover host remote.
+
+Repository registrations live in the session's `git-repositories.json`, independently of Compose configuration. Bare repositories live in the `git-data` named volume, which survives ordinary exit/stop in both modes. Ephemeral agents clone them again on the next start; persistent agents retain their existing clones and uncommitted work. Only `remove` deletes the volume. Unpushed changes in an ephemeral agent are lost when it exits.
+
+#### Retrieving a sandbox-created project
+
+The sandbox cannot create new sidecar repositories, but it can push an unrelated
+project's history to a new branch in an existing share:
+
+```bash
+# Inside the sandbox, from the new project's repository:
+git push git://git/workspace.git HEAD:refs/heads/new-project
+
+# On the host, from the original project, clone that branch separately:
+git clone --single-branch --branch new-project \
+  "$(git remote get-url agentbox-SESSION_ID)" ../new-project
+```
+
+This uses a branch in `workspace`, not a new sidecar repository. A distinct
+sidecar repository must first be initialized/shared from the host.
+
+See [the Git sidecar contract](docs/SPEC-git-sidecar.md) for details.
+
+### Explicit filesystem mounts
 
 Mount additional projects at `/context/<name>` when initializing a session:
 
@@ -241,16 +305,17 @@ agentbox init --ro-mount ~/libs/shared-lib:shared-lib --rw-mount ~/data/scratch:
 ```
 
 For a persistent session, set mounts during `init`. Existing containers keep their original mounts; create a new session to change them.
+These flags deliberately opt into host bind mounts and weaken filesystem isolation. `/context/git` is reserved for Git shares.
 
 ### Retrieving output
 
-Output is fetched automatically when the session ends. To fetch mid-session:
+Fetch output manually, either during the session or after it stops. Use the remote printed by `init`/`mount`:
 
 ```bash
-git fetch agentbox-<name>
-git log agentbox-<name>/my-feature
-git diff HEAD agentbox-<name>/my-feature
-git merge agentbox-<name>/my-feature
+git fetch agentbox-SESSION_ID
+git log agentbox-SESSION_ID/my-feature
+git diff HEAD agentbox-SESSION_ID/my-feature
+git merge agentbox-SESSION_ID/my-feature
 ```
 
 ### Maintenance
@@ -265,7 +330,7 @@ agentbox remote-cleanup   # remove stale agentbox-* git remotes with no matching
 
 ### Image tags
 
-`AGENTBOX_IMAGE_TAG` selects the proxy, base agent, and built-in harness image tags.
+`AGENTBOX_IMAGE_TAG` selects the proxy, Git sidecar, base agent, and built-in harness image tags.
 It defaults to `latest` when unset or empty:
 
 ```bash
@@ -432,3 +497,11 @@ Installing `podman-compose==1.5.0` enables native image-interpolation and Compos
 mitmproxy dependency enables the real TLS/ALPN and HTTP streaming/reload regressions.
 TLS negotiation runs in memory without sockets. The streaming regression requires
 working local TCP listeners and reports a skip when the environment cannot provide them.
+
+For real containers, first build `base git proxy`, then run:
+
+```bash
+AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
+```
+
+This uses krun by default. On a machine without KVM, explicitly set `AGENTBOX_TEST_RUNTIME=crun` to test container networking and synchronization without claiming VM-isolation coverage. `AGENTBOX_IMAGE_TAG` must match the built images.

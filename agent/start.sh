@@ -19,23 +19,15 @@ export GIT_SSL_CAINFO="$CA"
 export REQUESTS_CA_BUNDLE="$CA"
 export NODE_EXTRA_CA_CERTS="$CA"
 
-# Clone source bundle and wire up writable output remote
-if [ -f /source/project.bundle ] && [ ! -d /workspace/.git ]; then
-    echo "[agent] Cloning workspace..."
-    git clone -q --no-local /source/project.bundle /workspace
-    git -C /workspace branch --unset-upstream
-    git -C /workspace remote rename origin source
-    git -C /workspace remote add origin /output/repo.git
-    # let git create and track the remote branch automatically when it does not exist
-    git -C /workspace config push.autoSetupRemote true
-    echo "[agent] When done: git push origin HEAD"
-fi
-
 # Replace image defaults (including .bashrc) on first boot, then preserve edits.
 if [ -d /agentbox-dotfiles ] && [ ! -e "$HOME/.agentbox-dotfiles-seeded" ]; then
     cp -rT /agentbox-dotfiles "$HOME"
     touch "$HOME/.agentbox-dotfiles-seeded"
 fi
+
+# Clone current shares once. In a running sandbox, use agentbox-clone NAME for
+# repositories shared later. Existing working trees are always left untouched.
+/usr/local/bin/agentbox-clone --wait 80
 
 # krun's virtio-console sends \n for Enter instead of \r. Node.js readline in
 # raw mode expects \r. setRawMode() clears icrnl but not inlcr, so inlcr set

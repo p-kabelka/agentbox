@@ -86,7 +86,7 @@ _agentbox_harnesses() {
   local home=${AGENTBOX_HOME:-$HOME/.local/share/agentbox} expl
   local -a values selected=("${(@b)${(@Q)line}}")
   values=("$home"/agent/Containerfile.*(N:t))
-  values=("${values[@]#Containerfile.}" proxy)
+  values=("${values[@]#Containerfile.}" proxy git)
   _wanted harnesses expl harness compadd -F selected -a values
 }
 
@@ -201,9 +201,10 @@ _agentbox() {
   case $command_path in
     agentbox)
       subcommands=(
-        'build:Build proxy and agent images'
+        'build:Build proxy, Git sidecar, and agent images'
         'update:Rebuild images without cache'
         'init:Initialize a session'
+        'mount:Share a Git repository with a session'
         'start:Launch a session'
         'stop:Stop a session'
         'remove:Delete a session'
@@ -243,12 +244,18 @@ _agentbox() {
         '(-n --name)'{-n+,--name=}'[name the new session]:new session name:' \
         '(-p --preset)'{-p+,--preset=}'[select a preset]:preset:_agentbox_presets' \
         '--branch=[select the source git revision]:git revision:_agentbox_branches' \
-        '--no-git[skip git bundle and output repository setup]' \
+        '--no-git[bind-mount the workspace read/write instead of using Git]' \
         '--persist[retain the agent container between starts]' \
         '*--ro-mount=[add a read-only reference mount]:source path (optionally \:destination):_agentbox_mounts' \
         '*--rw-mount=[add a writable reference mount]:source path (optionally \:destination):_agentbox_mounts' \
         '--start[start the session after initialization]' \
         '1:project directory:_files -/'
+      return ;;
+    agentbox/mount)
+      _arguments -s -S "$help[@]" "$session_options[@]" \
+        '--as=[name the repository under /context/git; accepts org/repo]:repository name:' \
+        '--branch=[select the shared git revision]:git revision:_agentbox_branches' \
+        '1:repository directory:_files -/'
       return ;;
     agentbox/start)
       _arguments -s -S "$help[@]" "$session_options[@]" '*:::command: _agentbox_exec'

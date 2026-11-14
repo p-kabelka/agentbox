@@ -1,0 +1,13 @@
+FROM fedora:44
+
+RUN dnf install -y git-core git-daemon python3 && dnf clean all && \
+    useradd --system --create-home git && \
+    mkdir -p /srv/git/repos && chown -R git:git /srv/git && \
+    git config --system core.hooksPath /dev/null && \
+    git config --system receive.fsckObjects true && \
+    git config --system transfer.fsckObjects true
+
+COPY server.py /app/server.py
+USER git
+EXPOSE 9418 8083
+ENTRYPOINT ["python3", "/app/server.py"]

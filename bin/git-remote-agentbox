@@ -1,0 +1,13 @@
+#!/usr/bin/env python3
+"""Forward Git's remote-helper protocol to the agentbox CLI."""
+
+import os
+import sys
+from pathlib import Path
+
+
+if __name__ == "__main__":
+    if len(sys.argv) != 3:
+        sys.exit("usage: git-remote-agentbox REMOTE URL")
+    os.execv(sys.executable, [sys.executable, str(Path(__file__).resolve().with_name("agentbox")),
+                             "_git-remote-helper", sys.argv[2]])

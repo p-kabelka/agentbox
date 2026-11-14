@@ -3,6 +3,7 @@
 
 volumes:
   proxy-ca:    # mitmproxy CA cert shared between proxy and agent
+  git-data:    # bare repositories and the agent's reference-repository catalog
 
 networks:
   agent-net:
@@ -33,12 +34,28 @@ services:
     # ports: defined per-project in compose.override.yaml
     restart: unless-stopped
 
+  git:
+    image: localhost/agentbox-git:${AGENTBOX_IMAGE_TAG:-latest}
+    networks:
+      - agent-net
+    volumes:
+      - git-data:/srv/git:z
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   agent:
     image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
     networks:
       - agent-net          # internal only — no direct internet access
     depends_on:
       - proxy
+      - git
     runtime: krun
     environment:
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}
@@ -57,8 +74,8 @@ services:
       https_proxy: http://proxy:8080
       HTTP_PROXY: http://proxy:8080
       http_proxy: http://proxy:8080
-      NO_PROXY: proxy,localhost,127.0.0.1
-      no_proxy: proxy,localhost,127.0.0.1
+      NO_PROXY: proxy,git,localhost,127.0.0.1
+      no_proxy: proxy,git,localhost,127.0.0.1
       NODE_USE_ENV_PROXY: 1
     volumes:
       - proxy-ca:/proxy-ca:ro,z
