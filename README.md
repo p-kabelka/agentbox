@@ -103,15 +103,19 @@ annotations:
   krun.use_passt: "1"
 ```
 
-Some passt versions disable DHCP when the container's network namespace has no
-default gateway, as is intentional on `agent-net`. Agentbox works around this
-without a patched crun: each `start` refreshes the actual internal IPv4 subnet
-from Podman into a read-only `/agentbox-network` mount. Before cloning Git
+passt/krun can leave the guest's IPv4 networking missing or partially configured
+on internal networks, including an existing address with an unusable prefix or
+missing subnet route. Agentbox works around this without a patched crun: each
+`start` refreshes the actual internal IPv4 subnet from Podman into a read-only
+`/agentbox-network` mount. Before cloning Git
 repositories or launching the harness, `agentbox-network` combines that subnet
 with the current container's allocated address in Podman's `/etc/hosts`.
-It configures `eth0` only when passt is enabled and IPv4 is missing. It adds
-neither a default route nor public DNS; `internal: true` remains unchanged.
-Working DHCP, TSI, and ordinary crun networking are left alone.
+When passt is enabled, it checks `eth0`'s allocated address, netmask, link state,
+and connected subnet route, repairing incomplete configuration even if an IPv4
+address already exists. It adds neither a default route nor public DNS;
+`internal: true` remains unchanged. Matching, working configuration is reported
+and left alone, as are TSI and ordinary crun networking. If subnet metadata is
+mounted but krun/passt is not detected, startup reports why setup was skipped.
 
 Rebuild `base` and the harness image you use, then initialize a **new session**
 with the updated preset. Existing retained containers cannot acquire the new

@@ -1,8 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
-# passt disables DHCP on gateway-less internal networks. Restore only the
-# allocated address and connected subnet route before contacting either sidecar.
+# passt may leave eth0 missing or partially configured on internal networks.
+# Restore the allocated address/prefix and subnet route before using either sidecar.
 /usr/local/bin/agentbox-network
 
 # Trust only the mitmproxy CA — the agent has no direct internet access,
