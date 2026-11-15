@@ -168,6 +168,21 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual([e[0] for e in self.events],
                          ["up", "exec", "up", "stop", "up", "exec", "stop"])
 
+    def test_network_metadata_is_refreshed_before_each_persistent_boot(self):
+        snapshots = []
+
+        def prepare(session):
+            snapshots.append((session, list(self.events), len(self.starts)))
+
+        with patch.dict(self.g, _prepare_agent_network=prepare):
+            self.assertEqual(self.start(["bash"]), 7)
+            self.assertEqual(self.start(), 7)
+        self.assertEqual([snapshot[2] for snapshot in snapshots], [0, 1])
+        self.assertTrue(all(snapshot[0] == self.session and snapshot[1][-1][0] == "exec"
+                            for snapshot in snapshots))
+        self.assertEqual([e for e in self.events if e[-1] == "agent"],
+                         [("up", "--no-start", "--no-deps", "--no-recreate", "agent")])
+
     def test_first_start_recovers_stopped_proxy_from_failed_creation(self):
         proxy = self.container("proxy", "exited")
         self.compose_hash = (self.session / "compose.yaml").read_bytes()

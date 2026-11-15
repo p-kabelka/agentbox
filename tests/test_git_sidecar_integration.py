@@ -3,12 +3,15 @@
 Build first: AGENTBOX_IMAGE_TAG=git-sidecar-test agentbox build base git proxy
 Run: AGENTBOX_INTEGRATION=1 AGENTBOX_IMAGE_TAG=git-sidecar-test python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
 On systems without KVM only, explicitly set AGENTBOX_TEST_RUNTIME=crun.
+Set AGENTBOX_TEST_USE_PASST=1 to exercise krun's passt backend and IPv4 workaround.
 """
 
 import hashlib
+import ipaddress
 import json
 import os
 import select
+import shlex
 import shutil
 import subprocess
 import sys
@@ -39,7 +42,11 @@ class GitSidecarIntegrationTest(unittest.TestCase):
         preset = self.home / "custom" / "presets" / "integration"
         preset.mkdir(parents=True)
         (preset / "proxy.yaml").write_text("providers: []\nextra_request_policy: []\n")
-        (preset / "agent.yaml").write_text(yaml.safe_dump({"dotfiles": {".gitconfig": "[user]\nname=Agent\nemail=agent@example.com\n"}}))
+        self.use_passt = os.environ.get("AGENTBOX_TEST_USE_PASST") == "1"
+        agent_cfg = {"dotfiles": {".gitconfig": "[user]\nname=Agent\nemail=agent@example.com\n"}}
+        if self.use_passt:
+            agent_cfg["annotations"] = {"krun.use_passt": "1"}
+        (preset / "agent.yaml").write_text(yaml.safe_dump(agent_cfg))
         self.env = {**os.environ, "AGENTBOX_HOME": str(self.home), "AGENTBOX_STATE": str(self.root / "state"),
                     "PATH": f"{ROOT / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"}
         self.session_id = "feature-" + hashlib.sha256(str(self.project.resolve()).encode()).hexdigest()
@@ -206,8 +213,18 @@ hook.chmod(0o755)
         name = "agentbox-direct-" + hashlib.sha256(self.session_id.encode()).hexdigest()[:20]
         self.addCleanup(lambda: self.run_command(["podman", "rm", "-f", name], check=False))
         image = self.config()["services"]["agent"]["image"]
+        annotations = ["--annotation", "krun.use_passt=1"] if self.use_passt else []
+        network_setup = ""
+        if self.use_passt:
+            info = json.loads(self.run_command(["podman", "network", "inspect", network]).stdout)[0]
+            subnets = [entry["subnet"] for entry in info["subnets"]
+                       if ipaddress.ip_network(entry["subnet"]).version == 4]
+            self.assertTrue(subnets)
+            # This raw podman run intentionally bypasses the image entrypoint.
+            subnet_args = [arg for subnet in subnets for arg in ("--subnet", subnet)]
+            network_setup = shlex.join(["agentbox-network", *subnet_args]) + "\n"
         self.run_command(["podman", "run", "--rm", "--name", name, "--runtime", os.environ.get("AGENTBOX_TEST_RUNTIME", "krun"),
-                          "--network", network, "--entrypoint", "/bin/bash", image, "-ec", """
+                          *annotations, "--network", network, "--entrypoint", "/bin/bash", image, "-ec", network_setup + """
 git clone git://git/workspace.git /workspace/project
 cd /workspace/project
 git config user.name Agent
@@ -226,6 +243,38 @@ git push origin --delete temporary
         self.git(self.project, "fetch", self.remote)
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/direct-work:source").stdout, "direct\n")
         self.assertEqual((self.project / "source").read_text(), "host\n")
+
+    def test_passt_dns_and_workaround_routes_survive_vm_restart(self):
+        if not self.use_passt:
+            self.skipTest("Set AGENTBOX_TEST_USE_PASST=1 to exercise passt guest networking")
+        if os.environ.get("AGENTBOX_TEST_RUNTIME", "krun") == "crun":
+            self.skipTest("This regression requires a krun VM, not the explicit crun fallback")
+        self.initialize("--persist")
+        script = """
+import json, socket
+from pathlib import Path
+assert int(json.loads(Path('/.krun_config.json').read_text())['annotations']['krun.use_passt']) == 1
+for service in ('proxy', 'git'):
+    assert socket.getaddrinfo(service, 8080, socket.AF_INET, socket.SOCK_STREAM)
+routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]
+assert any(route[0] == 'eth0' and route[1] != '00000000' for route in routes), routes
+print('PASST_GUEST_ROUTES=' + json.dumps(routes), flush=True)
+"""
+        def assert_workaround_routes(result):
+            # Future passt versions may provide working DHCP, which the helper
+            # deliberately preserves. Only its fallback promises no guest default.
+            if "[agent] Configured passt IPv4" in result.stdout + result.stderr:
+                report = next(line for line in result.stdout.splitlines() if line.startswith("PASST_GUEST_ROUTES="))
+                routes = json.loads(report.partition("=")[2])
+                self.assertFalse(any(route[1] == '00000000' for route in routes), routes)
+
+        assert_workaround_routes(self.cli("start", "--session", self.session_id, "--", "python3", "-c", script))
+        name = self.config()["services"]["agent"]["container_name"]
+        before = self.run_command(["podman", "inspect", "--format", "{{.Id}}", name]).stdout.strip()
+        # Reuse the exact retained container, but boot a new guest kernel.
+        assert_workaround_routes(self.cli("start", "--session", self.session_id))
+        self.assertEqual(self.run_command(["podman", "inspect", "--format", "{{.Id}}", name]).stdout.strip(), before)
+        self.assert_isolation()
 
     def test_manual_clone_into_retained_agent_and_restart_preserves_work(self):
         self.initialize("--persist")

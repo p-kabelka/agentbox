@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -39,6 +40,7 @@ HARNESS_CONTAINERFILES = {
 }
 HARNESS_CONTAINERFILES.update({"proxy": "Containerfile", "git": "Containerfile"})
 GIT_REPOSITORY_NAME = re.compile(r"(?=.{1,100}\Z)[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", re.ASCII)
+NETWORK_CONFIG_VOLUME = "./network-config:/agentbox-network:ro,z"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -486,6 +488,13 @@ def generate_compose(
     agent_annotations = agent_cfg.get("annotations") or {}
     if agent_annotations:
         agent["annotations"] = agent_annotations
+    try:
+        use_passt = int(agent_annotations.get("krun.use_passt", "0")) > 0
+    except (TypeError, ValueError):
+        die("krun.use_passt must be an integer")
+    if use_passt:
+        (session_dir / "network-config").mkdir(exist_ok=True)
+        agent["volumes"].append(NETWORK_CONFIG_VOLUME)
 
     save_yaml(session_dir / "compose.yaml", base)
 
@@ -748,6 +757,39 @@ def cmd_mount(args) -> None:
     _mount_repository(session_dir, path, args.repo_name, args.branch)
 
 
+def _prepare_agent_network(session_dir: Path) -> None:
+    """Refresh read-only subnet metadata; Podman supplies each guest's IP in /etc/hosts."""
+    directory = session_dir / "network-config"
+    if not directory.is_dir():
+        return
+    result = subprocess.run(["podman", "inspect", _persistent_name(session_dir, "git")],
+                            capture_output=True, text=True, check=True)
+    try:
+        networks = json.loads(result.stdout)[0]["NetworkSettings"]["Networks"]
+        if not isinstance(networks, dict) or len(networks) != 1:
+            raise ValueError("Git sidecar must have exactly one network")
+        result = subprocess.run(["podman", "network", "inspect", next(iter(networks))],
+                                capture_output=True, text=True, check=True)
+        network = json.loads(result.stdout)[0]
+        if network["internal"] is not True:
+            raise ValueError("Git sidecar's network must be internal")
+        subnets = [ipaddress.ip_network(entry["subnet"]) for entry in network["subnets"]]
+        subnets = sorted({str(subnet) for subnet in subnets if subnet.version == 4 and subnet.prefixlen > 0})
+        if not subnets:
+            raise ValueError("internal network has no usable IPv4 subnet")
+    except (ValueError, KeyError, TypeError, IndexError) as exc:
+        die(f"cannot discover the internal IPv4 subnet for passt: {exc}")
+
+    fd, temporary = tempfile.mkstemp(prefix=".ipv4-subnets-", dir=directory)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump({"ipv4_subnets": subnets}, stream)
+            stream.write("\n")
+        os.replace(temporary, directory / "ipv4-subnets.json")
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
 def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
     name = _persistent_name(session_dir, "agent")
     with ExitStack() as lifetime:
@@ -769,6 +811,7 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
                 compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", check=True)
                 _synchronize_proxy(session_dir, full, providers, sources)
                 del sources
+                _prepare_agent_network(session_dir)
                 if agent is None:
                     if cmd:
                         cfg = load_yaml(session_dir / "compose.yaml")
@@ -813,6 +856,7 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
             compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", check=True)
             _synchronize_proxy(session_dir, full, providers, sources)
             del sources
+            _prepare_agent_network(session_dir)
             lifetime.enter_context(_proxy_lifetime(session_dir))
         # Dependency startup would be another proxy lifecycle action outside the lock.
         result = compose(session_dir, "run", "--rm", "--no-deps", "agent", *(cmd or []))

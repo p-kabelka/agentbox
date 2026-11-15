@@ -14,6 +14,7 @@ RUN dnf install -y \
 
 COPY start.sh /start.sh
 COPY --chmod=755 clone_repos.py /usr/local/bin/agentbox-clone
+COPY --chmod=755 configure_network.py /usr/local/bin/agentbox-network
 
 WORKDIR /workspace
 ENTRYPOINT ["/start.sh"]

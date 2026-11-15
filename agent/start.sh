@@ -1,6 +1,10 @@
 #!/bin/bash
 set -euo pipefail
 
+# passt disables DHCP on gateway-less internal networks. Restore only the
+# allocated address and connected subnet route before contacting either sidecar.
+/usr/local/bin/agentbox-network
+
 # Trust only the mitmproxy CA — the agent has no direct internet access,
 # all TLS is terminated at the proxy which re-signs with this CA.
 CA=/proxy-ca/mitmproxy-ca-cert.pem

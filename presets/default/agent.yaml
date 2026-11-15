@@ -5,6 +5,7 @@ agent_image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
 # annotations:
 #   krun.ram_mib: "2048"
 #   krun.cpus: "2"
+#   krun.use_passt: "1"  # Requires host passt; enables the internal-network IPv4 workaround.
 
 # Extra environment variables injected into the agent container.
 # These are merged with (and can override) the base env in compose-base.yaml.

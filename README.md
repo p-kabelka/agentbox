@@ -93,6 +93,37 @@ agentbox preset edit proxy new-preset
 agentbox preset edit agent new-preset
 ```
 
+### krun with passt networking
+
+To use passt instead of krun's default TSI backend, install `passt` on the host
+and add this to the preset's `agent.yaml` (merge with any existing annotations):
+
+```yaml
+annotations:
+  krun.use_passt: "1"
+```
+
+Some passt versions disable DHCP when the container's network namespace has no
+default gateway, as is intentional on `agent-net`. Agentbox works around this
+without a patched crun: each `start` refreshes the actual internal IPv4 subnet
+from Podman into a read-only `/agentbox-network` mount. Before cloning Git
+repositories or launching the harness, `agentbox-network` combines that subnet
+with the current container's allocated address in Podman's `/etc/hosts`.
+It configures `eth0` only when passt is enabled and IPv4 is missing. It adds
+neither a default route nor public DNS; `internal: true` remains unchanged.
+Working DHCP, TSI, and ordinary crun networking are left alone.
+
+Rebuild `base` and the harness image you use, then initialize a **new session**
+with the updated preset. Existing retained containers cannot acquire the new
+image or metadata mount on restart. Ephemeral sessions can instead be
+reinitialized with their preset. Do not pin the example IP addresses from another
+session or change the network to non-internal.
+
+This uses the standard Agentbox image entrypoint and Podman-generated
+`/etc/hosts`. A custom entrypoint must invoke `agentbox-network` before accessing
+the network. For a standalone `podman run` without the metadata mount, pass the
+actual internal network's subnet with `agentbox-network --subnet CIDR`.
+
 ---
 
 ## Quickstart
@@ -505,3 +536,13 @@ AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p test_git_sidecar
 ```
 
 This uses krun by default. On a machine without KVM, explicitly set `AGENTBOX_TEST_RUNTIME=crun` to test container networking and synchronization without claiming VM-isolation coverage. `AGENTBOX_IMAGE_TAG` must match the built images.
+
+To run the integration suite with passt, including DNS and internal-only guest
+routes across persistent VM restarts:
+
+```bash
+AGENTBOX_INTEGRATION=1 AGENTBOX_TEST_USE_PASST=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
+```
+
+The test flag sets the annotation on both the suite's generated preset and its
+standalone `podman run`; editing your normal preset does not configure these tests.
