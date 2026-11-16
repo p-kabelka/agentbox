@@ -67,7 +67,7 @@ def _project_name(session_dir: Path, meta: dict) -> str:
     return f"agentbox-{project}-{meta['name']}-{digest}"
 
 
-def _persistent_name(session_dir: Path, service: str) -> str:
+def _service_container_name(session_dir: Path, service: str) -> str:
     digest = hashlib.sha256(session_dir.name.encode()).hexdigest()[:20]
     return f"agentbox-{digest}-{service}"
 
@@ -443,9 +443,9 @@ def generate_compose(
     }
 
     for service in ("proxy", "git", "network"):
-        base["services"][service]["container_name"] = _persistent_name(session_dir, service)
+        base["services"][service]["container_name"] = _service_container_name(session_dir, service)
     base["services"]["agent"]["container_name"] = (
-        _persistent_name(session_dir, "agent") if persist
+        _service_container_name(session_dir, "agent") if persist
         else f"{_project_name(session_dir, base['x-metadata'])}_agent")
 
     # --- Proxy service ---
@@ -684,7 +684,7 @@ def git_remote_helper(url: str) -> int:
             sys.stdout.write("\n")
             sys.stdout.flush()
             return subprocess.run([
-                "podman", "exec", "-i", *env_args, _persistent_name(session_dir, "git"),
+                "podman", "exec", "-i", *env_args, _service_container_name(session_dir, "git"),
                 "git", "-c", "core.hooksPath=/dev/null", service,
                 f"/srv/git/repos/{repository}.git",
             ]).returncode
@@ -777,7 +777,7 @@ def cmd_mount(args) -> None:
 def _prepare_agent_network(session_dir: Path) -> None:
     """Write current addresses and install the allowlist in the running holder."""
     services = ("proxy", "git", "network")
-    result = subprocess.run(["podman", "inspect", *(_persistent_name(session_dir, service) for service in services)],
+    result = subprocess.run(["podman", "inspect", *(_service_container_name(session_dir, service) for service in services)],
                             capture_output=True, text=True, check=True)
     networks = {service: details["NetworkSettings"]["Networks"]
                 for service, details in zip(services, json.loads(result.stdout), strict=True)}
@@ -797,78 +797,79 @@ def _prepare_agent_network(session_dir: Path) -> None:
         die(f"cannot enforce agent network policy: {result.stderr.strip()}")
 
 
-def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
-    name = _persistent_name(session_dir, "agent")
+def _create_persistent_agent(session_dir: Path, project: str, name: str, cmd: list[str] | None) -> None:
+    if cmd:
+        cfg = load_yaml(session_dir / "compose.yaml")
+        cfg["services"]["agent"]["command"] = cmd
+        save_yaml(session_dir / "compose.yaml", cfg)
+    # podman-compose has no `create` subcommand. This creates only the agent,
+    # without restarting dependencies or recreating existing containers.
+    compose(session_dir, "up", "--no-start", "--no-deps", "--no-recreate", "agent", check=True)
+    if not any(c["name"] == name for c in _list_session_containers(project)):
+        die("Compose did not create the persistent agent service container")
+
+
+def _run_persistent_agent(session_dir: Path, project: str, name: str) -> int:
+    exit_code = None
+    try:
+        # start -ai blocks until exit. Stop may race here and stop the proxy
+        # after synchronization but before the agent starts.
+        attached = subprocess.run(["podman", "start", "-ai", name]).returncode
+    finally:
+        with _secret_sync_lock(session_dir, if_exists=True) as exists:
+            if exists:
+                try:
+                    agent = next((c for c in _list_session_containers(project) if c["name"] == name), None)
+                    if agent and agent["state"] == "exited":
+                        result = subprocess.run(["podman", "inspect", "--format", "{{.State.ExitCode}}", agent["id"]],
+                                                capture_output=True, text=True, check=True)
+                        exit_code = int(result.stdout.strip())
+                finally:
+                    _stop_persistent(session_dir)
+    return exit_code if isinstance(exit_code, int) else attached
+
+
+def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
     with ExitStack() as lifetime:
         with _secret_sync_lock(session_dir):
             lifetime.enter_context(_agent_lifetime(session_dir))
-            project_name = _project_name(session_dir, read_compose_metadata(session_dir))
-            containers = {c["name"]: c for c in _list_session_containers(project_name)}
-            agent = containers.get(name)
-            if agent and cmd:
-                die("a persistent agent already exists; start without -- CMD to reuse its saved command")
+            metadata = read_compose_metadata(session_dir)
+            persistent = _persistent(metadata)
+            project = _project_name(session_dir, metadata)
+            name = _service_container_name(session_dir, "agent") if persistent else f"{project}_agent"
+            agent = None
+            proxy_started_here = False
+            if persistent:
+                containers = {c["name"]: c for c in _list_session_containers(project)}
+                agent = containers.get(name)
+                if agent and cmd:
+                    die("a persistent agent already exists; start without -- CMD to reuse its saved command")
+                proxy_started_here = not _container_running(
+                    containers.get(_service_container_name(session_dir, "proxy")))
 
             full, providers, sources = _secret_preflight(session_dir)
-            proxy_started_here = not _container_running(containers.get(_persistent_name(session_dir, "proxy")))
             try:
-                # podman-compose's up otherwise tears down *all* services when
-                # the Compose YAML changes, including a retained agent.
+                # Never recreate retained services after a Compose YAML edit.
                 compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", "network", check=True)
                 _synchronize_proxy(session_dir, full, providers, sources)
                 del sources
+                if not persistent:
+                    lifetime.enter_context(_ephemeral_lifetime(session_dir))
                 _prepare_agent_network(session_dir)
-                if agent is None:
-                    if cmd:
-                        cfg = load_yaml(session_dir / "compose.yaml")
-                        cfg["services"]["agent"]["command"] = cmd
-                        save_yaml(session_dir / "compose.yaml", cfg)
-                    # podman-compose has no `create` subcommand. This creates
-                    # only the agent service, without restarting the proxy or
-                    # recreating an existing container after a YAML change.
-                    compose(session_dir, "up", "--no-start", "--no-deps", "--no-recreate", "agent", check=True)
-                    if not any(c["name"] == name for c in _list_session_containers(project_name)):
-                        die("Compose did not create the persistent agent service container")
+                if persistent and agent is None:
+                    _create_persistent_agent(session_dir, project, name, cmd)
             except BaseException:
                 if proxy_started_here:
                     _stop_persistent(session_dir)
                 raise
 
-        exit_code = None
-        try:
-            # start -ai blocks until exit. Stop may race here and stop the proxy
-            # after synchronization but before the agent starts.
-            attached = subprocess.run(["podman", "start", "-ai", name]).returncode
-        finally:
-            with _secret_sync_lock(session_dir, if_exists=True) as exists:
-                if exists:
-                    try:
-                        agent = next((c for c in _list_session_containers(project_name) if c["name"] == name), None)
-                        if agent and agent["state"] == "exited":
-                            result = subprocess.run(["podman", "inspect", "--format", "{{.State.ExitCode}}", agent["id"]],
-                                                    capture_output=True, text=True, check=True)
-                            exit_code = int(result.stdout.strip())
-                    finally:
-                        _stop_persistent(session_dir)
-        return exit_code if isinstance(exit_code, int) else attached
-
-
-def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
-    if _persistent(read_compose_metadata(session_dir)):
-        sys.exit(_launch_persistent(session_dir, cmd))
-    with ExitStack() as lifetime:
-        with _secret_sync_lock(session_dir):
-            lifetime.enter_context(_agent_lifetime(session_dir))
-            project = _project_name(session_dir, read_compose_metadata(session_dir))
-            full, providers, sources = _secret_preflight(session_dir)
-            compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", "network", check=True)
-            _synchronize_proxy(session_dir, full, providers, sources)
-            del sources
-            lifetime.enter_context(_ephemeral_lifetime(session_dir))
-            _prepare_agent_network(session_dir)
         # Dependency startup would be another proxy lifecycle action outside the lock.
-        result = compose(session_dir, "run", "--rm", "--no-deps", "--name", f"{project}_agent",
-                         "agent", *(cmd or []))
-    sys.exit(result.returncode)
+        if persistent:
+            exit_code = _run_persistent_agent(session_dir, project, name)
+        else:
+            exit_code = compose(session_dir, "run", "--rm", "--no-deps", "--name", name,
+                                "agent", *(cmd or [])).returncode
+    sys.exit(exit_code)
 
 
 def cmd_init(args) -> None:
@@ -887,7 +888,7 @@ def cmd_init(args) -> None:
                 die("cannot change a session's persistence mode; create a new named session")
             if meta.get("no-git", False) != args.no_git:
                 die("cannot change a session's workspace transport; create a new named session")
-            if args.persist and any(c["name"] == _persistent_name(session_dir, "agent")
+            if args.persist and any(c["name"] == _service_container_name(session_dir, "agent")
                                     for c in _list_session_containers(_project_name(session_dir, meta))):
                 die("persistent agent already exists; use start or create a new session")
         _init_session(session_dir, project_dir, name, args)
@@ -1089,7 +1090,7 @@ def cmd_proxy_restart(args) -> None:
 
 def _refresh_agent_network(session_dir: Path) -> None:
     result = subprocess.run(["podman", "inspect", "--format", "{{.State.Running}}",
-                             _persistent_name(session_dir, "network")],
+                             _service_container_name(session_dir, "network")],
                             capture_output=True, text=True)
     if result.returncode == 0 and result.stdout.strip() == "true":
         _prepare_agent_network(session_dir)
@@ -1268,8 +1269,8 @@ def _session_activity(session_dir: Path, meta: dict, running: str) -> tuple[bool
     project_name = _project_name(session_dir, meta)
     if persistent:
         containers = {c["name"]: c for c in _list_session_containers(project_name)}
-        agent = containers.get(_persistent_name(session_dir, "agent"))
-        proxy = containers.get(_persistent_name(session_dir, "proxy"))
+        agent = containers.get(_service_container_name(session_dir, "agent"))
+        proxy = containers.get(_service_container_name(session_dir, "proxy"))
         return True, _container_running(agent), _container_running(proxy)
     active = f"{project_name}_" in running
     return False, active, active

@@ -111,7 +111,7 @@ class HostPasstNetworkTest(unittest.TestCase):
         return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     def inspect(self, args, **kwargs):
-        self.assertEqual(args, ["podman", "inspect", *(self.g["_persistent_name"](self.session, service)
+        self.assertEqual(args, ["podman", "inspect", *(self.g["_service_container_name"](self.session, service)
                                                       for service in ("proxy", "git", "network"))])
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(self.details))
 

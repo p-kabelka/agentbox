@@ -77,7 +77,7 @@ class PersistentSandboxesTest(unittest.TestCase):
                 self.containers.clear()  # podman-compose's default up tears down the project
             if args[-1] in ("proxy", "git", "network"):
                 for service in (arg for arg in args if arg in ("proxy", "git", "network")):
-                    container = self.containers.get(self.agentbox["_persistent_name"](session, service))
+                    container = self.containers.get(self.agentbox["_service_container_name"](session, service))
                     if container is None:
                         container = self.container(service)
                     container["State"].update(Status="running", Running=True, Pid=12)
@@ -195,7 +195,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual(self.start(["tmux", "new-session"]), 7)
         self.assertIs(self.containers[proxy["Name"]], proxy)
         self.assertEqual([e[0] for e in self.events], ["up", "exec", "up", "stop"])
-        self.assertIn(self.agentbox["_persistent_name"](self.session, "agent"), self.containers)
+        self.assertIn(self.agentbox["_service_container_name"](self.session, "agent"), self.containers)
 
     def test_reuse_rejects_command_before_proxy_changes(self):
         self.start()
@@ -206,7 +206,7 @@ class PersistentSandboxesTest(unittest.TestCase):
 
     def test_agent_compose_edits_do_not_reconfigure_retained_container(self):
         self.start(["bash", "-l"])
-        name = self.agentbox["_persistent_name"](self.session, "agent")
+        name = self.agentbox["_service_container_name"](self.session, "agent")
         container = self.containers[name]
         saved = dict(container["Config"])
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
@@ -226,7 +226,40 @@ class PersistentSandboxesTest(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.agentbox["_launch"](self.session)
         self.assertEqual([e[0] for e in self.events], ["up", "exec", "stop"])
-        self.assertFalse(self.containers[self.agentbox["_persistent_name"](self.session, "proxy")]["State"]["Running"])
+        self.assertFalse(self.containers[self.agentbox["_service_container_name"](self.session, "proxy")]["State"]["Running"])
+
+    def test_preflight_failure_does_not_start_or_stop_services(self):
+        with patch.dict(self.g, _secret_preflight=lambda session: self.agentbox["die"]("preflight failed")):
+            self.assertEqual(self.start(), 1)
+        self.assertEqual(self.events, [])
+        self.assertEqual(self.containers, {})
+        self.assertEqual(self.starts, [])
+
+    def test_failed_sync_preserves_an_already_running_proxy(self):
+        proxy = self.container("proxy", "running")
+        self.compose_hash = (self.session / "compose.yaml").read_bytes()
+        self.sync_fails = True
+        self.assertEqual(self.start(), 1)
+        self.assertEqual([e[0] for e in self.events], ["up", "exec"])
+        self.assertTrue(proxy["State"]["Running"])
+        self.assertEqual(self.starts, [])
+
+    def test_network_failure_retains_agent_and_only_stops_a_newly_started_proxy(self):
+        for proxy_status in ("running", "exited"):
+            with self.subTest(proxy_status=proxy_status):
+                self.containers.clear()
+                self.events.clear()
+                agent = self.container("agent", "exited")
+                proxy = self.container("proxy", proxy_status)
+                self.compose_hash = (self.session / "compose.yaml").read_bytes()
+                with patch.dict(self.g, _prepare_agent_network=lambda session: self.agentbox["die"]("network failed")):
+                    self.assertEqual(self.start(), 1)
+                expected = ["up", "exec"] + (["stop"] if proxy_status == "exited" else [])
+                self.assertEqual([e[0] for e in self.events], expected)
+                self.assertIs(self.containers[agent["Name"]], agent)
+                self.assertFalse(agent["State"]["Running"])
+                self.assertEqual(proxy["State"]["Running"], proxy_status == "running")
+                self.assertEqual(self.starts, [])
 
     def test_recovery_refuses_running_unattached_agent(self):
         self.container("agent", "running")
@@ -403,7 +436,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         self.start_return = 125
         self.assertEqual(self.start(), 125)
-        self.assertFalse(self.containers[self.agentbox["_persistent_name"](self.session, "agent")]["State"]["Running"])
+        self.assertFalse(self.containers[self.agentbox["_service_container_name"](self.session, "agent")]["State"]["Running"])
 
 
 class PodmanComposeCompatibilityTest(unittest.TestCase):

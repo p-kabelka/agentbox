@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
-from contextlib import redirect_stderr
+from contextlib import contextmanager, redirect_stderr
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -81,6 +81,40 @@ class SingleAgentTest(unittest.TestCase):
         with self.agentbox["_agent_lifetime"](self.session):
             with self.agentbox["_agent_lifetime"](other):
                 pass
+
+    def test_start_derives_mode_and_project_from_one_metadata_read_under_sync_lock(self):
+        sync_lock = self.g["_secret_sync_lock"]
+        locked = False
+
+        @contextmanager
+        def lock(*args, **kwargs):
+            nonlocal locked
+            with sync_lock(*args, **kwargs) as exists:
+                locked = True
+                try:
+                    yield exists
+                finally:
+                    locked = False
+
+        for persistent in (False, True):
+            with self.subTest(persistent=persistent):
+                metadata = {**self.agentbox["read_compose_metadata"](self.session), "persist": persistent}
+
+                def read(session):
+                    self.assertTrue(locked, "Metadata was read outside the synchronization lock")
+                    return metadata
+
+                read_metadata = Mock(side_effect=read)
+                mode = Mock(wraps=self.agentbox["_persistent"])
+                project = Mock(wraps=self.agentbox["_project_name"])
+                with patch.dict(self.g, _secret_sync_lock=lock, read_compose_metadata=read_metadata,
+                                _persistent=mode, _project_name=project,
+                                _list_session_containers=lambda project: [],
+                                _create_persistent_agent=Mock(), _run_persistent_agent=Mock(return_value=0)):
+                    self.assertEqual(self.start(), 0)
+                read_metadata.assert_called_once_with(self.session)
+                mode.assert_called_once_with(metadata)
+                project.assert_called_once_with(self.session, metadata)
 
     def test_failed_start_releases_ownership_for_retry(self):
         self.preflight.side_effect = SystemExit(1)

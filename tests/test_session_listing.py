@@ -51,7 +51,7 @@ class SessionListingTest(unittest.TestCase):
         containers = self.containers[project_name] = []
         for service, state in (("agent", agent), ("proxy", proxy)):
             if state is not None:
-                name = (self.agentbox["_persistent_name"](session, service) if persistent
+                name = (self.agentbox["_service_container_name"](session, service) if persistent
                         else f"{project_name}_{service}_1")
                 containers.append({"id": name + "-id", "name": name, "state": state,
                                    "pid": "42" if state == "running" else "0"})

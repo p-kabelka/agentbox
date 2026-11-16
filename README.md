@@ -581,10 +581,11 @@ mitmproxy dependency enables the real TLS/ALPN and HTTP streaming/reload regress
 TLS negotiation runs in memory without sockets. The streaming regression requires
 working local TCP listeners and reports a skip when the environment cannot provide them.
 
-For real containers, first build `base network git proxy`, then run:
+For real containers, first build `base network git proxy`, then run the Git and
+network isolation integration suites:
 
 ```bash
-AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
+AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p 'test_*_integration.py' -v
 ```
 
 This uses krun by default. On a machine without KVM, explicitly set `AGENTBOX_TEST_RUNTIME=crun` to test container networking and synchronization without claiming VM-isolation coverage. `AGENTBOX_IMAGE_TAG` must match the built images.
@@ -594,8 +595,12 @@ sockets, a 4 MiB push/clone round trip, and internal-only guest routes across
 persistent VM restarts:
 
 ```bash
-AGENTBOX_INTEGRATION=1 AGENTBOX_TEST_USE_PASST=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
+AGENTBOX_INTEGRATION=1 AGENTBOX_TEST_USE_PASST=1 python3 -m unittest discover -s tests -p 'test_*_integration.py' -v
 ```
 
 The test flag sets the annotation on the suite's generated preset; editing your
 normal preset does not configure these tests.
+
+Use `-p test_git_sidecar_integration.py` for Git sharing and workspace lifecycle,
+or `-p test_network_isolation_integration.py` for firewall, proxy, and passt
+networking checks. Both use the shared fixture in `tests/integration_support.py`.
