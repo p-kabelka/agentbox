@@ -96,7 +96,8 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.agentbox = runpy.run_path(str(ROOT / "bin/agentbox"))
         self.g = self.agentbox["main"].__globals__
         self.calls = []
-        p = patch.dict(self.g, AGENTBOX_HOME=ROOT, _resolve_images=lambda images: images, compose=self.compose)
+        p = patch.dict(self.g, AGENTBOX_HOME=ROOT, _resolve_images=lambda images: images,
+                       _running_agent=lambda session: False, compose=self.compose)
         p.start()
         self.addCleanup(p.stop)
         self.agentbox["generate_compose"](self.session, self.session.parent, "feature", 9876, {}, {}, [])
@@ -116,6 +117,8 @@ class HostPasstNetworkTest(unittest.TestCase):
 
     def test_topology_has_native_guard_and_drops_agent_network_capabilities(self):
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
+        project = self.g["_project_name"](self.session, cfg["x-metadata"])
+        self.assertEqual(cfg["services"]["agent"]["container_name"], f"{project}_agent")
         self.assertEqual(cfg["services"]["agent"]["network_mode"], "service:network")
         self.assertEqual(cfg["services"]["agent"]["cap_drop"], ["NET_ADMIN", "NET_RAW"])
         self.assertEqual(cfg["services"]["guard"]["network_mode"], "service:network")

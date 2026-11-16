@@ -117,8 +117,13 @@ class PersistentSandboxesTest(unittest.TestCase):
                     return subprocess.CompletedProcess(args, 0, stdout="\n".join(
                         f"{c['Id']}\t{c['Name']}" for c in containers))
                 return subprocess.CompletedProcess(args, 0, stdout="\n".join(c["Id"] for c in containers))
+            filters = [args[i + 1].removeprefix("label=").partition("=")
+                       for i, arg in enumerate(args) if arg == "--filter"]
             return subprocess.CompletedProcess(args, 0, stdout="\n".join(
-                c["Name"] for c in self.containers.values() if c["State"]["Running"]))
+                c["Name"] for c in self.containers.values() if c["State"]["Running"]
+                and all(key in c["Config"]["Labels"] and
+                        (not separator or c["Config"]["Labels"][key] == value)
+                        for key, separator, value in filters)))
         if args[:3] == ["podman", "inspect", "--format"]:
             state = next(c["State"] for c in self.containers.values() if c["Id"] == args[4])
             if args[3] == "{{.State.ExitCode}}":

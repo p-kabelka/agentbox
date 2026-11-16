@@ -168,6 +168,7 @@ class HostSecretsTest(unittest.TestCase):
         self.agentbox["generate_compose"](self.session, self.project, "test", 1234, self.cfg, {}, [])
         self.args = types.SimpleNamespace()
         self.patches = patch.dict(self.g, resolve_session=lambda args: (self.session, self.project),
+                                  _running_agent=lambda session: False,
                                   _prepare_agent_network=lambda session: None,
                                   _refresh_agent_network=lambda session: None)
         self.patches.start()
@@ -452,7 +453,7 @@ class HostSecretsTest(unittest.TestCase):
                 self.assertEqual(errors, [])
 
     def test_final_lifetime_teardown_waits_for_sync_lock(self):
-        context = self.agentbox["_proxy_lifetime"](self.session)
+        context = self.agentbox["_ephemeral_lifetime"](self.session)
         with self.agentbox["_secret_sync_lock"](self.session):
             context.__enter__()
         with patch.dict(self.g, compose=self.compose):

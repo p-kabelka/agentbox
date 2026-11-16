@@ -2,7 +2,7 @@
 
 ## 1. Overview
 
-agentbox creates isolated, credential-safe workspaces for running AI coding agents such as Claude Code, OpenCode, and Codex CLI. Each session has a proxy, a Git sidecar, and one or more agents connected by a private internal network. Only the proxy can reach external networks.
+agentbox creates isolated, credential-safe workspaces for running AI coding agents such as Claude Code, OpenCode, and Codex CLI. Each session has a proxy, a Git sidecar, and one agent connected by a private internal network. Only the proxy can reach external networks.
 
 The core problem is that AI agents run with broad process permissions. If an agent is compromised through prompt injection or malicious content in the working directory, it can read API credentials from environment variables or well-known paths, exfiltrate them to attacker-controlled endpoints, make arbitrary outbound network calls, or inject malicious hooks into the host's `.git/` directory that execute silently when a developer runs routine git operations.
 
@@ -168,7 +168,9 @@ Host fetching, review, and merging are manual. Ordinary exit/stop retains the Gi
 
 `agentbox init` creates the session's configuration and dotfiles under `$AGENTBOX_STATE/sessions/`, generates `compose.yaml`, then releases its configuration lock before sharing the project through the Git sidecar unless `--no-git`. `--start` immediately launches the agent. `mount` records shares in the separate `git-repositories.json` without rewriting Compose, recreating the agent, or changing its mounts. Sharing and host Git transfers do not acquire the proxy/lifecycle lock, so large pushes do not delay `proxy reload`, `stop`, or `remove`; teardown may interrupt them and leave incomplete sharing state to retry or clean up. All host remotes are named `agentbox-<full-session-id>`; linked worktrees reuse the same remote and sidecar repository for their branches.
 
-`agentbox start` preflights configuration/provider files, starts/reuses both sidecars with one `compose up -d --no-recreate proxy git`, synchronizes credentials through stdin, and verifies the proxy reload before launching the agent. Read-only configuration and dotfile mounts are unchanged. Without `--persist`, `compose run --rm --no-deps agent` launches independent agents concurrently. The last exit tears the project down without deleting named volumes. Exit does not fetch output.
+`agentbox start` acquires exclusive session ownership before preflight, provider synchronization, or service/network changes. A second simultaneous start fails with "session already running" in both modes. A running agent left by a killed CLI also blocks startup; recover it with `agentbox stop`. Separate sessions may run simultaneously.
+
+After the ownership check, `start` preflights configuration/provider files, starts/reuses both sidecars with one `compose up -d --no-recreate proxy git`, synchronizes credentials through stdin, and verifies the proxy reload before launching the agent. Read-only configuration and dotfile mounts are unchanged. Without `--persist`, `compose run --rm --no-deps --name <project>_agent agent` launches one removable agent with a deterministic name as a runtime-level backstop against duplicate creation. The generated agent service uses that same name so Compose stop/remove can find it, even after its CLI dies. Exit tears the project down without deleting named volumes or fetching output. Ownership remains held through teardown, while `stop`, `remove`, and proxy reload remain usable.
 
 With `init --persist`, first start creates the named agent service with `compose up --no-start --no-deps --no-recreate agent`, then attaches using `podman start -ai`. Later starts reuse that same container and saved command. Only one attached start may own it. Exit/stop retain the agent, sidecars, and namespace holder; the one-shot guard removes itself after installation. Remove deletes retained containers and their volumes. Workspace/home files survive restart, not processes. Agent image/environment/mounts/command are fixed at creation, but new Git shares can be cloned explicitly without recreation. Every start resynchronizes configuration/credentials and clones any missing shares once. See [the persistent lifecycle contract](SPEC-persistent-sandboxes.md).
 
@@ -202,7 +204,7 @@ Each session directory describes its configuration; repository data is in Compos
 | `proxy-config/proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init; sole authority for provider secret declarations |
 | `network-config/network.json` | Read-only sidecar addresses and guest IPv4 address/prefix for agent startup |
 | `.secret-sync.lock` | Exclusive synchronization/lifecycle lock; contains no secret data |
-| `.lifetime.lock` | Shared by concurrent ephemeral agents; exclusively owned by an attached persistent start |
+| `.lifetime.lock` | Exclusive, nonblocking session ownership held by either kind of start through cleanup |
 | `dotfiles/` | Extracted dotfiles from preset `agent.yaml` |
 | `git-repositories.json` | Share names mapped to host Git common directories (shared by linked worktrees); bare data lives only in the `git-data` named volume. Remote names are derived from the session ID; branches live in Git. |
 

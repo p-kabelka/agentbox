@@ -216,7 +216,7 @@ The exclusive lock is:
 
 It is held from before any CLI-managed proxy lifecycle action through configuration snapshot, target reset, transfer, and reload. It contains no secret data.
 
-`compose()`, `_proxy_lifetime()`, `_launch()`, and the relevant CLI commands already provide the lifecycle structure at `bin/agentbox:122-171,417-423,564-659`. Add one-shot synchronization only to `_launch()`, `proxy reload`, and `proxy restart`; keep `allow` and `deny` on fast reload. Add the synchronization lock to those operations, final lifetime teardown, `stop`, and `remove` rather than creating a second lifecycle manager.
+`compose()`, `_agent_lifetime()`, `_ephemeral_lifetime()`, `_launch()`, and the relevant CLI commands provide the lifecycle structure. One-shot synchronization belongs only in startup, `proxy reload`, and `proxy restart`; keep `allow` and `deny` on fast reload. The synchronization lock covers those operations, lifetime teardown, `stop`, and `remove`, without introducing a second lifecycle manager.
 
 ---
 

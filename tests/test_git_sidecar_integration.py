@@ -175,7 +175,7 @@ for command in sys.stdin:
     def read_agent_output(self, process, marker, timeout=15):
         output = bytearray()
         deadline = time.monotonic() + timeout
-        while marker not in output:
+        while marker not in output.splitlines():
             ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
             if not ready:
                 break
@@ -183,7 +183,7 @@ for command in sys.stdin:
             if not chunk:
                 break
             output.extend(chunk)
-        self.assertIn(marker, output, output.decode(errors="replace"))
+        self.assertIn(marker, output.splitlines(), output.decode(errors="replace"))
 
     def check_waiting_agent(self, process):
         self.assertIsNone(process.poll(), "Agent attachment exited")
@@ -213,41 +213,87 @@ for command in sys.stdin:
         self.assertEqual(self.run_command(identity).stdout, original)
         self.finish_waiting_agent(process)
 
-    def test_network_installer_failure_preserves_concurrent_ephemeral_agents_and_policy(self):
+    def test_network_installer_failure_preserves_ephemeral_agent_and_policy(self):
         self.initialize()
-        agents = [self.start_waiting_agent(), self.start_waiting_agent()]
+        process = self.start_waiting_agent()
         original = {c["name"]: (c["id"], c["pid"]) for c in
                     json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)}
-        self.assertEqual(len(original), 5)  # Two agents, two sidecars, and the unprivileged holder.
+        self.assertEqual(len(original), 4)  # One agent, two sidecars, and the unprivileged holder.
         cfg = self.config()
         cfg["services"]["guard"]["entrypoint"] = ["/usr/bin/false"]
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         failed = self.cli("proxy", "reload", "--session", self.session_id, check=False)
         self.assertNotEqual(failed.returncode, 0)
         self.assertIn("cannot enforce agent network policy", failed.stderr)
-        for process in agents:
-            self.check_waiting_agent(process)
+        self.check_waiting_agent(process)
         del cfg["services"]["guard"]["entrypoint"]
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         self.cli("proxy", "reload", "--session", self.session_id)
-        for process in agents:
-            self.check_waiting_agent(process)
+        self.check_waiting_agent(process)
         current = {c["name"]: (c["id"], c["pid"]) for c in
                    json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)}
         self.assertEqual(current, original)
-        for process in agents:
-            self.finish_waiting_agent(process)
+        self.finish_waiting_agent(process)
 
-    def test_network_holder_restart_filters_new_agents_in_the_current_namespace(self):
+    def assert_second_start_rejected(self, *, persistent):
+        self.initialize(*(["--persist"] if persistent else []))
+        process = self.start_waiting_agent()
+        before = json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
+        metadata = (self.session / "network-config/network.json").stat()
+        rejected = self.cli("start", "--session", self.session_id, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("session already running", rejected.stderr)
+        after = json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
+        self.assertEqual(after, before)
+        self.assertEqual((self.session / "network-config/network.json").stat().st_ino, metadata.st_ino)
+        self.check_waiting_agent(process)
+        self.finish_waiting_agent(process)
+        if not persistent:
+            # Releasing ownership permits the next agent and a fresh passt instance.
+            self.cli("start", "--session", self.session_id, "--", "true")
+
+    def test_ephemeral_session_rejects_second_start_without_side_effects(self):
+        self.assert_second_start_rejected(persistent=False)
+
+    def test_persistent_session_rejects_second_start_without_side_effects(self):
+        self.assert_second_start_rejected(persistent=True)
+
+    def test_ephemeral_session_refuses_unattached_agent_until_stopped(self):
         self.initialize()
-        old = self.start_waiting_agent()  # Keep the original namespace and session alive.
+        process = self.start_waiting_agent()
+        process.kill()  # Release the CLI lock without stopping its agent container.
+        process.wait(timeout=10)
+        rejected = self.cli("start", "--session", self.session_id, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("unattached agent", rejected.stderr)
+        self.cli("stop", "--session", self.session_id)
+        self.assertEqual(json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout), [])
+        self.cli("start", "--session", self.session_id, "--", "true")
+
+    def test_network_holder_restart_filters_its_current_namespace_without_restarting_agent(self):
+        self.initialize()
+        process = self.start_waiting_agent()
         holder = self.config()["services"]["network"]["container_name"]
         self.run_command(["podman", "kill", holder])
-        new = self.start_waiting_agent()  # Checks sidecar access and management-port denial.
-        self.check_waiting_agent(new)
-        self.assertIsNone(old.poll(), "Holder failure terminated the existing agent")
-        self.finish_waiting_agent(new)
-        self.finish_waiting_agent(old)
+        self.run_command(["podman", "start", holder])
+        self.cli("proxy", "reload", "--session", self.session_id)
+        # Probe the replacement namespace directly, without launching a second
+        # agent. A reused installer in the old namespace would leave this open.
+        endpoints = json.loads((self.session / "network-config/network.json").read_text())["endpoints"]
+        self.run_command(["podman", "exec", holder, "python3", "-c", f"ENDPOINTS={endpoints!r}\n" + """
+import socket
+for service, port in (('proxy', 8080), ('git', 9418), ('git', 8083)):
+    with socket.create_connection((ENDPOINTS[service], port), timeout=5):
+        pass
+for port in (8081, 8082, 9090):
+    try:
+        with socket.create_connection((ENDPOINTS['proxy'], port), timeout=1):
+            raise AssertionError(('Management port reachable', port))
+    except OSError:
+        pass
+"""])
+        self.assertIsNone(process.poll(), "Holder failure terminated the existing agent")
+        self.finish_waiting_agent(process)
 
     def test_workspace_round_trip_selected_branch_and_sidecar_survives_teardown(self):
         self.git(self.project, "checkout", "-qb", "chosen")
@@ -925,6 +971,19 @@ with context.wrap_socket(raw, server_hostname='upstream.example') as client:
     assert all(body.startswith(b'EXTERNAL_FIXTURE_OK H2 ') for body in bodies.values()), bodies
     assert len({body.split()[-1] for body in bodies.values()}) == 1, bodies
 """])
+
+
+class AgentOutputTest(unittest.TestCase):
+    def test_readiness_requires_a_marker_line_not_an_error_quoting_the_command(self):
+        script = "print(\"Error executing: print('NETWORK_LIFETIME_READY')\", flush=True)"
+        with subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE) as process:
+            with self.assertRaisesRegex(AssertionError, "Error executing"):
+                GitSidecarIntegrationTest().read_agent_output(process, b"NETWORK_LIFETIME_READY")
+
+    def test_readiness_accepts_a_complete_marker_line(self):
+        script = "print('banner\\nNETWORK_LIFETIME_READY', flush=True)"
+        with subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE) as process:
+            GitSidecarIntegrationTest().read_agent_output(process, b"NETWORK_LIFETIME_READY")
 
 
 if __name__ == "__main__":

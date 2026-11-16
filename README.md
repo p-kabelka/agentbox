@@ -8,7 +8,7 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](d
 
 ## How it works
 
-Each session has a **proxy** (holds real credentials and controls internet access), a **Git sidecar**, and one or more **agents** (hold no credentials and have no internet route). In Git-backed sessions, repositories travel through pushes and clones, not host filesystem mounts. The sidecar stores bare repositories in a named volume, uses only the session's internal network, and publishes no ports. There are no writable host-directory bind mounts by default; read-only dotfiles and proxy configuration mounts remain.
+Each session has a **proxy** (holds real credentials and controls internet access), a **Git sidecar**, and one **agent** (holds no credentials and has no internet route). In Git-backed sessions, repositories travel through pushes and clones, not host filesystem mounts. The sidecar stores bare repositories in a named volume, uses only the session's internal network, and publishes no ports. There are no writable host-directory bind mounts by default; read-only dotfiles and proxy configuration mounts remain.
 
 The agent uses a network namespace held by a minimal service outside the
 microVM. Before every launch, a one-shot **network guard** joins the holder's
@@ -213,7 +213,9 @@ agentbox stop   [--name NAME]            # stop containers
 agentbox remove [--name NAME]            # delete session, sidecar repositories, and registered remotes
 ```
 
-`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. By default, `agentbox start` can run independent agents concurrently; the sidecars stay up until the last agent exits, then `compose down` tears the project down without deleting named volumes. With `init --persist`, the agent is one retained service container; `start -- CMD` is only valid before first creation, later starts use its saved command, and a second simultaneous start fails. `stop` retains the persistent containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running agent; use another ephemeral start or separate session for parallel shells.
+`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. **Each session permits only one running agent container**, in both ephemeral and persistent modes. A second `start` fails before changing credentials, sidecars, or network policy. Use separate named sessions for simultaneous agents.
+
+By default, `start` launches a removable agent; its exit tears the project down without deleting named volumes. With `init --persist`, the agent is one retained service container; `start -- CMD` is only valid before first creation, and later starts use its saved command. `stop` retains persistent containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running agent; use tmux inside the agent or a separate session for parallel shells.
 
 Everywhere where `--name` can be used, the parameter `--session` can also be used when you provide the session global ID found in `agentbox list --all`.
 

@@ -141,6 +141,12 @@ no automatic restart policy. If it fails, existing agents are not terminated or
 deleted; their networking can be interrupted. Before launching another agent,
 the CLI restarts the holder and installs rules in its new namespace.
 
+Each session permits only one running agent container. An exclusive lifetime
+lock is acquired before startup side effects and held through cleanup, and a
+running agent left by a killed CLI also blocks startup. This also avoids two
+passt instances competing for forwarded ports in the shared outer namespace.
+Simultaneous agents use separate sessions, not additional starts of one session.
+
 The native-crun proxy independently rejects TCP connections to host IPs, either
 session network, loopback, and link-local addresses. A Python socket audit hook
 checks the numeric address passed to each actual connect call, after DNS, so
@@ -357,7 +363,7 @@ At `agentbox init` time, `compose-base.yaml` (the shared template defining image
 
 The `compose.yaml` is generated at init and then user-owned: edits persist across `agentbox start` calls. Running `agentbox init` again regenerates an ephemeral session, preserving its web port and context mounts. Persistent sessions may be re-initialized only before the agent container has been created.
 
-By default, each `start` launches a removable one-off agent; multiple starts share both sidecars. `init --persist` instead gives the agent and proxy fixed service names; the Git service always has a fixed session-specific name. First start creates the agent with `compose up --no-start --no-deps --no-recreate agent`, then attaches with `podman start -ai`; later starts reuse it. Sidecar startup uses `--no-recreate` to protect retained agents after user Compose edits; sharing updates only a separate registry. Lifetime and synchronization locks protect ownership, configuration, startup, and teardown. Git publication (including the initial workspace push) and host transfers run outside those locks, allowing proxy reload and stop/remove without waiting for large transfers; teardown may interrupt sharing. Persistent cleanup stops all services; ephemeral cleanup tears them down while retaining named volumes. Published output remains available for manual fetching after either form of shutdown. `remove` uses `compose down -v`. Saved agent image/environment/mounts/command remain unchanged on restart.
+By default, each `start` launches one removable agent with a fixed session-specific run name. `init --persist` instead retains the agent as a fixed-name service container; the proxy, Git service, and namespace holder also have fixed session-specific names. First persistent start creates the agent with `compose up --no-start --no-deps --no-recreate agent`, then attaches with `podman start -ai`; later starts reuse it. Sidecar startup uses `--no-recreate` to protect retained agents after user Compose edits; sharing updates only a separate registry. Both modes share the same exclusive lifetime ownership lock, acquired before startup changes and held through teardown. The synchronization lock still serializes configuration and service changes without blocking stop/remove or reload for the duration of an attached agent. Git publication (including the initial workspace push) and host transfers run outside those locks, allowing proxy reload and stop/remove without waiting for large transfers; teardown may interrupt sharing. Persistent cleanup stops all services; ephemeral cleanup tears them down while retaining named volumes. Published output remains available for manual fetching after either form of shutdown. `remove` uses `compose down -v`. Saved agent image/environment/mounts/command remain unchanged on persistent restart.
 
 ### 6.7 Hot-reload over proxy restart for allowlist changes
 

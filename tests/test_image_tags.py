@@ -172,6 +172,7 @@ class ImageTagsTest(unittest.TestCase):
         agentbox = runpy.run_path(str(ROOT / "bin" / "agentbox"))
         self.assertEqual(agentbox["AGENTBOX_IMAGE_TAG"], "latest")
         with (patch.dict(agentbox["main"].__globals__,
+                          _running_agent=lambda session: False,
                           _prepare_agent_network=lambda session: None,
                           _synchronize_proxy=lambda *args: None),
               patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run,
@@ -181,7 +182,9 @@ class ImageTagsTest(unittest.TestCase):
         self.assertEqual(result.exception.code, 0)
         self.assertEqual((session / "compose.yaml").read_bytes(), original)
         self.assertEqual(run.call_args_list[0].args[0][-5:], ["up", "-d", "--no-recreate", "proxy", "git"])
-        self.assertEqual(run.call_args_list[1].args[0][-4:], ["run", "--rm", "--no-deps", "agent"])
+        project = agentbox["_project_name"](session, yaml.safe_load(original)["x-metadata"])
+        self.assertEqual(run.call_args_list[1].args[0][-6:],
+                         ["run", "--rm", "--no-deps", "--name", f"{project}_agent", "agent"])
 
     def test_build_update_defaults_and_explicit_tag_override(self):
         harnesses = ["base", "proxy", "git", "network", "opencode", "claude", "codex", "cursor"]
