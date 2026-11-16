@@ -265,7 +265,7 @@ class HostSecretsTest(unittest.TestCase):
             with self.assertRaises(SystemExit) as exit:
                 self.agentbox["_launch"](self.session)
         self.assertEqual(exit.exception.code, 0)
-        up_index = self.events.index(("up", "-d", "--no-recreate", "proxy", "git"))
+        up_index = self.events.index(("up", "-d", "--no-recreate", "proxy", "git", "network"))
         sync_index = next(i for i, e in enumerate(self.events) if e[-1] == "sync")
         run_index = next(i for i, e in enumerate(self.events) if e[0] == "run")
         self.assertTrue(up_index < sync_index < run_index)
@@ -480,7 +480,7 @@ class HostSecretsTest(unittest.TestCase):
         self.assertEqual(len(self.events), 1)
         self.assertTrue(self.events[0][-1].endswith("/reload"))
 
-    def test_allow_protocol_conflict_requests_restart(self):
+    def test_allow_connection_policy_conflict_requests_restart(self):
         def conflict(session, *args, **kwargs):
             self.events.append(args)
             return subprocess.CompletedProcess(args, 0, stdout='{"restart_required":true}\n409')
@@ -488,10 +488,11 @@ class HostSecretsTest(unittest.TestCase):
         with patch.dict(self.g, compose=conflict), redirect_stderr(output), redirect_stdout(output), self.assertRaises(SystemExit):
             self.agentbox["_update_allowlist"]("new.example", True, self.args)
         self.assertIn("saved but not active", output.getvalue())
+        self.assertIn("connection policy changed", output.getvalue())
         self.assertIn("proxy restart", output.getvalue())
         self.assertEqual(len(self.events), 1)
 
-    def test_synchronization_protocol_conflict_requests_restart(self):
+    def test_synchronization_connection_policy_conflict_requests_restart(self):
         def conflict(session, *args, **kwargs):
             reply = {"status": 409, "body": {"restart_required": True}}
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(reply).encode())
@@ -500,6 +501,7 @@ class HostSecretsTest(unittest.TestCase):
         with patch.dict(self.g, compose=conflict), redirect_stderr(output), self.assertRaises(SystemExit):
             self.agentbox["_synchronize_proxy"](self.session, full, providers, sources)
         self.assertIn("proxy restart", output.getvalue())
+        self.assertIn("connection policy changed", output.getvalue())
 
 
 class ComposeCompatibilityTest(unittest.TestCase):

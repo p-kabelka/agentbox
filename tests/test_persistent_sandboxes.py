@@ -75,8 +75,8 @@ class PersistentSandboxesTest(unittest.TestCase):
             current_hash = (session / "compose.yaml").read_bytes()
             if self.containers and current_hash != self.compose_hash and "--no-recreate" not in args:
                 self.containers.clear()  # podman-compose's default up tears down the project
-            if args[-1] in ("proxy", "git"):
-                for service in (arg for arg in args if arg in ("proxy", "git")):
+            if args[-1] in ("proxy", "git", "network"):
+                for service in (arg for arg in args if arg in ("proxy", "git", "network")):
                     container = self.containers.get(self.agentbox["_persistent_name"](session, service))
                     if container is None:
                         container = self.container(service)
@@ -167,7 +167,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertEqual([e for e in self.events if e[-1] == "agent"],
                          [("up", "--no-start", "--no-deps", "--no-recreate", "agent")])
         self.assertEqual([e for e in self.events if e[0] == "up" and "proxy" in e],
-                         [("up", "-d", "--no-recreate", "proxy", "git")] * 2)
+                         [("up", "-d", "--no-recreate", "proxy", "git", "network")] * 2)
         self.assertEqual(self.starts, [("podman", "start", "-ai", name)] * 2)
         self.assertEqual([e for e in self.events if e[0] == "stop"], [("stop",)] * 2)
         self.assertFalse(any(e[0] in ("run", "down") for e in self.events))
@@ -219,7 +219,7 @@ class PersistentSandboxesTest(unittest.TestCase):
         self.assertIs(self.containers[name], container)
         self.assertEqual(container["Config"], saved)
         self.assertEqual([e[0] for e in self.events], ["up", "exec", "stop"])
-        self.assertIn(("up", "-d", "--no-recreate", "proxy", "git"), self.events)
+        self.assertIn(("up", "-d", "--no-recreate", "proxy", "git", "network"), self.events)
 
     def test_failed_sync_does_not_create_agent_and_stops_new_proxy(self):
         self.sync_fails = True

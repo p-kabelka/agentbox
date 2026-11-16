@@ -94,8 +94,12 @@ mitmproxy's DNS handler bypasses HTTP request policy even with `rawtcp=false`.
 Private remote APIs require exact `private_upstreams` IP entries
 in the trusted proxy configuration in addition to an L7 rule; those entries
 cannot override host, loopback, link-local, or session-subnet blocks.
-The exception set is validated and committed with the rest of the proxy
-configuration; failed reloads retain the complete previous runtime policy.
+The exception set is validated at proxy startup and fixed for that process.
+Adding or removing exceptions requires `proxy restart`, which closes pooled
+connections that might otherwise retain revoked access. Both reload endpoints
+return HTTP 409 with `restart_required: true` and retain the complete previous
+runtime if the set changes. Reordering, duplicates, and equivalent IPv4-mapped
+addresses do not change the set.
 
 The guard is a one-shot installer, not a daemon. The host atomically writes
 `network.json`, then invokes `compose run --rm --no-deps -T guard`. A fresh
@@ -170,7 +174,7 @@ Host fetching, review, and merging are manual. Ordinary exit/stop retains the Gi
 
 `agentbox start` acquires exclusive session ownership before preflight, provider synchronization, or service/network changes. A second simultaneous start fails with "session already running" in both modes. A running agent left by a killed CLI also blocks startup; recover it with `agentbox stop`. Separate sessions may run simultaneously.
 
-After the ownership check, `start` preflights configuration/provider files, starts/reuses both sidecars with one `compose up -d --no-recreate proxy git`, synchronizes credentials through stdin, and verifies the proxy reload before launching the agent. Read-only configuration and dotfile mounts are unchanged. Without `--persist`, `compose run --rm --no-deps --name <project>_agent agent` launches one removable agent with a deterministic name as a runtime-level backstop against duplicate creation. The generated agent service uses that same name so Compose stop/remove can find it, even after its CLI dies. Exit tears the project down without deleting named volumes or fetching output. Ownership remains held through teardown, while `stop`, `remove`, and proxy reload remain usable.
+After the ownership check, `start` preflights configuration/provider files, starts/reuses both sidecars and the namespace holder with one `compose up -d --no-recreate proxy git network`, synchronizes credentials through stdin, and verifies the proxy reload before installing the network policy and launching the agent. Policy refresh only installs rules in an already-running holder; it never starts or restarts it. Read-only configuration and dotfile mounts are unchanged. Without `--persist`, `compose run --rm --no-deps --name <project>_agent agent` launches one removable agent with a deterministic name as a runtime-level backstop against duplicate creation. The generated agent service uses that same name so Compose stop/remove can find it, even after its CLI dies. Exit tears the project down without deleting named volumes or fetching output. Ownership remains held through teardown, while `stop`, `remove`, and proxy reload remain usable.
 
 With `init --persist`, first start creates the named agent service with `compose up --no-start --no-deps --no-recreate agent`, then attaches using `podman start -ai`. Later starts reuse that same container and saved command. Only one attached start may own it. Exit/stop retain the agent, sidecars, and namespace holder; the one-shot guard removes itself after installation. Remove deletes retained containers and their volumes. Workspace/home files survive restart, not processes. Agent image/environment/mounts/command are fixed at creation, but new Git shares can be cloned explicitly without recreation. Every start resynchronizes configuration/credentials and clones any missing shares once. See [the persistent lifecycle contract](SPEC-persistent-sandboxes.md).
 
@@ -336,6 +340,7 @@ All regex patterns use Python `re` syntax and support environment variable expan
 | `proxy_volumes` | No | List of `{src, dst}` read-only mounts (e.g., gcloud ADC at `/root/.config/gcloud`, OAuth JSON at `/oauth/credentials.json`). `src` supports `~`. |
 | `extra_request_policy` | No | Additional egress rules using the same rule schema as provider `request_policy`. These rules control allowlisting only — they never trigger credential injection. |
 | `force_http1_hosts` | No | List of `{host: regex, port: integer or regex}` destinations forced to upstream HTTP/1.1. Default `[]`; port defaults to 443. Does not grant egress access or inject credentials. |
+| `private_upstreams` | No | List of exact private/LAN IP exceptions, default `[]`; an L7 rule is also required. Cannot override host or session-network blocks. Changes require `proxy restart`. |
 | `trusted_certificates` | No | Filenames from `custom/certs/` to install into the proxy's system trust store |
 
 `force_http1_hosts` is independent of request policies. The public `server_connect`

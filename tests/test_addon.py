@@ -458,28 +458,52 @@ class ReloadTest(unittest.IsolatedAsyncioTestCase):
 
     def check_upstream(self, address):
         import upstream_isolation
-        policy = addon_module.UpstreamIsolation(lambda: self.addon._cfg.private_upstreams)
+        policy = addon_module.UpstreamIsolation(self.addon._cfg.private_upstreams)
         with (patch.object(upstream_isolation, "host_addresses", return_value=set()),
               patch.object(upstream_isolation, "connected_networks", return_value=[])):
             policy.audit("socket.connect", (
                 types.SimpleNamespace(family=socket.AF_INET), (address, 443)))
 
-    async def test_private_upstreams_change_only_after_successful_reload(self):
-        self.cfg["private_upstreams"] = ["10.50.1.42"]
-        with self.assertRaises(PermissionError):
+    async def test_private_upstream_changes_require_restart_and_keep_entire_runtime(self):
+        for addresses in (["10.50.1.42"], []):
+            previous = self.addon._cfg
+            self.cfg["private_upstreams"] = addresses
+            self.cfg["logging"] = {"log_bodies": not previous.logging_flags[2]}
+            for path in ("/reload", "/reload/providers"):
+                status, body = await self.reload(path)
+                self.assertEqual(status, 409)
+                self.assertIs(body["restart_required"], True)
+                self.assertIn("proxy restart", body["error"])
+                self.assertIs(self.addon._cfg, previous)
+                self.assertEqual(addon_module._log_bodies, previous.logging_flags[2])
+            self.addon = addon_module.AgentboxAddon()  # restart applies the new IP policy
+            self.assertEqual(self.addon._cfg.private_upstreams,
+                             frozenset(ipaddress.ip_address(address) for address in addresses))
+            self.assertEqual((await self.reload())[0], 200)
+            if addresses:
+                self.check_upstream("10.50.1.42")
+            else:
+                with self.assertRaises(PermissionError):
+                    self.check_upstream("10.50.1.42")
+
+    async def test_equivalent_private_upstream_sets_can_reload(self):
+        self.cfg["private_upstreams"] = ["10.50.1.42", "::ffff:10.50.1.43"]
+        self.addon = addon_module.AgentboxAddon()
+        self.cfg["private_upstreams"] = ["10.50.1.43", "10.50.1.42", "::ffff:10.50.1.42"]
+        self.cfg["extra_request_policy"].append({"host": "another.example"})
+        for path in ("/reload", "/reload/providers"):
+            self.assertEqual((await self.reload(path))[0], 200)
             self.check_upstream("10.50.1.42")
-        self.assertEqual((await self.reload())[0], 200)
-        self.assertEqual(self.addon._cfg.private_upstreams, frozenset({ipaddress.ip_address("10.50.1.42")}))
-        self.check_upstream("10.50.1.42")
-        self.cfg["private_upstreams"] = []
+            self.check_upstream("10.50.1.43")
+
+    async def test_invalid_on_disk_config_does_not_change_private_upstreams(self):
+        self.cfg["private_upstreams"] = ["10.50.1.42"]
+        self.addon = addon_module.AgentboxAddon()
         # Even unreadable/invalid on-disk config is not read by the socket hook.
         with patch.object(addon_module, "_read_config", side_effect=yaml.YAMLError("unfinished edit")):
             self.check_upstream("10.50.1.42")
             self.assertEqual((await self.reload())[0], 500)
         self.check_upstream("10.50.1.42")
-        self.assertEqual((await self.reload("/reload"))[0], 200)
-        with self.assertRaises(PermissionError):
-            self.check_upstream("10.50.1.42")
 
     async def test_rejected_reload_does_not_widen_private_upstreams(self):
         previous = self.addon._cfg

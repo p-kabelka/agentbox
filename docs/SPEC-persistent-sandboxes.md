@@ -33,8 +33,8 @@ Host fetching is manual. `git fetch agentbox-SESSION_ID` can restart only the Gi
 
 | Persistent operation | Container management |
 |---|---|
-| First `start` | Start both sidecars without recreation; synchronize; create agent without starting/dependencies/recreation; `podman start -ai <agent>` |
-| Later `start` | Start both sidecars without recreation; synchronize; `podman start -ai <agent>` |
+| First `start` | Start both sidecars and the namespace holder without recreation; synchronize; install network policy; create agent without starting/dependencies/recreation; `podman start -ai <agent>` |
+| Later `start` | Start both sidecars and the namespace holder without recreation; synchronize; install network policy; `podman start -ai <agent>` |
 | Agent exit / `agentbox stop` | `stop` (one invocation; all session services) |
 | `agentbox remove` | `down -v` |
 
@@ -53,7 +53,7 @@ Host fetching is manual. `git fetch agentbox-SESSION_ID` can restart only the Gi
 Persistent `start` follows the existing `start` secret transaction, with the agent ownership check added **before** proxy changes:
 
 1. Acquire `.secret-sync.lock`; acquire the **exclusive, nonblocking** `.lifetime.lock` used by both session modes. Reject any running agent identified by the session's Compose project and agent-service labels, including an agent left by a killed CLI. Find the retained agent by fixed name and disallow `-- CMD` on reuse. Hold ownership until the attached process and cleanup complete. Do not wait for the ownership lock while holding `.secret-sync.lock`.
-2. Run `_secret_preflight` against the current session `proxy-config/proxy.yaml`. Start/reuse the proxy, then call the current `_synchronize_proxy` transaction: one `compose exec -T proxy` stages credentials, waits for reload readiness, performs the provider reload, and verifies the applied fingerprints. Keep `.secret-sync.lock` across these steps, as today. **Do not launch or restart the agent until synchronization succeeds.** On first start, write any `-- CMD` override to `services.agent.command` (as a list) before creating that service container.
+2. Run `_secret_preflight` against the current session `proxy-config/proxy.yaml`. Start/reuse both sidecars and the namespace holder with one `compose up -d --no-recreate proxy git network`, then call the current `_synchronize_proxy` transaction: one `compose exec -T proxy` stages credentials, waits for reload readiness, performs the provider reload, and verifies the applied fingerprints. Install network policy in the running holder. Keep `.secret-sync.lock` across these steps, as today. **Do not launch or restart the agent until synchronization and policy installation succeed.** On first start, write any `-- CMD` override to `services.agent.command` (as a list) before creating that service container.
 3. Still holding `.secret-sync.lock`, use `compose up --no-start --no-deps --no-recreate agent` only if the service container does not exist. Release the sync lock before `podman start -ai`, which blocks until the agent exits. A concurrent `stop` can stop the proxy between synchronization and agent startup, leaving the agent without proxy access; this race is accepted. Inspect the agent's exit status after `podman start -ai` if its return code does not reliably forward it.
 4. On exit/interruption, reacquire `.secret-sync.lock` if the session still exists. Run `compose stop` once and verify all services stopped. Report cleanup failures without discarding data. If `remove` deleted the session, skip cleanup. A forcibly killed CLI releases its lock; the next start refuses any still-running agent until recovered with `stop`.
 

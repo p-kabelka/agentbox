@@ -130,7 +130,9 @@ The host refreshes the policy and read-only address metadata before each agent
 boot. Names for `proxy` and `git` come from that metadata, so the agent does not
 need access to the bridge's DNS service. Failed firewall installation prevents launch.
 Configuration reload/restart also runs a fresh installer to update the optional
-metadata rule. The host writes a single atomic `network.json`; both the installer
+metadata rule if the holder is running; refresh never starts or restarts it.
+Startup starts the holder alongside both sidecars before policy installation.
+The host writes a single atomic `network.json`; both the installer
 and guest startup read it. Each `compose run --rm --no-deps -T guard` joins the
 holder's current namespace, installs the policy in one nftables transaction,
 and exits. There is no long-running firewall daemon, readiness marker, or
@@ -161,9 +163,13 @@ session subnets come from the proxy's own routing tables. No generated host
 address snapshot or reload after address changes is needed. Non-global upstreams
 are denied unless the trusted configuration lists their exact `private_upstreams`
 IPs; host, local, and session-network blocks always take precedence.
-These exceptions are compiled into the proxy's validated configuration snapshot
-and change only on a successful reload. The socket hook reads that snapshot,
-not the YAML file; only network state is read live per connection.
+These exceptions are compiled into a fixed set at proxy startup. Adding or removing
+exceptions requires `proxy restart`, so pooled connections cannot retain revoked
+access. Both reload endpoints reject changes with HTTP 409 and
+`restart_required: true`, retaining the complete previous runtime. Equivalent
+sets, including reordered, duplicate, or IPv4-mapped entries, remain reloadable.
+The socket hook uses the fixed set, not the YAML file; only network state is read
+live per connection.
 
 The proxy container is attached to both networks and is the sole egress point for all agent traffic.
 

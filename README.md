@@ -38,9 +38,10 @@ changes do not require a reload.
 Other private/LAN upstreams are denied by default; if needed, declare their exact
 IPs in `proxy.yaml` under `private_upstreams: [...]` as well as an L7 request rule.
 This cannot override host, loopback, or session-network blocks.
-Private-IP exceptions are validated and applied with the rest of the proxy
-configuration on a successful reload; rejected or unfinished edits leave the
-active policy unchanged.
+Private-IP exceptions are validated at startup and fixed for the proxy process.
+Adding or removing exceptions requires `agentbox proxy restart`, which closes
+pooled upstream connections. Hot reload rejects these changes and retains the
+complete previous configuration; reordering or duplicating the same IPs is harmless.
 
 ---
 

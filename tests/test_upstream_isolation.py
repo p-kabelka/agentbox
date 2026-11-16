@@ -35,8 +35,7 @@ class UpstreamIsolationTest(unittest.TestCase):
         (upstream.LOCAL_NET / "ipv6_route").write_text(
             "fd000000000000000000000000000000 40 00000000000000000000000000000000 00 "
             "00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth0\n")
-        self.private = frozenset()
-        self.guard = upstream.UpstreamIsolation(lambda: self.private)
+        self.guard = upstream.UpstreamIsolation(frozenset())
 
     def hosts(self, *addresses):
         (upstream.HOST_NET / "fib_trie").write_text(
@@ -73,7 +72,7 @@ class UpstreamIsolationTest(unittest.TestCase):
             self.connect("8.8.8.8")
 
     def test_dns_flows_are_refused_without_forwarding_even_for_private_exceptions(self):
-        self.private = upstream.compile_private_upstreams(["10.50.1.42"])
+        self.guard = upstream.UpstreamIsolation(upstream.compile_private_upstreams(["10.50.1.42"]))
         flow = types.SimpleNamespace(request=Mock(), response=None)
         for _ in range(2):
             self.guard.dns_request(flow)
@@ -81,11 +80,11 @@ class UpstreamIsolationTest(unittest.TestCase):
         self.assertEqual(flow.request.fail.call_count, 2)
         flow.request.fail.assert_called_with(5)  # REFUSED, not an upstream lookup.
 
-    def test_private_exceptions_reload_without_overriding_hard_blocks(self):
+    def test_private_exceptions_cannot_override_hard_blocks(self):
         with self.assertRaises(PermissionError):
             self.connect("10.50.1.42")
-        self.private = upstream.compile_private_upstreams(
-            ["10.50.1.42", "10.89.0.3", "127.0.0.1", "9.9.9.9"])
+        self.guard = upstream.UpstreamIsolation(upstream.compile_private_upstreams(
+            ["10.50.1.42", "10.89.0.3", "127.0.0.1", "9.9.9.9"]))
         self.connect("10.50.1.42")
         for address in ("10.89.0.3", "127.0.0.1", "9.9.9.9"):
             with self.assertRaises(PermissionError):
@@ -103,6 +102,16 @@ class UpstreamIsolationTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.connect("8.8.8.8")
 
+    def test_destination_validation_rejects_hostnames_and_invalid_addresses(self):
+        for address in ("allowed.example", "not-an-ip", "", None):
+            with self.subTest(address=address), self.assertRaises(PermissionError):
+                upstream.check_destination(address, frozenset())
+
+    def test_audit_delegates_numeric_destination_validation(self):
+        with patch.object(upstream, "check_destination") as check:
+            self.connect("::ffff:8.8.8.8")
+        check.assert_called_once_with("::ffff:8.8.8.8", self.guard.private_upstreams)
+
     def test_only_internet_socket_connect_events_are_checked(self):
         self.guard.audit("socket.bind", ())
         self.guard.audit("socket.connect", (types.SimpleNamespace(family=socket.AF_UNIX), "/some/socket"))
@@ -119,7 +128,7 @@ spec = importlib.util.spec_from_file_location('guard', sys.argv[1])
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 guard.HOST_NET, guard.LOCAL_NET = map(Path, sys.argv[2:])
-guard.UpstreamIsolation(lambda: frozenset()).running()
+guard.UpstreamIsolation(frozenset()).running()
 with socket.socket() as client:
     try:
         client.connect(('9.9.9.9', 80))
@@ -171,7 +180,7 @@ guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 guard.HOST_NET = Path(sys.argv[2]) / "live-net"
 guard.LOCAL_NET = Path(sys.argv[2]) / "proxy-net"
-policy = guard.UpstreamIsolation(lambda: frozenset())
+policy = guard.UpstreamIsolation(frozenset())
 def check():
     policy.audit("socket.connect", (types.SimpleNamespace(family=socket.AF_INET), ("192.0.0.9", 80)))
 check()

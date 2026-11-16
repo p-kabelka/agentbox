@@ -147,7 +147,7 @@ class HostPasstNetworkTest(unittest.TestCase):
         with (patch.object(subprocess, "run", side_effect=self.inspect),
               patch.dict(self.g, compose=start)):
             self.g["_prepare_agent_network"](self.session)
-        self.assertEqual([args[-1] for args, _ in self.calls], ["network", "guard"])
+        self.assertEqual([args[-1] for args, _ in self.calls], ["guard"])
         self.assertEqual(self.calls[-1][0], ("run", "--rm", "--no-deps", "-T", "guard"))
         self.assertNotIn("input", self.calls[-1][1])
 
@@ -164,7 +164,7 @@ class HostPasstNetworkTest(unittest.TestCase):
             self.g["_prepare_agent_network"](self.session)
             self.assertEqual(json.loads(metadata.read_text())["ipv4"], "10.89.40.6/20")
         self.assertEqual(inspect.call_count, 2)
-        self.assertEqual([args[0] for args, _ in self.calls], ["up", "run", "up", "run"])
+        self.assertEqual([args[0] for args, _ in self.calls], ["run", "run"])
 
     def test_failed_policy_installation_prevents_agent_launch(self):
         def fail_install(session, *args, **kwargs):
@@ -180,18 +180,21 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.assertFalse(any(args[0] == "run" and "agent" in args for args, _ in self.calls))
 
     def test_reload_updates_when_namespace_holder_is_running(self):
-        for running in ("true", "false"):
+        for status, running in ((0, "true"), (0, "false"), (1, "")):
             calls = []
-            with (patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=running)),
+            with (patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], status, stdout=running)),
                   patch.dict(self.g, _prepare_agent_network=lambda session: calls.append(session))):
                 self.g["_refresh_agent_network"](self.session)
             self.assertEqual(calls, [self.session] if running == "true" else [])
+        self.assertEqual(self.calls, [])
 
     def test_policy_installation_precedes_agent_launch(self):
         events = []
 
         def compose(session, *args, **kwargs):
             events.append(args[0])
+            if args[0] == "up":
+                self.assertEqual(args, ("up", "-d", "--no-recreate", "proxy", "git", "network"))
             return subprocess.CompletedProcess(args, 0)
 
         with (patch.dict(self.g, compose=compose,

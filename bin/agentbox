@@ -351,7 +351,7 @@ def _reload_proxy(session_dir: Path) -> dict:
         except (ValueError, AttributeError):
             restart_required = False
         if restart_required:
-            die("Allowlist edit saved but not active: HTTP protocol policy changed. "
+            die("Allowlist edit saved but not active: proxy connection policy changed. "
                 "Run agentbox proxy restart to apply it")
         die("Allowlist edit saved but not active: provider changes are pending. "
             "Run agentbox proxy reload to apply both changes")
@@ -385,7 +385,7 @@ def _synchronize_proxy(session_dir: Path, full: str, providers: str,
         die("Invalid proxy synchronization response; rerun the command")
     if status == 409:
         if applied.get("restart_required") is True:
-            die("HTTP protocol policy changed; run agentbox proxy restart to apply it")
+            die("Proxy connection policy changed; run agentbox proxy restart to apply it")
         die("Concurrent configuration change; rerun the synchronization command")
     if status != 200:
         die("Proxy rejected the configuration; fix proxy.yaml and rerun")
@@ -775,8 +775,7 @@ def cmd_mount(args) -> None:
 
 
 def _prepare_agent_network(session_dir: Path) -> None:
-    """Install the outer-namespace allowlist before any agent can start."""
-    compose(session_dir, "up", "-d", "--no-deps", "--no-recreate", "network", check=True)
+    """Write current addresses and install the allowlist in the running holder."""
     services = ("proxy", "git", "network")
     result = subprocess.run(["podman", "inspect", *(_persistent_name(session_dir, service) for service in services)],
                             capture_output=True, text=True, check=True)
@@ -814,7 +813,7 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
             try:
                 # podman-compose's up otherwise tears down *all* services when
                 # the Compose YAML changes, including a retained agent.
-                compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", check=True)
+                compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", "network", check=True)
                 _synchronize_proxy(session_dir, full, providers, sources)
                 del sources
                 _prepare_agent_network(session_dir)
@@ -861,7 +860,7 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
             lifetime.enter_context(_agent_lifetime(session_dir))
             project = _project_name(session_dir, read_compose_metadata(session_dir))
             full, providers, sources = _secret_preflight(session_dir)
-            compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", check=True)
+            compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", "network", check=True)
             _synchronize_proxy(session_dir, full, providers, sources)
             del sources
             lifetime.enter_context(_ephemeral_lifetime(session_dir))

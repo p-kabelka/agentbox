@@ -827,7 +827,7 @@ for port in (53, 5353):
                           f"import socket\nfor port in (53, 5353):\n"
                           f"    with socket.create_connection(({address!r}, port), timeout=5): pass\n"])
 
-    def test_allowed_http_and_https_still_work_through_the_proxy(self):
+    def test_allowed_http_https_reuse_and_private_upstream_restart_policy(self):
         preset = self.home / "custom" / "presets" / "integration" / "proxy.yaml"
         preset.write_text(yaml.safe_dump({"providers": [], "extra_request_policy": [
             {"host": r"upstream\.example", "port": port} for port in (8080, 8443)]}))
@@ -970,6 +970,58 @@ with context.wrap_socket(raw, server_hostname='upstream.example') as client:
         client.sendall(connection.data_to_send())
     assert all(body.startswith(b'EXTERNAL_FIXTURE_OK H2 ') for body in bodies.values()), bodies
     assert len({body.split()[-1] for body in bodies.values()}) == 1, bodies
+"""])
+        # Keep a real upstream connection pooled while trying to revoke its IP.
+        # Reload must reject the whole edit; restart must close the old pool.
+        process = subprocess.Popen(["podman", "exec", "-i", proxy, "python3", "-c", """
+import http.client, sys
+client = http.client.HTTPConnection('127.0.0.1', 8080, timeout=10)
+def check():
+    client.request('GET', 'http://upstream.example:8080/')
+    response = client.getresponse()
+    body = response.read()
+    assert response.status == 200, (response.status, body)
+    return body
+original = check()
+print('PRIVATE_UPSTREAM_READY', flush=True)
+for _ in sys.stdin:
+    assert check() == original, 'Pooled upstream connection replaced'
+    print('PRIVATE_UPSTREAM_REUSED', flush=True)
+"""], env=self.env, cwd=self.project, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+            process.stdin.close()
+            process.stdout.close()
+
+        self.addCleanup(cleanup)
+        self.read_agent_output(process, b"PRIVATE_UPSTREAM_READY")
+        policy["private_upstreams"] = []
+        proxy_config.write_text(yaml.safe_dump(policy))
+        # Exercise both the full synchronization and fast-reload endpoints.
+        rejected = self.cli("proxy", "reload", "--session", self.session_id, check=False)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertIn("proxy restart", rejected.stderr)
+        reply = self.run_command(["podman", "exec", proxy, "curl", "-sS", "--max-time", "10",
+                                  "-w", "\n%{http_code}", "http://127.0.0.1:8082/reload"])
+        body, _, status = reply.stdout.rpartition("\n")
+        self.assertEqual(status, "409")
+        self.assertIs(json.loads(body)["restart_required"], True)
+        process.stdin.write(b"check\n")
+        process.stdin.flush()
+        self.read_agent_output(process, b"PRIVATE_UPSTREAM_REUSED")
+        self.cli("proxy", "restart", "--session", self.session_id)
+        self.assertNotEqual(process.wait(timeout=15), 0, "Proxy restart retained the old client")
+        self.run_command(["podman", "exec", proxy, "python3", "-c", """
+import http.client
+client = http.client.HTTPConnection('127.0.0.1', 8080, timeout=10)
+client.request('GET', 'http://upstream.example:8080/')
+response = client.getresponse()
+body = response.read()
+assert response.status == 502 and b'Agentbox blocked' in body, (response.status, body)
 """])
 
 

@@ -181,7 +181,7 @@ class ImageTagsTest(unittest.TestCase):
             agentbox["main"]()
         self.assertEqual(result.exception.code, 0)
         self.assertEqual((session / "compose.yaml").read_bytes(), original)
-        self.assertEqual(run.call_args_list[0].args[0][-5:], ["up", "-d", "--no-recreate", "proxy", "git"])
+        self.assertEqual(run.call_args_list[0].args[0][-6:], ["up", "-d", "--no-recreate", "proxy", "git", "network"])
         project = agentbox["_project_name"](session, yaml.safe_load(original)["x-metadata"])
         self.assertEqual(run.call_args_list[1].args[0][-6:],
                          ["run", "--rm", "--no-deps", "--name", f"{project}_agent", "agent"])

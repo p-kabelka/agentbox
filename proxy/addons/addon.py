@@ -273,10 +273,11 @@ class AgentboxAddon:
                         providers = self._cfg.providers if path == "/reload" else None
                         candidate = await asyncio.get_running_loop().run_in_executor(
                             None, self._build_candidate, cfg, providers)
-                        if candidate.http1_destinations != self._cfg.http1_destinations:
-                            # Public connection hooks cannot renegotiate pooled TLS
-                            # connections. Retain the entire previous configuration.
-                            body = {"error": "HTTP protocol policy changed; run agentbox proxy restart",
+                        if (candidate.http1_destinations != self._cfg.http1_destinations
+                                or candidate.private_upstreams != self._cfg.private_upstreams):
+                            # Pooled connections retain their negotiated protocol
+                            # and IP-policy decisions until the proxy restarts.
+                            body = {"error": "Proxy connection policy changed; run agentbox proxy restart",
                                     "restart_required": True}
                             status = b"409 Conflict"
                         else:
@@ -383,4 +384,4 @@ class AgentboxAddon:
 
 
 _agentbox = AgentboxAddon()
-addons = [_agentbox, UpstreamIsolation(lambda: _agentbox._cfg.private_upstreams)]
+addons = [_agentbox, UpstreamIsolation(_agentbox._cfg.private_upstreams)]

@@ -44,6 +44,19 @@ def connected_networks():
                 yield ipaddress.IPv6Network((int(fields[0], 16), int(fields[1], 16)))
 
 
+def check_destination(host, private_upstreams):
+    """Reject numeric destinations outside the process's fixed IP policy."""
+    try:
+        address = ipaddress.ip_address(host.split("%", 1)[0])
+        address = getattr(address, "ipv4_mapped", None) or address
+        if (address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast
+                or (not address.is_global and address not in private_upstreams)
+                or address in host_addresses() or any(address in network for network in connected_networks())):
+            raise ValueError("host or control-plane destination")
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError):
+        raise PermissionError(BLOCKED) from None
+
+
 class UpstreamIsolation:
     def __init__(self, private_upstreams):
         self.private_upstreams = private_upstreams
@@ -66,12 +79,4 @@ class UpstreamIsolation:
     def audit(self, event, args):
         if event != "socket.connect" or args[0].family not in (socket.AF_INET, socket.AF_INET6):
             return
-        try:
-            address = ipaddress.ip_address(args[1][0].split("%", 1)[0])
-            address = getattr(address, "ipv4_mapped", None) or address
-            if (address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast
-                    or address in host_addresses() or any(address in network for network in connected_networks())
-                    or (not address.is_global and address not in self.private_upstreams())):
-                raise ValueError("host or control-plane destination")
-        except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError):
-            raise PermissionError(BLOCKED) from None
+        check_destination(args[1][0], self.private_upstreams)
