@@ -301,23 +301,13 @@ assert int(json.loads(Path('/.krun_config.json').read_text())['annotations']['kr
 for service in ('proxy', 'git'):
     assert socket.getaddrinfo(service, 8080, socket.AF_INET, socket.SOCK_STREAM)
 routes = [line.split() for line in Path('/proc/net/route').read_text().splitlines()[1:]]
-assert any(route[0] == 'eth0' and route[1] != '00000000' for route in routes), routes
-print('PASST_GUEST_ROUTES=' + json.dumps(routes), flush=True)
+assert any(route[0] == 'eth0' and route[1] != '00000000' and route[2] == '00000000' for route in routes), routes
 """
-        def assert_workaround_routes(result):
-            # A repair must provide the direct subnet route. Existing DHCP
-            # routes, including a default route, are not deliberately removed.
-            if "[agent] Configured passt IPv4" in result.stdout + result.stderr:
-                report = next(line for line in result.stdout.splitlines() if line.startswith("PASST_GUEST_ROUTES="))
-                routes = json.loads(report.partition("=")[2])
-                self.assertTrue(any(route[0] == 'eth0' and route[1] != '00000000' and route[2] == '00000000'
-                                    for route in routes), routes)
-
-        assert_workaround_routes(self.cli("start", "--session", self.session_id, "--", "python3", "-c", script))
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
         name = self.config()["services"]["agent"]["container_name"]
         before = self.run_command(["podman", "inspect", "--format", "{{.Id}}", name]).stdout.strip()
         # Reuse the exact retained container, but boot a new guest kernel.
-        assert_workaround_routes(self.cli("start", "--session", self.session_id))
+        self.cli("start", "--session", self.session_id)
         self.assertEqual(self.run_command(["podman", "inspect", "--format", "{{.Id}}", name]).stdout.strip(), before)
         self.assert_isolation()
 
@@ -327,34 +317,32 @@ print('PASST_GUEST_ROUTES=' + json.dumps(routes), flush=True)
         if os.environ.get("AGENTBOX_TEST_RUNTIME", "krun") == "crun":
             self.skipTest("This regression requires a krun VM, not the explicit crun fallback")
         self.initialize()
+        self.assert_isolation()  # Ephemeral start tears down the sidecar containers on exit.
         self.cli("start", "--session", self.session_id, "--", "python3", "-c", """
-import fcntl, json, socket, struct, subprocess, urllib.request
+import json, socket, subprocess, urllib.request
 from pathlib import Path
 
-request = struct.pack('16s24x', b'eth0')
+def ip(*args):
+    return subprocess.check_output(['ip', *args], text=True)
+
 resolv = Path('/etc/resolv.conf').read_bytes()
-with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as control:
-    original_ip = fcntl.ioctl(control, 0x8915, request)[20:24]
-    original_mask = fcntl.ioctl(control, 0x891b, request)[20:24]
-    for address, mask in ((original_ip, socket.inet_aton('255.255.255.255')),
-                          (socket.inet_aton('169.254.2.2'), socket.inet_aton('255.255.0.0'))):
-        for operation, value in ((0x8916, address), (0x891c, mask)):
-            fcntl.ioctl(control, operation, struct.pack('16sH2x4s16x', b'eth0', socket.AF_INET, value))
-        result = subprocess.run(['agentbox-network'], capture_output=True, text=True)
-        assert result.returncode == 0, result.stdout + result.stderr
-        assert '[agent] Configured passt IPv4' in result.stderr, result.stderr
-        assert fcntl.ioctl(control, 0x8915, request)[20:24] == original_ip
-        assert fcntl.ioctl(control, 0x891b, request)[20:24] == original_mask
-        for service in ('proxy', 'git'):
-            assert socket.getaddrinfo(service, 8080, socket.AF_INET, socket.SOCK_STREAM)
-        with socket.create_connection(('proxy', 8080), timeout=5):
-            pass
-        client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-        with client.open('http://git:8083/manifest.json', timeout=5) as response:
-            assert 'workspace' in json.load(response)
+original = json.loads(ip('-j', '-4', 'address', 'show', 'dev', 'eth0'))[0]['addr_info']
+for address in (original[0]['local'] + '/32', '169.254.2.2/16'):
+    ip('-4', 'address', 'flush', 'dev', 'eth0')
+    ip('address', 'add', address, 'dev', 'eth0')
+    subprocess.run(['agentbox-network'], check=True)
+    configured = json.loads(ip('-j', '-4', 'address', 'show', 'dev', 'eth0'))[0]['addr_info']
+    assert all(any(a['local'] == b['local'] and a['prefixlen'] == b['prefixlen']
+                   for a in configured) for b in original), configured
+    for service in ('proxy', 'git'):
+        assert socket.getaddrinfo(service, 8080, socket.AF_INET, socket.SOCK_STREAM)
+    with socket.create_connection(('proxy', 8080), timeout=5):
+        pass
+    client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with client.open('http://git:8083/manifest.json', timeout=5) as response:
+        assert 'workspace' in json.load(response)
 assert Path('/etc/resolv.conf').read_bytes() == resolv
 """)
-        self.assert_isolation()
 
     def test_manual_clone_into_retained_agent_and_restart_preserves_work(self):
         self.initialize("--persist")

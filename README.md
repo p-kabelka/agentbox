@@ -107,15 +107,12 @@ passt/krun can leave the guest's IPv4 networking missing or partially configured
 on internal networks, including an existing address with an unusable prefix or
 missing subnet route. Agentbox works around this without a patched crun: each
 `start` refreshes the actual internal IPv4 subnet from Podman into a read-only
-`/agentbox-network` mount. Before cloning Git
-repositories or launching the harness, `agentbox-network` combines that subnet
-with the current container's allocated address in Podman's `/etc/hosts`.
-When passt is enabled, it checks `eth0`'s allocated address, netmask, link state,
-and connected subnet route, repairing incomplete configuration even if an IPv4
-address already exists. It adds neither a default route nor public DNS;
-`internal: true` remains unchanged. Matching, working configuration is reported
-and left alone, as are TSI and ordinary crun networking. If subnet metadata is
-mounted but krun/passt is not detected, startup reports why setup was skipped.
+`/agentbox-network` mount. Before any network access, `agentbox-network` combines
+that subnet with the container's allocated address in Podman's `/etc/hosts`.
+For passt guests only, three idempotent `ip` commands bring up `eth0`, apply the
+address/prefix, and ensure the connected subnet route exists. Other addresses,
+routes, and DNS are left alone; no default route is added and `internal: true`
+remains unchanged.
 
 Rebuild `base` and the harness image you use, then initialize a **new session**
 with the updated preset. Existing retained containers cannot acquire the new
