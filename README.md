@@ -10,22 +10,26 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](d
 
 Each session has a **proxy** (holds real credentials and controls internet access), a **Git sidecar**, and one or more **agents** (hold no credentials and have no internet route). In Git-backed sessions, repositories travel through pushes and clones, not host filesystem mounts. The sidecar stores bare repositories in a named volume, uses only the session's internal network, and publishes no ports. There are no writable host-directory bind mounts by default; read-only dotfiles and proxy configuration mounts remain.
 
-The agent and trusted **network guard** share a network namespace held by a
-separate minimal service outside the microVM. Its default-deny firewall permits
+The agent uses a network namespace held by a minimal service outside the
+microVM. Before every launch, a one-shot **network guard** joins the holder's
+current namespace, installs a default-deny firewall, and exits. The firewall permits
 only TCP to `proxy:8080` and `git:9418`/`git:8083`, plus `proxy:9090` when Vertex metadata is enabled.
 Proxy management/reload ports, host services, other containers, direct DNS,
 UDP, and IPv6 egress are blocked. `proxy` and `git` resolve through generated
 hosts entries; external names are resolved by the HTTP proxy. Root inside the
-guest cannot alter the outer firewall. The guard requires `NET_ADMIN` only
-inside its own container namespace, not sudo or host-wide firewall changes.
+guest cannot alter the outer firewall. Only the short-lived installer has
+`NET_ADMIN`, scoped to that container network namespace—not Podman's
+`--privileged` mode, sudo, or host-wide firewall changes.
 The guard explicitly uses native `crun` and refuses to run inside a microVM.
 Podman's `internal: true` remains defense in depth, not the destination policy.
-The kernel firewall and network interface survive guard exit. The guard can
-restart and atomically restore its saved policy without restarting agents,
-resetting their TCP connections, or discarding sandbox work. Guard outages do
-not trigger agent shutdown or session removal.
+The kernel firewall and network interface survive installer exit; no firewall
+daemon stays running. Policy refreshes are atomic and preserve agents and
+their TCP connections. If the holder restarts, the next launch installs rules
+in its new namespace rather than reusing an installer in the old one.
 
-The HTTP proxy also rejects upstream connections to host addresses, session
+The HTTP proxy refuses DNS-over-TCP tunnels, including CONNECT to ports 53 and
+5353; disabling raw TCP forwarding alone does not disable mitmproxy's DNS handler.
+It also rejects upstream connections to host addresses, session
 networks, loopback, and link-local destinations—even if an L7 allow rule matches.
 Each TCP socket's actual destination is checked after DNS resolution, without
 rewriting mitmproxy's upstream address or disrupting connection reuse. The proxy
@@ -183,7 +187,7 @@ agentbox init --name feature --persist
 agentbox start --name feature -- bash     # first start chooses the saved command
 # exit bash, then restart the same container and its filesystem
 agentbox start --name feature
-agentbox stop --name feature              # retain the stopped services, including the network guard
+agentbox stop --name feature              # retain the stopped services, including the namespace holder
 agentbox remove --name feature            # delete containers and the sidecar's repositories
 ```
 

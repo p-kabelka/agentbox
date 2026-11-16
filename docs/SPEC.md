@@ -71,14 +71,14 @@ A developer runs an agent for the first time on a project and wants to observe i
 
 The agent container has no default gateway to the internet. It is attached only to an internal Podman network. The proxy container is attached to both the internal network and an external network with internet connectivity.
 
-The agent and trusted guard join a minimal holder's network namespace. Before launch, the host
+The agent and trusted one-shot guard join a minimal holder's network namespace. Before launch, the host
 installs an nftables default-deny policy there allowing only IPv4 TCP to the
 session proxy on port 8080 and Git sidecar on ports 9418 and 8083. Proxy port
 9090 is additionally allowed when Vertex metadata is enabled. Proxy management
 and reload ports, host services on any address, other containers, IPv6, UDP,
 and direct DNS are not allowed destinations.
 
-The guard alone has `NET_ADMIN`; the agent drops `NET_ADMIN` and `NET_RAW`
+Only the short-lived guard has `NET_ADMIN`; the agent drops `NET_ADMIN` and `NET_RAW`
 outside the microVM. Guest root, changed guest routes, and a custom agent
 entrypoint cannot widen the outer policy. Only the two sidecar names are
 provided locally in `/etc/hosts`; the HTTP proxy resolves external names.
@@ -88,19 +88,24 @@ Policy installation must succeed before every agent start, including persistent
 restarts. The HTTP proxy checks actual TCP socket destinations after DNS
 resolution, using live host addresses and its connected session subnets. It
 does not rewrite upstream hostnames or perform a second DNS lookup. Non-TCP
-upstreams and opaque raw TCP tunneling are disabled.
+upstreams and opaque raw TCP tunneling are disabled. DNS flows are explicitly
+refused, including DNS-over-TCP through CONNECT to ports 53 and 5353, because
+mitmproxy's DNS handler bypasses HTTP request policy even with `rawtcp=false`.
 Private remote APIs require exact `private_upstreams` IP entries
 in the trusted proxy configuration in addition to an L7 rule; those entries
 cannot override host, loopback, link-local, or session-subnet blocks.
 The exception set is validated and committed with the rest of the proxy
 configuration; failed reloads retain the complete previous runtime policy.
 
-The namespace holder is independent of the guard. Guard exit leaves the kernel
-firewall, interface, and running agents intact. The guard restarts automatically
-after failure and atomically restores the saved policy without resetting active
-TCP connections. Invalid saved policy fails closed at the network boundary;
-guard failures must not stop agents, restart their VMs, or remove their
-filesystems.
+The guard is a one-shot installer, not a daemon. The host atomically writes
+`network.json`, then invokes `compose run --rm --no-deps -T guard`. A fresh
+installer joins the holder's current namespace on every start or policy refresh.
+Installer exit leaves the kernel firewall, interface, and running agents intact.
+Policy replacement is atomic and does not reset active TCP connections.
+Invalid policy fails closed at the network boundary; installer failures must not
+stop agents, restart their VMs, or remove their filesystems. If the holder fails,
+its replacement must receive a successful firewall installation before another
+agent launches; an installer in the old namespace must never be reused.
 
 ### 4.2 Credential Separation
 
@@ -165,7 +170,7 @@ Host fetching, review, and merging are manual. Ordinary exit/stop retains the Gi
 
 `agentbox start` preflights configuration/provider files, starts/reuses both sidecars with one `compose up -d --no-recreate proxy git`, synchronizes credentials through stdin, and verifies the proxy reload before launching the agent. Read-only configuration and dotfile mounts are unchanged. Without `--persist`, `compose run --rm --no-deps agent` launches independent agents concurrently. The last exit tears the project down without deleting named volumes. Exit does not fetch output.
 
-With `init --persist`, first start creates the named agent service with `compose up --no-start --no-deps --no-recreate agent`, then attaches using `podman start -ai`. Later starts reuse that same container and saved command. Only one attached start may own it. Exit/stop retain all service containers, including the network guard; remove deletes them and their volumes. Workspace/home files survive restart, not processes. Agent image/environment/mounts/command are fixed at creation, but new Git shares can be cloned explicitly without recreation. Every start resynchronizes configuration/credentials and clones any missing shares once. See [the persistent lifecycle contract](SPEC-persistent-sandboxes.md).
+With `init --persist`, first start creates the named agent service with `compose up --no-start --no-deps --no-recreate agent`, then attaches using `podman start -ai`. Later starts reuse that same container and saved command. Only one attached start may own it. Exit/stop retain the agent, sidecars, and namespace holder; the one-shot guard removes itself after installation. Remove deletes retained containers and their volumes. Workspace/home files survive restart, not processes. Agent image/environment/mounts/command are fixed at creation, but new Git shares can be cloned explicitly without recreation. Every start resynchronizes configuration/credentials and clones any missing shares once. See [the persistent lifecycle contract](SPEC-persistent-sandboxes.md).
 
 `agentbox allow` and `agentbox deny` append or remove rules in `extra_request_policy` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections. Hostnames are automatically escaped for regex safety unless `-r` / `--regex` is passed, which preserves the host regex verbatim. Removal matches the exact stored pattern, not every hostname matching that regex. The `host:port` syntax is supported in either mode (e.g., `agentbox allow registry.internal.com:8443` or `agentbox allow -r '.*\.internal\.com:8443'`).
 
@@ -426,7 +431,7 @@ Custom CA certificates can be placed in `$AGENTBOX_HOME/custom/certs/`. When lis
 | Agent cannot plant executable hooks in host git | Repository filesystems are not exposed; sidecar disables hooks | Git objects/refs, not hooks or configuration, are transferred |
 | Agent cannot modify sidecar repo git config | Agent has protocol access only, not the sidecar volume | Git services cannot be reconfigured by filesystem writes from the agent |
 | External agent HTTP(S) traffic is auditable | Proxy TLS termination; structured JSON access log | External requests, including denials, are logged; internal Git/catalog is separate |
-| Agentbox network isolation requires no host privilege | Default-deny guard in a private container network namespace | No `sudo` or host-wide firewall changes; only the trusted guard has `NET_ADMIN` |
+| Agentbox network isolation requires no host privilege | Default-deny firewall in a private container network namespace | No `sudo` or host-wide firewall changes; only the one-shot installer has `NET_ADMIN` |
 
 ---
 

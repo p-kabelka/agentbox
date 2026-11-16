@@ -131,7 +131,7 @@ Fetching, review, and merging on the host are manual; agent exit never fetches.
 Ephemeral teardown removes containers/networks but retains the named Git volume
 and session registration. The next start clones the retained repositories again;
 unpushed changes in the removed agent are lost. Persistent teardown stops all
-services, including the network guard, and retains both the Git volume and the agent's working trees/home.
+services, including the namespace holder, and retains both the Git volume and the agent's working trees/home.
 Host Git can start just the sidecar after either form of teardown, reusing its
 existing data, and leaves it running after the transfer. No running agent or proxy
 is required. `remove` alone deletes the named volumes and matching registered

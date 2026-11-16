@@ -120,6 +120,9 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.assertEqual(cfg["services"]["agent"]["cap_drop"], ["NET_ADMIN", "NET_RAW"])
         self.assertEqual(cfg["services"]["guard"]["network_mode"], "service:network")
         self.assertEqual(cfg["services"]["guard"]["cap_add"], ["NET_ADMIN"])
+        self.assertNotIn("container_name", cfg["services"]["guard"])
+        self.assertNotIn("tmpfs", cfg["services"]["guard"])
+        self.assertNotIn("guard", cfg["services"]["agent"]["depends_on"])
         self.assertEqual(cfg["services"]["network"]["cap_drop"], ["ALL"])
         self.assertNotIn("cap_add", cfg["services"]["network"])
         for service in ("proxy", "network", "guard"):
@@ -127,13 +130,13 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.assertIn("/proc/1/net:/host-net:ro", cfg["services"]["proxy"]["volumes"])
         self.assertTrue(cfg["networks"]["agent-net"]["internal"])
         self.assertEqual(cfg["services"]["network"]["restart"], "no")
-        self.assertEqual(cfg["services"]["guard"]["restart"], "unless-stopped")
+        self.assertEqual(cfg["services"]["guard"]["restart"], "no")
 
-    def test_saved_policy_precedes_guard_start(self):
+    def test_saved_policy_precedes_one_shot_installer(self):
         compose = self.compose
 
         def start(session, *args, **kwargs):
-            if args[0] == "up" and args[-1] == "guard":
+            if args[0] == "run" and args[-1] == "guard":
                 policy = json.loads((session / "network-config/network.json").read_text())
                 self.assertEqual(policy["endpoints"]["proxy"], "10.89.40.5")
             return compose(session, *args, **kwargs)
@@ -141,9 +144,11 @@ class HostPasstNetworkTest(unittest.TestCase):
         with (patch.object(subprocess, "run", side_effect=self.inspect),
               patch.dict(self.g, compose=start)):
             self.g["_prepare_agent_network"](self.session)
-        self.assertEqual([args[-1] for args, _ in self.calls], ["network", "guard", "apply"])
+        self.assertEqual([args[-1] for args, _ in self.calls], ["network", "guard"])
+        self.assertEqual(self.calls[-1][0], ("run", "--rm", "--no-deps", "-T", "guard"))
+        self.assertNotIn("input", self.calls[-1][1])
 
-    def test_one_inspection_and_one_apply_refresh_current_metadata(self):
+    def test_one_inspection_and_fresh_installer_refresh_current_metadata(self):
         with patch.object(subprocess, "run", side_effect=self.inspect) as inspect:
             self.g["_prepare_agent_network"](self.session)
             metadata = self.session / "network-config/network.json"
@@ -151,24 +156,25 @@ class HostPasstNetworkTest(unittest.TestCase):
                 "ipv4": "10.89.40.6/24",
                 "endpoints": {"proxy": "10.89.40.5", "git": "10.89.40.4", "vertex_metadata": False},
             })
-            self.assertEqual(self.calls[-1][0][-1], "apply")
+            self.assertEqual(self.calls[-1][0], ("run", "--rm", "--no-deps", "-T", "guard"))
             self.details[2]["NetworkSettings"]["Networks"]["session_agent-net"]["IPPrefixLen"] = 20
             self.g["_prepare_agent_network"](self.session)
             self.assertEqual(json.loads(metadata.read_text())["ipv4"], "10.89.40.6/20")
         self.assertEqual(inspect.call_count, 2)
+        self.assertEqual([args[0] for args, _ in self.calls], ["up", "run", "up", "run"])
 
     def test_failed_policy_installation_prevents_agent_launch(self):
-        def fail_apply(session, *args, **kwargs):
+        def fail_install(session, *args, **kwargs):
             self.calls.append((args, kwargs))
-            return subprocess.CompletedProcess(args, int(args[-1] == "apply"), stderr="denied")
+            return subprocess.CompletedProcess(args, int(args[-1] == "guard"), stderr="denied")
 
         with (patch.object(subprocess, "run", side_effect=self.inspect),
-              patch.dict(self.g, compose=fail_apply,
+              patch.dict(self.g, compose=fail_install,
                          _secret_preflight=lambda session: ("config", "providers", []),
                          _synchronize_proxy=lambda *args: None),
               redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
             self.g["_launch"](self.session, ["bash"])
-        self.assertNotIn("run", [args[0] for args, _ in self.calls])
+        self.assertFalse(any(args[0] == "run" and "agent" in args for args, _ in self.calls))
 
     def test_reload_updates_when_namespace_holder_is_running(self):
         for running in ("true", "false"):

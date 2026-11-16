@@ -58,6 +58,11 @@ class UpstreamIsolation:
         if data.server.transport_protocol != "tcp":
             data.server.error = BLOCKED
 
+    def dns_request(self, flow):
+        # rawtcp=false still permits mitmproxy's DNS layer after CONNECT to
+        # port 53/5353. Refuse it here: DNS flows never run the HTTP allowlist.
+        flow.response = flow.request.fail(5)  # DNS REFUSED
+
     def audit(self, event, args):
         if event != "socket.connect" or args[0].family not in (socket.AF_INET, socket.AF_INET6):
             return

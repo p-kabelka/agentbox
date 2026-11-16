@@ -54,7 +54,7 @@ services:
   network:
     image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}
     runtime: crun
-    # Namespace lifetime is independent of the firewall manager's process.
+    # The namespace and firewall outlive the one-shot installer.
     entrypoint: ["/usr/bin/sleep", "infinity"]
     networks:
       - agent-net
@@ -69,6 +69,7 @@ services:
   guard:
     image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}
     runtime: crun
+    # Each invocation joins the holder's current namespace, installs, and exits.
     network_mode: service:network
     depends_on:
       - network
@@ -79,16 +80,14 @@ services:
     read_only: true
     volumes:
       - ./network-config:/agentbox-network:ro,z
-    tmpfs:
-      - /run:rw,noexec,nosuid,nodev
     security_opt:
       - no-new-privileges:true
-    restart: unless-stopped
+    restart: "no"
 
   agent:
     image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
-    # The holder keeps the namespace alive across guard restarts. The VM
-    # cannot change its firewall, even as guest root.
+    # The holder retains the firewall after the installer exits. The VM
+    # cannot change it, even as guest root.
     network_mode: service:network
     cap_drop:
       - NET_ADMIN
@@ -97,7 +96,6 @@ services:
       - proxy
       - git
       - network
-      - guard
     runtime: krun
     environment:
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}

@@ -197,38 +197,57 @@ for command in sys.stdin:
         output, _ = process.communicate(timeout=30)
         self.assertEqual(process.returncode, 0, output.decode(errors="replace"))
 
-    def test_network_guard_restart_preserves_persistent_agent_and_connections(self):
+    def test_network_policy_refresh_preserves_persistent_agent_and_connections(self):
         self.initialize("--persist")
         process = self.start_waiting_agent()
         cfg = self.config()
         agent = cfg["services"]["agent"]["container_name"]
-        guard = cfg["services"]["guard"]["container_name"]
         identity = ["podman", "inspect", "--format", "{{.Id}} {{.State.Pid}} {{.State.StartedAt}}", agent]
         original = self.run_command(identity).stdout
-        self.run_command(["podman", "restart", guard])
-        self.check_waiting_agent(process)
+        for _ in range(2):
+            self.cli("proxy", "reload", "--session", self.session_id)
+            self.check_waiting_agent(process)
+            containers = json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
+            self.assertEqual({c["name"] for c in containers},
+                             {cfg["services"][s]["container_name"] for s in ("proxy", "git", "network", "agent")})
         self.assertEqual(self.run_command(identity).stdout, original)
         self.finish_waiting_agent(process)
 
-    def test_network_guard_outage_preserves_concurrent_ephemeral_agents_and_policy(self):
+    def test_network_installer_failure_preserves_concurrent_ephemeral_agents_and_policy(self):
         self.initialize()
         agents = [self.start_waiting_agent(), self.start_waiting_agent()]
-        guard = self.config()["services"]["guard"]["container_name"]
         original = {c["name"]: (c["id"], c["pid"]) for c in
-                    json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
-                    if c["name"] != guard}
-        self.run_command(["podman", "stop", guard])
+                    json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)}
+        self.assertEqual(len(original), 5)  # Two agents, two sidecars, and the unprivileged holder.
+        cfg = self.config()
+        cfg["services"]["guard"]["entrypoint"] = ["/usr/bin/false"]
+        (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
+        failed = self.cli("proxy", "reload", "--session", self.session_id, check=False)
+        self.assertNotEqual(failed.returncode, 0)
+        self.assertIn("cannot enforce agent network policy", failed.stderr)
         for process in agents:
             self.check_waiting_agent(process)
+        del cfg["services"]["guard"]["entrypoint"]
+        (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         self.cli("proxy", "reload", "--session", self.session_id)
         for process in agents:
             self.check_waiting_agent(process)
         current = {c["name"]: (c["id"], c["pid"]) for c in
-                   json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
-                   if c["name"] != guard}
+                   json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)}
         self.assertEqual(current, original)
         for process in agents:
             self.finish_waiting_agent(process)
+
+    def test_network_holder_restart_filters_new_agents_in_the_current_namespace(self):
+        self.initialize()
+        old = self.start_waiting_agent()  # Keep the original namespace and session alive.
+        holder = self.config()["services"]["network"]["container_name"]
+        self.run_command(["podman", "kill", holder])
+        new = self.start_waiting_agent()  # Checks sidecar access and management-port denial.
+        self.check_waiting_agent(new)
+        self.assertIsNone(old.poll(), "Holder failure terminated the existing agent")
+        self.finish_waiting_agent(new)
+        self.finish_waiting_agent(old)
 
     def test_workspace_round_trip_selected_branch_and_sidecar_survives_teardown(self):
         self.git(self.project, "checkout", "-qb", "chosen")
@@ -693,6 +712,74 @@ for target in TARGETS:
         self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
         with self.assertRaises(socket.timeout):
             listener.accept()
+
+    def test_http_proxy_refuses_connect_dns_without_an_l7_rule(self):
+        self.initialize("--persist")
+        name = "agentbox-dns-" + hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
+        network = name + "-net"
+        self.run_command(["podman", "network", "create", "-o", "isolate=false", network])
+        self.addCleanup(lambda: self.run_command(["podman", "network", "rm", network], check=False))
+        self.addCleanup(lambda: self.run_command(["podman", "rm", "-f", name], check=False))
+        self.run_command(["podman", "run", "-d", "--name", name, "--network", network,
+                          "--entrypoint", "python3", self.config()["services"]["proxy"]["image"], "-c", """
+import socketserver, threading
+from pathlib import Path
+class Handler(socketserver.StreamRequestHandler):
+    def handle(self):
+        with Path('/tmp/dns-connections').open('a') as log:
+            log.write(str(self.server.server_address[1]) + '\\n')
+        size = self.rfile.read(2)
+        if len(size) == 2:
+            query = bytearray(self.rfile.read(int.from_bytes(size, 'big')))
+            query[2] |= 0x80
+            self.wfile.write(size + query)
+servers = [socketserver.ThreadingTCPServer(('0.0.0.0', port), Handler) for port in (53, 5353)]
+threading.Thread(target=servers[0].serve_forever, daemon=True).start()
+servers[1].serve_forever()
+"""])
+        fixture = json.loads(self.run_command(["podman", "inspect", name]).stdout)[0]
+        address = fixture["NetworkSettings"]["Networks"][network]["IPAddress"]
+        # Only the address is trusted, not any L7 request. This isolates DNS
+        # protocol enforcement from the independent private-address restriction.
+        config = self.session / "proxy-config" / "proxy.yaml"
+        config.write_text(yaml.safe_dump({"providers": [], "extra_request_policy": [],
+                                         "private_upstreams": [address]}))
+        script = f"TARGET={address!r}\n" + """
+import socket, struct
+def read_exact(client, size):
+    result = b''
+    while len(result) < size:
+        part = client.recv(size - len(result))
+        assert part, 'Connection closed before the DNS response'
+        result += part
+    return result
+query = struct.pack('!6H', 0x1234, 0x100, 1, 0, 0, 0)
+query += b'\\x05hello\\x07example\\x00' + struct.pack('!2H', 1, 1)
+for port in (53, 5353):
+    with socket.create_connection(('proxy', 8080), timeout=5) as client:
+        client.sendall(f'CONNECT {TARGET}:{port} HTTP/1.1\\r\\nHost: {TARGET}:{port}\\r\\n\\r\\n'.encode())
+        header = b''
+        while not header.endswith(b'\\r\\n\\r\\n'):
+            header += read_exact(client, 1)
+        assert b' 200 ' in header, header
+        for _ in range(2):
+            client.sendall(struct.pack('!H', len(query)) + query)
+            size = int.from_bytes(read_exact(client, 2), 'big')
+            response = read_exact(client, size)
+            assert response[:2] == query[:2], response
+            assert response[3] & 15 == 5, ('DNS was not refused', port, response)
+"""
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
+        # No tunneled query may even open an upstream socket. Then prove that
+        # both fixture listeners are reachable from the proxy, avoiding a false
+        # pass from bridge isolation or a missing DNS server.
+        self.run_command(["podman", "exec", name, "python3", "-c",
+                          "from pathlib import Path; assert not Path('/tmp/dns-connections').exists()"])
+        proxy = self.config()["services"]["proxy"]["container_name"]
+        self.run_command(["podman", "start", proxy])
+        self.run_command(["podman", "exec", proxy, "python3", "-c",
+                          f"import socket\nfor port in (53, 5353):\n"
+                          f"    with socket.create_connection(({address!r}, port), timeout=5): pass\n"])
 
     def test_allowed_http_and_https_still_work_through_the_proxy(self):
         preset = self.home / "custom" / "presets" / "integration" / "proxy.yaml"

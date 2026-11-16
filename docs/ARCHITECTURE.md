@@ -37,8 +37,8 @@ This means even a fully compromised agent — one that dumps its entire environm
 
 All external agent traffic must pass through the proxy, which enforces an
 allowlist. Internal Git/catalog traffic goes directly to the Git sidecar.
-A minimal service holds the agent's outer network namespace; a separate trusted
-guard installs an endpoint allowlist before the VM starts. The agent cannot
+A minimal service holds the agent's outer network namespace; a trusted one-shot
+guard installs an endpoint allowlist and exits before the VM starts. The agent cannot
 change that firewall, even as guest root.
 
 The proxy acts as both a gateway and an inspection point. External HTTP requests, including denials, are logged; internal Git traffic is not part of the proxy access log.
@@ -117,8 +117,8 @@ Two Podman networks are created per agentbox:
 - **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent and Git sidecar are connected only to this network. Git/catalog traffic stays here and does not pass through the egress proxy.
 - **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy container is attached to this network.
 
-The agent and guard join a minimal holder's network namespace instead of attaching
-independently to `agent-net`. Only the guard has `NET_ADMIN`; the holder drops all
+The agent and one-shot guard join a minimal holder's network namespace instead of attaching
+independently to `agent-net`. Only the installer has `NET_ADMIN`; the holder drops all
 capabilities, and the agent explicitly drops both
 `NET_ADMIN` and `NET_RAW` outside the VM. Its IPv4 TCP allowlist is the proxy's
 internal address on 8080 (and 9090 for enabled Vertex metadata), plus the Git
@@ -129,16 +129,17 @@ errors inside the guarded namespace. This is not access to host loopback.
 The host refreshes the policy and read-only address metadata before each agent
 boot. Names for `proxy` and `git` come from that metadata, so the agent does not
 need access to the bridge's DNS service. Failed firewall installation prevents launch.
-Configuration reload/restart refreshes a running guard's optional metadata rule.
-Namespace ownership is independent of the guard process. The holder runs only
-`sleep infinity` and lives for the session; the guard may restart independently.
-The host saves the current policy before starting the guard. On restart the
-guard atomically restores it without clearing valid rules first, so existing
-connections and VM processes continue. Invalid saved policy installs deny-all,
-never an agent shutdown. Kernel rules and interfaces remain in place even
-while the guard is stopped. The namespace holder is not restarted independently;
-loss of that infrastructure can interrupt networking but does not terminate
-agents or delete their filesystems.
+Configuration reload/restart also runs a fresh installer to update the optional
+metadata rule. The host writes a single atomic `network.json`; both the installer
+and guest startup read it. Each `compose run --rm --no-deps -T guard` joins the
+holder's current namespace, installs the policy in one nftables transaction,
+and exits. There is no long-running firewall daemon, readiness marker, or
+second apply protocol. Kernel rules and interfaces remain after installer exit,
+and atomic refreshes preserve existing TCP connections. Invalid policy installs
+deny-all, never an agent shutdown. The holder runs only `sleep infinity` and has
+no automatic restart policy. If it fails, existing agents are not terminated or
+deleted; their networking can be interrupted. Before launching another agent,
+the CLI restarts the holder and installs rules in its new namespace.
 
 The native-crun proxy independently rejects TCP connections to host IPs, either
 session network, loopback, and link-local addresses. A Python socket audit hook
@@ -146,6 +147,9 @@ checks the numeric address passed to each actual connect call, after DNS, so
 DNS rebinding cannot substitute an unchecked destination. Mitmproxy's logical
 upstream address and connection pooling remain unchanged. Non-TCP upstreams
 are disabled because mitmproxy's Rust UDP connector does not use Python sockets.
+DNS flows are explicitly refused, including DNS-over-TCP through CONNECT to
+ports 53 and 5353: these use a specialized mitmproxy layer even with `rawtcp=false`
+and never invoke the HTTP request allowlist.
 Host addresses are read live from the read-only `/proc/1/net` mount; connected
 session subnets come from the proxy's own routing tables. No generated host
 address snapshot or reload after address changes is needed. Non-global upstreams
@@ -417,7 +421,7 @@ The proxy's addon interface (mitmproxy's Python API) is the primary extension po
 ## 8. Quality Attributes
 
 **Security.** Credentials and host repositories are absent from the agent.
-Network policy is enforced outside the untrusted VM by the small guard service,
+Network policy is installed outside the untrusted VM by the small one-shot guard,
 with an additional upstream-address check in the proxy. Proxy management is
 not an agent-accessible service. These trusted components and the hypervisor
 remain part of the security boundary and require auditing.

@@ -7,7 +7,7 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("upstream_guard", ROOT / "proxy/addons/upstream_isolation.py")
@@ -71,6 +71,15 @@ class UpstreamIsolationTest(unittest.TestCase):
         self.hosts("9.9.9.9", "8.8.8.8")
         with self.assertRaises(PermissionError):
             self.connect("8.8.8.8")
+
+    def test_dns_flows_are_refused_without_forwarding_even_for_private_exceptions(self):
+        self.private = upstream.compile_private_upstreams(["10.50.1.42"])
+        flow = types.SimpleNamespace(request=Mock(), response=None)
+        for _ in range(2):
+            self.guard.dns_request(flow)
+            self.assertIs(flow.response, flow.request.fail.return_value)
+        self.assertEqual(flow.request.fail.call_count, 2)
+        flow.request.fail.assert_called_with(5)  # REFUSED, not an upstream lookup.
 
     def test_private_exceptions_reload_without_overriding_hard_blocks(self):
         with self.assertRaises(PermissionError):

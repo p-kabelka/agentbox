@@ -1,14 +1,11 @@
-"""Enforce agent egress in its outer network namespace, never inside the VM."""
+"""Install agent egress rules in its current outer namespace, then exit."""
 
 import ipaddress
 import json
-import signal
 import subprocess
 import sys
-import time
 from pathlib import Path
 
-READY = Path("/run/agentbox-network-ready")
 CONFIG = Path("/agentbox-network/network.json")
 
 
@@ -53,31 +50,14 @@ table inet agentbox {{
 def main():
     if Path("/.krun_config.json").is_file():
         raise RuntimeError("network guard must use native crun, not a microVM")
-    if sys.argv[1:] == ["apply"]:
-        allowed = rules(json.load(sys.stdin))
-        deadline = time.monotonic() + 10
-        while not READY.is_file():
-            if time.monotonic() >= deadline:
-                raise RuntimeError("network guard did not become ready")
-            time.sleep(0.05)
-        install(allowed)
-        return
-    if sys.argv[1:]:
-        raise ValueError("expected no arguments or apply")
-    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-    signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
-    READY.unlink(missing_ok=True)
     try:
         allowed = rules(json.loads(CONFIG.read_text())["endpoints"])
     except (OSError, ValueError, TypeError, KeyError):
         install()  # Invalid policy fails closed, without stopping the sandbox.
         raise
-    # Kernel rules survive guard exit. Replace them atomically on restart,
+    # Kernel rules survive installer exit. Replace them atomically on refresh,
     # without a deny-all interval that would reset active TCP connections.
     install(allowed)
-    READY.touch()
-    while True:
-        signal.pause()
 
 
 if __name__ == "__main__":

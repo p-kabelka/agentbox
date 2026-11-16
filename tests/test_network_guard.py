@@ -48,34 +48,31 @@ class NetworkGuardTest(unittest.TestCase):
         self.assertIn("reject with tcp reset", policy)
         self.assertTrue(all(c.kwargs["check"] for c in run.call_args_list))
 
-    def test_restart_restores_saved_policy_atomically_without_deny_all_gap(self):
+    def test_one_shot_installs_policy_once_and_returns_without_deny_all_gap(self):
         endpoints = {"proxy": "10.123.0.2", "git": "10.123.0.3"}
         with tempfile.TemporaryDirectory() as temporary:
-            config, ready = Path(temporary) / "policy.json", Path(temporary) / "ready"
+            config = Path(temporary) / "policy.json"
             config.write_text(json.dumps({"endpoints": endpoints}))
-            with (patch.object(guard, "CONFIG", config), patch.object(guard, "READY", ready),
+            with (patch.object(guard, "CONFIG", config),
                   patch.object(guard.Path, "is_file", return_value=False),
-                  patch.object(sys, "argv", ["guard.py"]),
-                  patch.object(guard.signal, "signal"),
-                  patch.object(guard.signal, "pause", side_effect=KeyboardInterrupt),
-                  patch.object(guard, "install") as install, self.assertRaises(KeyboardInterrupt)):
+                  patch.object(guard, "install") as install):
                 guard.main()
-            install.assert_called_once_with(guard.rules(endpoints))
-            self.assertTrue(ready.exists())
+                install.assert_called_once_with(guard.rules(endpoints))
+                endpoints["vertex_metadata"] = True
+                config.write_text(json.dumps({"endpoints": endpoints}))
+                install.reset_mock()
+                guard.main()
+                install.assert_called_once_with(guard.rules(endpoints))
 
-    def test_invalid_restart_policy_fails_closed_without_marking_ready(self):
+    def test_invalid_policy_fails_closed(self):
         with tempfile.TemporaryDirectory() as temporary:
-            config, ready = Path(temporary) / "policy.json", Path(temporary) / "ready"
+            config = Path(temporary) / "policy.json"
             config.write_text('{"endpoints": null}')
-            ready.touch()
-            with (patch.object(guard, "CONFIG", config), patch.object(guard, "READY", ready),
+            with (patch.object(guard, "CONFIG", config),
                   patch.object(guard.Path, "is_file", return_value=False),
-                  patch.object(sys, "argv", ["guard.py"]),
-                  patch.object(guard.signal, "signal"),
                   patch.object(guard, "install") as install, self.assertRaises(ValueError)):
                 guard.main()
             install.assert_called_once_with()
-            self.assertFalse(ready.exists())
 
     def test_real_ipv4_ipv6_and_policy_replacement_in_private_namespace(self):
         if not all(shutil.which(tool) for tool in ("unshare", "ip", "nft")):

@@ -439,7 +439,7 @@ def generate_compose(
         "no-git": no_git,
     }
 
-    for service in ("proxy", "git", "network", "guard"):
+    for service in ("proxy", "git", "network"):
         base["services"][service]["container_name"] = _persistent_name(session_dir, service)
     if persist:
         base["services"]["agent"]["container_name"] = _persistent_name(session_dir, "agent")
@@ -785,13 +785,11 @@ def _prepare_agent_network(session_dir: Path) -> None:
     proxy_cfg = load_yaml(session_dir / "proxy-config" / "proxy.yaml")
     endpoints["vertex_metadata"] = any(p.get("name") == "vertex" and p.get("enabled")
                                        and p.get("metadata_server") for p in proxy_cfg.get("providers", []))
-    # The guard can restore this policy after a crash without replacing the
-    # holder's namespace or interrupting any running agent.
     _atomic_json(session_dir / "network-config" / "network.json",
                  {"ipv4": str(address), "endpoints": endpoints})
-    compose(session_dir, "up", "-d", "--no-deps", "--no-recreate", "guard", check=True)
-    result = compose(session_dir, "exec", "-T", "guard", "python3", "/app/guard.py", "apply",
-                     input=json.dumps(endpoints), text=True, capture_output=True)
+    # Never reuse an installer: a restarted holder has a new network namespace.
+    result = compose(session_dir, "run", "--rm", "--no-deps", "-T", "guard",
+                     text=True, capture_output=True)
     if result.returncode:
         die(f"cannot enforce agent network policy: {result.stderr.strip()}")
 
