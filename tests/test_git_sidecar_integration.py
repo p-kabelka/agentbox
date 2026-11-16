@@ -47,8 +47,12 @@ class GitSidecarIntegrationTest(unittest.TestCase):
         if self.use_passt:
             agent_cfg["annotations"] = {"krun.use_passt": "1"}
         (preset / "agent.yaml").write_text(yaml.safe_dump(agent_cfg))
+        helpers = self.root / "bin"
+        helpers.mkdir()
+        tag = os.environ.get("AGENTBOX_IMAGE_TAG") or "latest"
+        (helpers / f"git-remote-agentbox-{tag}").symlink_to(ROOT / "bin" / "git-remote-agentbox")
         self.env = {**os.environ, "AGENTBOX_HOME": str(self.home), "AGENTBOX_STATE": str(self.root / "state"),
-                    "PATH": f"{ROOT / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"}
+                    "PATH": f"{helpers}:{ROOT / 'bin'}:{Path(sys.executable).parent}:{os.environ['PATH']}"}
         self.session_id = "feature-" + hashlib.sha256(str(self.project.resolve()).encode()).hexdigest()
         self.session = self.root / "state" / "sessions" / self.session_id
         self.remote = f"agentbox-{self.session_id}"
@@ -196,6 +200,46 @@ git push
         self.assert_isolation()
         self.cli("remove", "--session", self.session_id)
         self.assertEqual(self.run_command(["podman", "volume", "exists", volume], check=False).returncode, 1)
+
+    def test_tagged_host_transport_ignores_agentbox_wrapper_environment(self):
+        tag = self.env["AGENTBOX_IMAGE_TAG"] = self.env.get("AGENTBOX_IMAGE_TAG") or "latest"
+        self.initialize()
+        compose = (self.session / "compose.yaml").read_bytes()
+        sidecar = self.config()["services"]["git"]["container_name"]
+        url = self.git(self.project, "remote", "get-url", self.remote).stdout
+        self.assertTrue(url.startswith(f"agentbox-{tag}::"))
+        original = self.env
+        variables = ("AGENTBOX_HOME", "AGENTBOX_STATE", "AGENTBOX_IMAGE_TAG",
+                     "AGENTBOX_PRESET", "XDG_STATE_HOME")
+        foreign = {
+            "AGENTBOX_HOME": str(self.root / "other-installation"),
+            "AGENTBOX_STATE": str(self.root / "other-state"),
+            "AGENTBOX_IMAGE_TAG": "not-built",
+            "AGENTBOX_PRESET": "not-a-preset",
+            "XDG_STATE_HOME": str(self.root / "other-xdg-state"),
+        }
+        try:
+            for index, settings in enumerate(({}, foreign)):
+                with self.subTest(environment=settings):
+                    self.env = {key: value for key, value in original.items() if key not in variables}
+                    self.env.update(settings)
+                    self.git(self.project, "commit", "--allow-empty", "-qm", f"host update {index}")
+                    commit = self.git(self.project, "rev-parse", "HEAD").stdout.strip()
+                    self.git(self.project, "push", self.remote, f"HEAD:published-{index}")
+                    stored = self.run_command(["podman", "exec", sidecar, "git", "-C",
+                                               "/srv/git/repos/workspace.git", "rev-parse", f"published-{index}"])
+                    self.assertEqual(stored.stdout.strip(), commit)
+                    self.run_command(["podman", "exec", sidecar, "git", "-C", "/srv/git/repos/workspace.git",
+                                      "update-ref", f"refs/heads/reply-{index}", commit])
+                    self.git(self.project, "fetch", self.remote)
+                    self.assertEqual(self.git(self.project, "rev-parse", f"{self.remote}/reply-{index}").stdout.strip(), commit)
+                    self.assertEqual(self.git(self.project, "remote", "get-url", self.remote).stdout, url)
+                    self.assertNotEqual(self.git(self.project, "config", "--get",
+                                                f"remote.{self.remote}.vcs", check=False).returncode, 0)
+                    self.assertEqual((self.session / "compose.yaml").read_bytes(), compose)
+        finally:
+            self.env = original
+        self.assert_isolation()
 
     def test_git_daemon_direct_transport_and_hook_isolation(self):
         self.initialize()

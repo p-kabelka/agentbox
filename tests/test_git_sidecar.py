@@ -66,7 +66,8 @@ args[-1] = args[-1].replace('/srv/git', {str(self.store)!r})
 os.execvp(args[0], args)
 """)
         podman.chmod(0o755)
-        environment = patch.dict(os.environ, PATH=f"{self.fake_bin}:{ROOT / 'bin'}:{os.environ['PATH']}")
+        environment = patch.dict(os.environ, AGENTBOX_IMAGE_TAG="",
+                                 PATH=f"{self.fake_bin}:{ROOT / 'bin'}:{os.environ['PATH']}")
         environment.start()
         self.addCleanup(environment.stop)
         self.agentbox = runpy.run_path(str(ROOT / "bin" / "agentbox"))
@@ -450,13 +451,65 @@ sys.stdout.buffer.write(sys.stdin.buffer.read())
 sys.stderr.write('CLI diagnostic\\n')
 sys.exit(23)
 """)
-        symlink = self.root / "helper-link"
+        symlink = self.root / "git-remote-agentbox-stage"
         symlink.symlink_to(standalone / "git-remote-agentbox")
         payload = b"binary pack data\x00\xff\n"
         result = subprocess.run([str(symlink), self.remote, url], input=payload, capture_output=True)
         self.assertEqual(result.returncode, 23)
         self.assertEqual(result.stdout, payload)
         self.assertEqual(result.stderr, b"CLI diagnostic\n")
+
+    def test_git_url_uses_nonempty_image_tag_and_parses_without_wrapper_environment(self):
+        for tag in (None, "", "stage", "latest", "test_1.2-rc"):
+            with self.subTest(tag=tag), patch.dict(os.environ):
+                if tag is None:
+                    os.environ.pop("AGENTBOX_IMAGE_TAG", None)
+                else:
+                    os.environ["AGENTBOX_IMAGE_TAG"] = tag
+                url = self.agentbox["_git_url"](self.session, "org/library")
+                transport = f"agentbox-{tag}" if tag else "agentbox"
+                self.assertEqual(url, f"{transport}::{self.session.as_uri()}#org/library")
+                os.environ["AGENTBOX_IMAGE_TAG"] = "other"
+                self.assertEqual(self.agentbox["_parse_git_url"](url), (self.session, "org/library"))
+                self.assertEqual(self.agentbox["_parse_git_url"](url.partition("::")[2]),
+                                 (self.session, "org/library"))
+
+    def test_tagged_host_transport_ignores_agentbox_wrapper_environment(self):
+        stage = self.root / "stage installation"
+        (stage / "bin").mkdir(parents=True)
+        for name in ("agentbox", "git-remote-agentbox"):
+            shutil.copy2(ROOT / "bin" / name, stage / "bin" / name)
+        (stage / "proxy").symlink_to(ROOT / "proxy")
+        (self.fake_bin / "git-remote-agentbox-stage").symlink_to(stage / "bin" / "git-remote-agentbox")
+        with patch.dict(os.environ, AGENTBOX_IMAGE_TAG="stage"):
+            self.share()
+        url = self.git(self.project, "remote", "get-url", self.remote).stdout
+        self.assertTrue(url.startswith("agentbox-stage::"))
+        variables = ("AGENTBOX_HOME", "AGENTBOX_STATE", "AGENTBOX_IMAGE_TAG",
+                     "AGENTBOX_PRESET", "XDG_STATE_HOME")
+        foreign = {
+            "AGENTBOX_HOME": str(self.root / "other-installation"),
+            "AGENTBOX_STATE": str(self.root / "other-state"),
+            "AGENTBOX_IMAGE_TAG": "other-tag",
+            "AGENTBOX_PRESET": "other-preset",
+            "XDG_STATE_HOME": str(self.root / "other-xdg-state"),
+        }
+        for index, settings in enumerate(({}, foreign)):
+            with self.subTest(environment=settings), patch.dict(os.environ):
+                for variable in variables:
+                    os.environ.pop(variable, None)
+                os.environ.update(settings)
+                self.git(self.project, "commit", "--allow-empty", "-qm", f"host update {index}")
+                commit = self.git(self.project, "rev-parse", "HEAD").stdout.strip()
+                self.git(self.project, "push", self.remote, f"HEAD:published-{index}")
+                stored = server.repository("workspace")
+                self.assertEqual(self.git(stored, "rev-parse", f"published-{index}").stdout.strip(), commit)
+                self.git(stored, "update-ref", f"refs/heads/reply-{index}", commit)
+                self.git(self.project, "fetch", self.remote)
+                self.assertEqual(self.git(self.project, "rev-parse", f"{self.remote}/reply-{index}").stdout.strip(), commit)
+                self.assertEqual(self.git(self.project, "remote", "get-url", self.remote).stdout, url)
+                self.assertNotEqual(self.git(self.project, "config", "--get",
+                                            f"remote.{self.remote}.vcs", check=False).returncode, 0)
 
     def test_internal_git_helper_cli_capabilities(self):
         url = self.agentbox["_git_url"](self.session, "workspace")
@@ -578,7 +631,8 @@ sys.exit(23)
         for name in ("git", "git/shadow", "../escape", "/absolute"):
             with self.subTest(name=name), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 self.agentbox["_validate_context_destination"](name)
-        for url in ("file:///session#../escape", "https://host/session#repo", "file://host/session#repo"):
+        for url in ("file:///session#../escape", "https://host/session#repo", "file://host/session#repo",
+                    "agentbox-stage::file://host/session#repo", "other::file:///session#repo"):
             with self.subTest(url=url), self.assertRaises(ValueError):
                 self.agentbox["_parse_git_url"](url)
 
@@ -612,6 +666,9 @@ sys.exit(23)
 
     def test_remove_cleans_all_registered_repos_but_preserves_repointed_remotes(self):
         self.share()
+        with patch.dict(os.environ, AGENTBOX_IMAGE_TAG="stage"):
+            self.git(self.project, "remote", "set-url", self.remote,
+                     self.agentbox["_git_url"](self.session, "workspace"))
         reference = self.root / "library"
         self.git(self.root, "clone", "-q", str(self.project), str(reference))
         self.share("org/library", reference)
@@ -627,6 +684,9 @@ sys.exit(23)
         reference = self.root / "library"
         self.git(self.root, "clone", "-q", str(self.project), str(reference))
         self.share("org/library", reference)
+        with patch.dict(os.environ, AGENTBOX_IMAGE_TAG="stage"):
+            self.git(reference, "remote", "set-url", self.remote,
+                     self.agentbox["_git_url"](self.session, "org/library"))
         with patch.dict(self.g, find_project_dir=lambda: reference), redirect_stdout(io.StringIO()):
             self.agentbox["cmd_remote_cleanup"](types.SimpleNamespace())
             self.assertIn(self.remote, self.git(reference, "remote").stdout.splitlines())

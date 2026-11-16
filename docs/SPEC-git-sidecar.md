@@ -18,9 +18,14 @@ publish commits and refs, not write the sidecar's configuration, hooks, catalog,
 or filesystem. An agent may read or push to any repository shared with its own
 session: the session, not an individual repository, is the trust boundary.
 
-The host uses `agentbox::<session-file-URI>#<repository>` remotes.
+The host uses `agentbox::<session-file-URI>#<repository>` remotes when
+`AGENTBOX_IMAGE_TAG` is unset or empty, and
+`agentbox-<tag>::<session-file-URI>#<repository>` for a non-empty tag.
+Git selects `git-remote-agentbox` or `git-remote-agentbox-<tag>` from `PATH`;
+tagged helpers are symlinks to the intended installation's `bin/git-remote-agentbox`.
 `bin/git-remote-agentbox` is a thin exec wrapper for the private
-`agentbox _git-remote-helper URL` command. The CLI implements Git's `connect`
+`agentbox _git-remote-helper URL` command in its resolved sibling CLI.
+The CLI implements Git's `connect`
 helper protocol, starts the sidecar if needed, and streams upload-pack/receive-pack
 through `podman exec -i`.
 The file URI identifies session configuration; it is **not** a host bare-repo
@@ -28,6 +33,10 @@ path. No SSH keys, published ports, `ext` transport permission, or container
 socket inside the agent is needed. Both host binaries must be on `PATH`.
 The protocol handler and session/locking/registration helpers all live in
 `bin/agentbox`; the wrapper preserves stdin/stdout, exit status, and signals.
+Host transfers use the remote's transport, absolute session URI, and saved Compose
+image references, not the caller's `AGENTBOX_*` environment. No per-session
+installation or interpreter record is needed. Removal and stale-remote cleanup
+recognize both tagged and untagged remotes regardless of the current image tag.
 
 ## Commands and publication
 

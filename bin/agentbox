@@ -616,11 +616,15 @@ def _git_remote_name(session_dir: Path) -> str:
 
 
 def _git_url(session_dir: Path, name: str) -> str:
-    return f"agentbox::{session_dir.resolve().as_uri()}#{name}"
+    tag = os.environ.get("AGENTBOX_IMAGE_TAG")
+    transport = f"agentbox-{tag}" if tag else "agentbox"
+    return f"{transport}::{session_dir.resolve().as_uri()}#{name}"
 
 
 def _parse_git_url(url: str) -> tuple[Path, str]:
-    parsed = urlsplit(url.removeprefix("agentbox::"))
+    if url.startswith(("agentbox::", "agentbox-")):
+        url = url.partition("::")[2]
+    parsed = urlsplit(url)
     if (parsed.scheme != "file" or parsed.netloc or parsed.query
             or not GIT_REPOSITORY_NAME.fullmatch(parsed.fragment)):
         raise ValueError("Invalid agentbox Git URL")
@@ -745,8 +749,9 @@ def _mount_repository(session_dir: Path, path: Path, name: str | None = None, re
     print(f"==> Shared {path} for {destination} (branch: {branch}).")
     print(f"==> Cloned at next agent start. In a running sandbox: agentbox-clone {name}")
     print(f"==> Remote '{remote}' registered — git fetch {remote} to review output.")
-    if not shutil.which("git-remote-agentbox"):
-        print(f"    Add {Path(__file__).resolve().parent} to PATH (including git-remote-agentbox) for host git push/fetch.")
+    helper = f"git-remote-{url.partition('::')[0]}"
+    if not shutil.which(helper):
+        print(f"    Add {helper} to PATH for host git push/fetch.")
 
 
 def cmd_mount(args) -> None:
@@ -1164,8 +1169,14 @@ def cmd_remove(args) -> None:
         for repository, git_dir in entries.items():
             git = ["git", "--git-dir", git_dir, "remote"]
             current = subprocess.run([*git, "get-url", remote], capture_output=True, text=True)
-            if current.returncode == 0 and current.stdout.strip() == _git_url(session_dir, repository):
-                subprocess.run([*git, "remove", remote], capture_output=True)
+            if current.returncode:
+                continue
+            try:
+                if _parse_git_url(current.stdout.strip()) != (session_dir.resolve(), repository):
+                    continue
+            except ValueError:
+                continue
+            subprocess.run([*git, "remove", remote], capture_output=True)
         shutil.rmtree(session_dir, ignore_errors=True)
 
     print(f"Removed session '{name}'.")
@@ -1194,7 +1205,7 @@ def cmd_remote_cleanup(args) -> None:
     for remote in agentbox_remotes:
         url = subprocess.run(["git", "-C", str(project_dir), "remote", "get-url", remote],
                              capture_output=True, text=True, check=True).stdout.strip()
-        if not url.startswith("agentbox::"):
+        if not url.startswith(("agentbox::", "agentbox-")):
             continue
         try:
             session_dir, repository = _parse_git_url(url)

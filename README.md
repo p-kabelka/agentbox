@@ -420,6 +420,21 @@ Use `agentbox-stage build`, `agentbox-stage init --name testing`, and
 tag for the main installation. The wrapper selects the tag and separate session
 state; no branch-specific image-tag edits are needed.
 
+A non-empty `AGENTBOX_IMAGE_TAG` also selects the host Git transport:
+`stage` creates `agentbox-stage::` remotes, which Git routes to
+`git-remote-agentbox-stage` on `PATH`. Install it as a symlink to the stage helper:
+
+```bash
+ln -s "$HOME/.local/share/agentbox-stage/bin/git-remote-agentbox" \
+      "$HOME/.local/bin/git-remote-agentbox-stage"
+```
+
+The helper resolves the symlink and runs its sibling stage CLI. Ordinary host
+`git fetch`/`git push` then needs no wrapper or `AGENTBOX_*` exports: the remote
+selects the helper and the saved Compose file pins the images. Unset or empty
+`AGENTBOX_IMAGE_TAG` keeps `agentbox::` and `git-remote-agentbox`; explicitly
+setting `latest` selects `agentbox-latest::` and `git-remote-agentbox-latest`.
+
 ### Providers
 
 Each session has its own `$AGENTBOX_STATE/sessions/<session-id>/proxy-config/proxy.yaml`, copied from the preset on `agentbox init`. The default state directory is `~/.local/state/agentbox`. Edit the session file to enable providers:
