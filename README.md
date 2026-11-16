@@ -23,14 +23,13 @@ Podman's `internal: true` remains defense in depth, not the destination policy.
 
 The HTTP proxy also rejects upstream connections to host addresses, session
 networks, loopback, and link-local destinations—even if an L7 allow rule matches.
-Resolved addresses are checked and pinned before connecting.
+Each TCP socket's actual destination is checked after DNS resolution, without
+rewriting mitmproxy's upstream address or disrupting connection reuse. The proxy
+reads host addresses live through a read-only `/proc/1/net` mount, so host address
+changes do not require a reload.
 Other private/LAN upstreams are denied by default; if needed, declare their exact
 IPs in `proxy.yaml` under `private_upstreams: [...]` as well as an L7 request rule.
 This cannot override host, loopback, or session-network blocks.
-
-Rebuild `base`, `network`, `proxy`, and the harness image you use, then initialize
-a new session to adopt this topology. Legacy sessions without a guard fail closed;
-retained agents cannot be migrated in place.
 
 ---
 
@@ -119,38 +118,34 @@ agentbox preset edit agent new-preset
 
 ### krun with passt networking
 
-To use passt instead of krun's default TSI backend, install `passt` on the host
-and add this to the preset's `agent.yaml` (merge with any existing annotations):
+To use passt instead of krun's default TSI backend, install `passt` and a krun
+runtime containing [crun #2334](https://github.com/containers/crun/pull/2334)
+(the procfs setup fix for passt). Add this to the preset's `agent.yaml`
+(merge with any existing annotations):
 
 ```yaml
 annotations:
   krun.use_passt: "1"
 ```
 
+Passt is recommended for Git-backed sessions on firmware affected by TSI's
+blocking full-duplex socket deadlock. Agentbox does not patch that guest-kernel
+behavior.
+
 passt/krun can leave the guest's IPv4 networking missing or partially configured
 on internal networks, including an existing address with an unusable prefix or
-missing subnet route. Agentbox works around this without a patched crun: each
-`start` refreshes the actual internal IPv4 subnet from Podman into a read-only
-`/agentbox-network` mount. Before any network access, `agentbox-network` combines
-that subnet with the guard namespace's Podman-allocated address.
+missing subnet route. Agentbox restores this configuration at startup: each
+`start` writes the guard's actual IPv4 address/prefix and sidecar addresses from
+Podman into `/agentbox-network/network.json` on a read-only mount.
 For passt guests only, three idempotent `ip` commands bring up `eth0`, apply the
-address/prefix, and ensure the connected subnet route exists. Other addresses,
+address/prefix, and ensure the connected subnet route exists. Other addresses and
 routes are left alone; no default route is added and `internal: true` remains
 unchanged. The helper also installs the two sidecar hostnames and disables
 external DNS in the guest for both TSI and passt.
 
-Rebuild `base` and the harness image you use, then initialize a **new session**
-with the updated preset. Existing retained containers cannot acquire the new
-image or metadata mount on restart. Ephemeral sessions can instead be
-reinitialized with their preset. Do not pin the example IP addresses from another
-session or change the network to non-internal.
-
-This uses the standard Agentbox image entrypoint. A custom entrypoint must invoke
-`agentbox-network` before accessing
-the network. For a standalone `podman run` without the metadata mount, pass the
-actual internal network's subnet with `agentbox-network --subnet CIDR`.
-That standalone helper only configures networking; it does not install the
-outer security policy. Use managed sessions for the isolation guarantee.
+This uses the standard Agentbox image entrypoint and managed session metadata.
+A custom entrypoint must invoke `agentbox-network` before using sidecar names
+or passt networking; the outer firewall is already installed before launch.
 
 ---
 
@@ -207,7 +202,7 @@ agentbox stop   [--name NAME]            # stop containers
 agentbox remove [--name NAME]            # delete session, sidecar repositories, and registered remotes
 ```
 
-`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. By default, `agentbox start` can run independent agents concurrently; both sidecars stay up until the last agent exits, then `compose down` tears the project down without deleting named volumes. With `init --persist`, the agent is one retained service container; `start -- CMD` is only valid before first creation, later starts use its saved command, and a second simultaneous start fails. `stop` retains all three persistent containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running agent; use another ephemeral start or separate session for parallel shells.
+`--name` defaults to a timestamp if not specified. If a project has exactly one session, it is auto-detected. By default, `agentbox start` can run independent agents concurrently; the sidecars stay up until the last agent exits, then `compose down` tears the project down without deleting named volumes. With `init --persist`, the agent is one retained service container; `start -- CMD` is only valid before first creation, later starts use its saved command, and a second simultaneous start fails. `stop` retains the persistent containers; `remove` deletes them. Because agents run in krun microVMs, `podman exec` cannot reach a running agent; use another ephemeral start or separate session for parallel shells.
 
 Everywhere where `--name` can be used, the parameter `--session` can also be used when you provide the session global ID found in `agentbox list --all`.
 
@@ -572,7 +567,7 @@ mitmproxy dependency enables the real TLS/ALPN and HTTP streaming/reload regress
 TLS negotiation runs in memory without sockets. The streaming regression requires
 working local TCP listeners and reports a skip when the environment cannot provide them.
 
-For real containers, first build `base git proxy`, then run:
+For real containers, first build `base network git proxy`, then run:
 
 ```bash
 AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
@@ -580,12 +575,13 @@ AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p test_git_sidecar
 
 This uses krun by default. On a machine without KVM, explicitly set `AGENTBOX_TEST_RUNTIME=crun` to test container networking and synchronization without claiming VM-isolation coverage. `AGENTBOX_IMAGE_TAG` must match the built images.
 
-To run the integration suite with passt, including DNS and internal-only guest
-routes across persistent VM restarts:
+To run the integration suite with passt, including blocking full-duplex Git
+sockets, a 4 MiB push/clone round trip, and internal-only guest routes across
+persistent VM restarts:
 
 ```bash
 AGENTBOX_INTEGRATION=1 AGENTBOX_TEST_USE_PASST=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
 ```
 
-The test flag sets the annotation on both the suite's generated preset and its
-standalone `podman run`; editing your normal preset does not configure these tests.
+The test flag sets the annotation on the suite's generated preset; editing your
+normal preset does not configure these tests.

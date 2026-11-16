@@ -84,11 +84,12 @@ entrypoint cannot widen the outer policy. Only the two sidecar names are
 provided locally in `/etc/hosts`; the HTTP proxy resolves external names.
 No host-wide firewall changes or host root privileges are required. The
 internal network remains an additional external-forwarding restriction.
-Policy setup is fail-closed, including on persistent restarts; old sessions
-without the guard must be reinitialized (retained agents need a new session).
-The HTTP proxy also blocks resolved host/session addresses and non-global
-upstreams, pins the validated destination, and disables opaque raw TCP
-tunneling. Private remote APIs require exact `private_upstreams` IP entries
+Policy installation must succeed before every agent start, including persistent
+restarts. The HTTP proxy checks actual TCP socket destinations after DNS
+resolution, using live host addresses and its connected session subnets. It
+does not rewrite upstream hostnames or perform a second DNS lookup. Non-TCP
+upstreams and opaque raw TCP tunneling are disabled.
+Private remote APIs require exact `private_upstreams` IP entries
 in the trusted proxy configuration in addition to an L7 rule; those entries
 cannot override host, loopback, link-local, or session-subnet blocks.
 
@@ -185,8 +186,7 @@ Each session directory describes its configuration; repository data is in Compos
 |------|---------|
 | `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on ephemeral `agentbox init` or persistent init before agent creation. Contains `x-metadata.project-dir`, `x-metadata.name`, and `x-metadata.persist` for session identification. |
 | `proxy-config/proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init; sole authority for provider secret declarations |
-| `proxy-config/network-policy.json` | Generated host addresses and session subnets that the proxy must never connect to; refreshed at start/reload/restart |
-| `network-config/ipv4-subnets.json` | Read-only sidecar names, guest address, and subnet metadata for agent startup |
+| `network-config/network.json` | Read-only sidecar addresses and guest IPv4 address/prefix for agent startup |
 | `.secret-sync.lock` | Exclusive synchronization/lifecycle lock; contains no secret data |
 | `.lifetime.lock` | Shared by concurrent ephemeral agents; exclusively owned by an attached persistent start |
 | `dotfiles/` | Extracted dotfiles from preset `agent.yaml` |

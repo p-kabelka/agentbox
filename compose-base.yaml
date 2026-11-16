@@ -14,6 +14,7 @@ services:
 
   proxy:
     image: localhost/agentbox-proxy:${AGENTBOX_IMAGE_TAG:-latest}
+    runtime: crun
     networks:
       - agent-net
       - proxy-net
@@ -22,6 +23,7 @@ services:
       - /run/secrets:rw,noexec,nosuid,nodev,mode=0700
     volumes:
       - proxy-ca:/root/.mitmproxy:z
+      - /proc/1/net:/host-net:ro
     # environment:
     #   AGENTBOX_NAME: ${AGENTBOX_NAME:-}
     #   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
@@ -80,7 +82,6 @@ services:
     runtime: krun
     environment:
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}
-      AGENTBOX_NETWORK_GUARD: "1"
 
       # Dummy credentials — proxy injects real values via mitmproxy
       # ANTHROPIC_API_KEY: dummy

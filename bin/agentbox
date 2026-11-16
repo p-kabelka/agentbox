@@ -40,7 +40,6 @@ HARNESS_CONTAINERFILES = {
 }
 HARNESS_CONTAINERFILES.update({name: "Containerfile" for name in ("proxy", "git", "network")})
 GIT_REPOSITORY_NAME = re.compile(r"(?=.{1,100}\Z)[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", re.ASCII)
-NETWORK_CONFIG_VOLUME = "./network-config:/agentbox-network:ro,z"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -238,19 +237,6 @@ def _atomic_json(path: Path, value) -> None:
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
-
-
-def _host_addresses() -> set[str]:
-    lines = Path("/proc/net/fib_trie").read_text().splitlines()
-    addresses = {str(ipaddress.IPv4Address(previous.split()[-1]))
-                 for previous, current in zip(lines, lines[1:]) if current.strip() == "/32 host LOCAL"}
-    if not addresses:
-        raise ValueError("cannot enumerate host addresses for proxy isolation")
-    ipv6 = Path("/proc/net/if_inet6")
-    if ipv6.exists():
-        addresses.update(str(ipaddress.IPv6Address(int(line.split()[0], 16)))
-                         for line in ipv6.read_text().splitlines())
-    return addresses
 
 
 def _resolve_images(images: dict[str, str]) -> dict[str, str]:
@@ -453,11 +439,10 @@ def generate_compose(
         "no-git": no_git,
     }
 
-    base["services"]["git"]["container_name"] = _persistent_name(session_dir, "git")
-    base["services"]["network"]["container_name"] = _persistent_name(session_dir, "network")
+    for service in ("proxy", "git", "network"):
+        base["services"][service]["container_name"] = _persistent_name(session_dir, service)
     if persist:
-        for service in ("agent", "proxy"):
-            base["services"][service]["container_name"] = _persistent_name(session_dir, service)
+        base["services"]["agent"]["container_name"] = _persistent_name(session_dir, "agent")
 
     # --- Proxy service ---
     proxy = base["services"]["proxy"]
@@ -488,7 +473,6 @@ def generate_compose(
     proxy_env: dict = proxy.get("environment", {})
     proxy_env.update(proxy_cfg.get("environment") or {})
     proxy_env["AGENTBOX_NAME"] = name
-    proxy_env["AGENTBOX_UPSTREAM_ISOLATION"] = "1"
     proxy["environment"] = proxy_env
 
     # --- Agent service ---
@@ -509,7 +493,6 @@ def generate_compose(
     agent_env: dict = agent.get("environment", {})
     agent_env.update(agent_preset_env)
     agent_env["AGENTBOX_NAME"] = name
-    agent_env["AGENTBOX_NETWORK_GUARD"] = "1"
     agent["environment"] = agent_env
 
     agent_annotations = agent_cfg.get("annotations") or {}
@@ -789,97 +772,25 @@ def cmd_mount(args) -> None:
 
 def _prepare_agent_network(session_dir: Path) -> None:
     """Install the outer-namespace allowlist before any agent can start."""
-    directory = session_dir / "network-config"
-    cfg = load_yaml(session_dir / "compose.yaml")
-    agent = cfg["services"]["agent"]
-    if agent.get("network_mode") != "service:network" or NETWORK_CONFIG_VOLUME not in agent.get("volumes", []):
-        die("session has no network guard; reinitialize it (retained agents require a new session)")
-    result = subprocess.run(["podman", "inspect", _persistent_name(session_dir, "git")],
-                            capture_output=True, text=True, check=True)
-    try:
-        networks = json.loads(result.stdout)[0]["NetworkSettings"]["Networks"]
-        if not isinstance(networks, dict) or len(networks) != 1:
-            raise ValueError("Git sidecar must have exactly one network")
-        result = subprocess.run(["podman", "network", "inspect", next(iter(networks))],
-                                capture_output=True, text=True, check=True)
-        network = json.loads(result.stdout)[0]
-        if network["internal"] is not True:
-            raise ValueError("Git sidecar's network must be internal")
-        subnets = [ipaddress.ip_network(entry["subnet"]) for entry in network["subnets"]]
-        subnets = sorted({str(subnet) for subnet in subnets if subnet.version == 4 and subnet.prefixlen > 0})
-        if not subnets:
-            raise ValueError("internal network has no usable IPv4 subnet")
-        network_name = next(iter(networks))
-        endpoints = {"git": str(ipaddress.IPv4Address(networks[network_name]["IPAddress"]))}
-        proxy_name = cfg["services"]["proxy"].get("container_name")
-        if not proxy_name:
-            running = subprocess.run(["podman", "ps", "-q", "--filter",
-                                      f"label=com.docker.compose.project={_project_name(session_dir, cfg['x-metadata'])}",
-                                      "--filter", "label=com.docker.compose.service=proxy"],
-                                     capture_output=True, text=True, check=True)
-            if len(running.stdout.split()) != 1:
-                raise ValueError("expected one running proxy")
-            proxy_name = running.stdout.strip()
-        proxy = subprocess.run(["podman", "inspect", proxy_name],
-                               capture_output=True, text=True, check=True)
-        proxy_networks = json.loads(proxy.stdout)[0]["NetworkSettings"]["Networks"]
-        endpoints["proxy"] = str(ipaddress.IPv4Address(proxy_networks[network_name]["IPAddress"]))
-        proxy_cfg = load_yaml(session_dir / "proxy-config" / "proxy.yaml")
-        endpoints["vertex_metadata"] = any(p.get("name") == "vertex" and p.get("enabled")
-                                           and p.get("metadata_server") for p in proxy_cfg.get("providers", []))
-        private = proxy_cfg.get("private_upstreams", [])
-        if not isinstance(private, list):
-            raise ValueError("private_upstreams must be a list of exact IP addresses")
-        private = [str(ipaddress.ip_address(address)) for address in private]
-    except (ValueError, KeyError, TypeError, IndexError) as exc:
-        die(f"cannot discover guarded network endpoints: {exc}")
-
-    feature = compose(session_dir, "exec", "-T", "proxy", "python3", "-c",
-                      "import sys; sys.path.insert(0, '/addons'); "
-                      "from upstream_isolation import UpstreamIsolation; "
-                      "sys.exit(not UpstreamIsolation().enabled)",
-                      capture_output=True, text=True)
-    if feature.returncode:
-        die("proxy lacks upstream isolation; rebuild proxy and create a new session")
     compose(session_dir, "up", "-d", "--no-deps", "--no-recreate", "network", check=True)
-    guard = subprocess.run(["podman", "inspect", _persistent_name(session_dir, "network")],
-                           capture_output=True, text=True, check=True)
-    guest_ipv4 = str(ipaddress.IPv4Address(
-        json.loads(guard.stdout)[0]["NetworkSettings"]["Networks"][network_name]["IPAddress"]))
+    services = ("proxy", "git", "network")
+    result = subprocess.run(["podman", "inspect", *(_persistent_name(session_dir, service) for service in services)],
+                            capture_output=True, text=True, check=True)
+    networks = {service: details["NetworkSettings"]["Networks"]
+                for service, details in zip(services, json.loads(result.stdout), strict=True)}
+    network_name, settings = next(iter(networks["network"].items()))
+    address = ipaddress.IPv4Interface(f"{settings['IPAddress']}/{settings['IPPrefixLen']}")
+    endpoints = {service: str(ipaddress.IPv4Address(networks[service][network_name]["IPAddress"]))
+                 for service in ("proxy", "git")}
+    proxy_cfg = load_yaml(session_dir / "proxy-config" / "proxy.yaml")
+    endpoints["vertex_metadata"] = any(p.get("name") == "vertex" and p.get("enabled")
+                                       and p.get("metadata_server") for p in proxy_cfg.get("providers", []))
     result = compose(session_dir, "exec", "-T", "network", "python3", "/app/guard.py", "apply",
                      input=json.dumps(endpoints), text=True, capture_output=True)
     if result.returncode:
         die(f"cannot enforce agent network policy: {result.stderr.strip()}")
-
-    blocked = _host_addresses() | {endpoints["proxy"], endpoints["git"], guest_ipv4}
-    blocked.update(settings[key] for settings in proxy_networks.values()
-                   for key in ("IPAddress", "GlobalIPv6Address", "Gateway", "IPv6Gateway") if settings.get(key))
-    blocked.update(entry["subnet"] for entry in network["subnets"])
-    for settings in proxy_networks.values():
-        for key, prefix in (("IPAddress", "IPPrefixLen"), ("GlobalIPv6Address", "GlobalIPv6PrefixLen")):
-            if settings.get(key) and settings.get(prefix):
-                blocked.add(str(ipaddress.ip_network(f"{settings[key]}/{settings[prefix]}", strict=False)))
-    _atomic_json(session_dir / "proxy-config" / "network-policy.json",
-                 {"blocked": sorted(blocked), "private_upstreams": private})
-    _atomic_json(directory / "ipv4-subnets.json",
-                 {"ipv4_subnets": subnets, "endpoints": endpoints, "guest_ipv4": guest_ipv4})
-
-
-def _assert_retained_network(session_dir: Path) -> None:
-    details = []
-    for service in ("agent", "network"):
-        result = subprocess.run(["podman", "inspect", _persistent_name(session_dir, service)],
-                                capture_output=True, text=True, check=True)
-        details.append(json.loads(result.stdout)[0])
-    agent, guard = details
-    host = agent["HostConfig"]
-    expected = {"container:" + guard["Id"], "container:" + _persistent_name(session_dir, "network")}
-    bounding, effective = agent.get("BoundingCaps"), agent.get("EffectiveCaps")
-    if not isinstance(bounding, list) or not isinstance(effective, list):
-        die("cannot verify retained agent capabilities; create a new session")
-    capabilities = {cap.upper().removeprefix("CAP_") for cap in [*bounding, *effective]}
-    if host.get("NetworkMode") not in expected or {"NET_ADMIN", "NET_RAW"} & capabilities:
-        die("retained agent has no enforced network boundary; create a new session")
+    _atomic_json(session_dir / "network-config" / "network.json",
+                 {"ipv4": str(address), "endpoints": endpoints})
 
 
 def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
@@ -915,7 +826,6 @@ def _launch_persistent(session_dir: Path, cmd: list[str] | None) -> int:
                     compose(session_dir, "up", "--no-start", "--no-deps", "--no-recreate", "agent", check=True)
                     if not any(c["name"] == name for c in _list_session_containers(project_name)):
                         die("Compose did not create the persistent agent service container")
-                _assert_retained_network(session_dir)
             except BaseException:
                 if proxy_started_here:
                     _stop_persistent(session_dir)
@@ -1173,8 +1083,6 @@ def cmd_proxy_restart(args) -> None:
 
 
 def _refresh_agent_network(session_dir: Path) -> None:
-    if not (session_dir / "network-config" / "ipv4-subnets.json").is_file():
-        return
     result = subprocess.run(["podman", "inspect", "--format", "{{.State.Running}}",
                              _persistent_name(session_dir, "network")],
                             capture_output=True, text=True)

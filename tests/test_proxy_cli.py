@@ -90,7 +90,8 @@ class ProxyCliTest(unittest.TestCase):
                 preflight = Mock(return_value=("full", "providers", []))
                 synchronize = Mock()
                 with (self.subTest(action=action, selector=selector),
-                      patch.dict(self.g, _secret_preflight=preflight, _synchronize_proxy=synchronize),
+                      patch.dict(self.g, _secret_preflight=preflight, _synchronize_proxy=synchronize,
+                                 _refresh_agent_network=lambda session: None),
                       patch.object(subprocess, "run") as run):
                     output, errors, status = self.cli("proxy", action, *selector)
                     self.assertEqual(status, 0, errors)

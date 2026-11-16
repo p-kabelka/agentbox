@@ -127,18 +127,20 @@ errors inside the guarded namespace. This is not access to host loopback.
 
 The host refreshes the policy and read-only address metadata before each agent
 boot. Names for `proxy` and `git` come from that metadata, so the agent does not
-need access to the bridge's DNS service. A failed/missing guard prevents launch.
+need access to the bridge's DNS service. Failed firewall installation prevents launch.
 Configuration reload/restart refreshes a running guard's optional metadata rule.
 
-The proxy independently rejects upstream connections to host IPs, either
-session network, loopback, and link-local addresses. The manager snapshots host
-addresses at start/reload and writes a proxy-only policy file. Resolved DNS
-addresses are validated and pinned before connecting to prevent DNS rebinding
-or broad L7 allow rules from exposing host/control-plane services.
-Non-global upstreams are denied by default, so subsequently created private
-bridges cannot expose a new host address through the proxy. Trusted configuration
-may declare exact remote `private_upstreams` IPs; hard host/session blocks take
-precedence. Reload the policy after changing the host's network addresses.
+The native-crun proxy independently rejects TCP connections to host IPs, either
+session network, loopback, and link-local addresses. A Python socket audit hook
+checks the numeric address passed to each actual connect call, after DNS, so
+DNS rebinding cannot substitute an unchecked destination. Mitmproxy's logical
+upstream address and connection pooling remain unchanged. Non-TCP upstreams
+are disabled because mitmproxy's Rust UDP connector does not use Python sockets.
+Host addresses are read live from the read-only `/proc/1/net` mount; connected
+session subnets come from the proxy's own routing tables. No generated host
+address snapshot or reload after address changes is needed. Non-global upstreams
+are denied unless the trusted configuration lists their exact `private_upstreams`
+IPs; host, local, and session-network blocks always take precedence.
 
 The proxy container is attached to both networks and is the sole egress point for all agent traffic.
 

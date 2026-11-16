@@ -1,49 +1,69 @@
-"""Keep HTTP proxy requests from reaching the host or the proxy's control plane."""
+"""Check actual Python TCP socket destinations without changing mitmproxy's pool keys."""
 
-import asyncio
 import ipaddress
-import json
-import os
 import socket
+import sys
 from pathlib import Path
 
-POLICY = Path("/config/network-policy.json")
+import yaml
+
+HOST_NET = Path("/host-net")
+LOCAL_NET = Path("/proc/net")
+CONFIG = Path("/config/proxy.yaml")
+BLOCKED = "Agentbox blocked a host/control-plane destination or unavailable network policy"
+
+
+def host_addresses():
+    lines = (HOST_NET / "fib_trie").read_text().splitlines()
+    addresses = {ipaddress.IPv4Address(previous.split()[-1])
+                 for previous, current in zip(lines, lines[1:]) if current.strip() == "/32 host LOCAL"}
+    if not addresses:
+        raise ValueError("host network state is unavailable")
+    ipv6 = HOST_NET / "if_inet6"
+    if ipv6.exists():
+        addresses.update(ipaddress.IPv6Address(int(line.split()[0], 16))
+                         for line in ipv6.read_text().splitlines())
+    return addresses
+
+
+def connected_networks():
+    for line in (LOCAL_NET / "route").read_text().splitlines()[1:]:
+        fields = line.split()
+        if fields[2] == "00000000" and fields[7] != "00000000":
+            address, mask = (ipaddress.IPv4Address(int(fields[i], 16).to_bytes(4, "little")) for i in (1, 7))
+            yield ipaddress.IPv4Network(f"{address}/{mask}")
+    ipv6 = LOCAL_NET / "ipv6_route"
+    if ipv6.exists():
+        for line in ipv6.read_text().splitlines():
+            fields = line.split()
+            if int(fields[1], 16) and int(fields[4], 16) == 0:
+                yield ipaddress.IPv6Network((int(fields[0], 16), int(fields[1], 16)))
 
 
 class UpstreamIsolation:
-    def __init__(self):
-        self.enabled = os.environ.get("AGENTBOX_UPSTREAM_ISOLATION") == "1"
+    def running(self):
+        # asyncio's TCP connector audits each numeric destination after DNS,
+        # immediately before connect(). No second lookup or address rewriting.
+        sys.addaudithook(self.audit)
 
-    async def server_connect(self, data):
-        if not self.enabled or data.server.address is None:
+    def server_connect(self, data):
+        # mitmproxy's Rust UDP connector does not use Python's socket audit hook.
+        if data.server.transport_protocol != "tcp":
+            data.server.error = BLOCKED
+
+    def audit(self, event, args):
+        if event != "socket.connect" or args[0].family not in (socket.AF_INET, socket.AF_INET6):
             return
-        server = data.server
-        host, port = server.address
         try:
-            policy = json.loads(POLICY.read_text())
-            if not isinstance(policy, dict):
-                raise ValueError("invalid network policy")
-            blocked = policy["blocked"]
-            private = policy.get("private_upstreams", [])
-            if (not isinstance(blocked, list) or not blocked or not isinstance(private, list)
-                    or any(not isinstance(value, str) for value in [*blocked, *private])):
-                raise ValueError("invalid network policy")
-            blocked = [ipaddress.ip_network(address, strict=False) for address in blocked]
-            private = {ipaddress.ip_address(address) for address in private}
-            answers = await asyncio.get_running_loop().getaddrinfo(host, port, type=socket.SOCK_STREAM)
-            addresses = [ipaddress.ip_address(answer[4][0]) for answer in answers]
-            if not addresses:
-                raise ValueError("no upstream address")
-            for address in addresses:
-                address = getattr(address, "ipv4_mapped", None) or address
-                if (any(address in network for network in blocked) or address.is_loopback or address.is_link_local
-                        or address.is_unspecified or address.is_multicast
-                        or (not address.is_global and address not in private)):
-                    raise ValueError("host or control-plane destination")
-            # Pin the validated address: a second DNS lookup must not permit rebinding.
-            # The default proxy bridge is IPv4-only, even on dual-stack hosts.
-            address = next((a for a in addresses if a.version == 4), addresses[0])
-            server.sni = server.sni or host
-            server.address = (str(address), port)
-        except (OSError, ValueError, TypeError, KeyError):
-            server.error = "Agentbox blocked a host/control-plane destination or unavailable network policy"
+            address = ipaddress.ip_address(args[1][0].split("%", 1)[0])
+            address = getattr(address, "ipv4_mapped", None) or address
+            private = yaml.safe_load(CONFIG.read_text()).get("private_upstreams", [])
+            if not isinstance(private, list):
+                raise ValueError("private_upstreams must be a list of exact IP addresses")
+            private = {ipaddress.ip_address(value) for value in private}
+            if (address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast
+                    or address in host_addresses() or any(address in network for network in connected_networks())
+                    or (not address.is_global and address not in private)):
+                raise ValueError("host or control-plane destination")
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError, yaml.YAMLError):
+            raise PermissionError(BLOCKED) from None

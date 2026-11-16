@@ -11,7 +11,6 @@ import ipaddress
 import json
 import os
 import select
-import shlex
 import shutil
 import socket
 import subprocess
@@ -244,8 +243,6 @@ git push
 
     def test_git_daemon_direct_transport_and_hook_isolation(self):
         self.initialize()
-        container = self.inspect_git()
-        network = next(iter(container["NetworkSettings"]["Networks"]))
         sidecar = self.config()["services"]["git"]["container_name"]
         # Even an administrator-created server hook is ignored by Git services.
         self.run_command(["podman", "exec", sidecar, "python3", "-c", """
@@ -255,21 +252,7 @@ hook.parent.mkdir(exist_ok=True)
 hook.write_text('#!/bin/sh\\nexit 1\\n')
 hook.chmod(0o755)
 """])
-        name = "agentbox-direct-" + hashlib.sha256(self.session_id.encode()).hexdigest()[:20]
-        self.addCleanup(lambda: self.run_command(["podman", "rm", "-f", name], check=False))
-        image = self.config()["services"]["agent"]["image"]
-        annotations = ["--annotation", "krun.use_passt=1"] if self.use_passt else []
-        network_setup = ""
-        if self.use_passt:
-            info = json.loads(self.run_command(["podman", "network", "inspect", network]).stdout)[0]
-            subnets = [entry["subnet"] for entry in info["subnets"]
-                       if ipaddress.ip_network(entry["subnet"]).version == 4]
-            self.assertTrue(subnets)
-            # This raw podman run intentionally bypasses the image entrypoint.
-            subnet_args = [arg for subnet in subnets for arg in ("--subnet", subnet)]
-            network_setup = shlex.join(["agentbox-network", *subnet_args]) + "\n"
-        self.run_command(["podman", "run", "--rm", "--name", name, "--runtime", os.environ.get("AGENTBOX_TEST_RUNTIME", "krun"),
-                          *annotations, "--network", network, "--entrypoint", "/bin/bash", image, "-ec", network_setup + """
+        self.cli("start", "--session", self.session_id, "--", "bash", "-ec", """
 git clone git://git/workspace.git /workspace/project
 cd /workspace/project
 git config user.name Agent
@@ -284,7 +267,7 @@ if git push origin HEAD:direct-work; then exit 3; fi
 git push --force origin HEAD:direct-work
 git push origin HEAD:temporary
 git push origin --delete temporary
-"""])
+""")
         self.git(self.project, "fetch", self.remote)
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/direct-work:source").stdout, "direct\n")
         self.assertEqual((self.project / "source").read_text(), "host\n")
@@ -343,6 +326,59 @@ for address in (original[0]['local'] + '/32', '169.254.2.2/16'):
     with client.open('http://git:8083/manifest.json', timeout=5) as response:
         assert 'workspace' in json.load(response)
 assert Path('/etc/resolv.conf').read_bytes() == resolv
+""")
+
+    def test_passt_blocking_full_duplex_and_large_git_transfer(self):
+        if not self.use_passt or os.environ.get("AGENTBOX_TEST_RUNTIME", "krun") == "crun":
+            self.skipTest("Requires a real krun/passt VM")
+        self.initialize()
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", """
+import hashlib, json, os, socket, subprocess, threading
+from pathlib import Path
+
+config = json.loads(Path('/.krun_config.json').read_text())
+assert int(config['annotations']['krun.use_passt']) == 1
+assert Path('/sys/class/net/eth0').exists()
+sock = socket.create_connection(('git', 9418), timeout=5)
+sock.settimeout(None)  # Git uses blocking sockets for its concurrent read/write.
+receiving, received, sent = threading.Event(), threading.Event(), threading.Event()
+reply = bytearray()
+
+def reader():
+    receiving.set()
+    while len(reply) < 4:
+        chunk = sock.recv(4 - len(reply))
+        if not chunk:
+            return
+        reply.extend(chunk)
+    received.set()
+
+def writer():
+    request = b'git-upload-pack /workspace.git\\0host=git\\0'
+    sock.sendall(f'{len(request) + 4:04x}'.encode() + request)
+    sent.set()
+
+threading.Thread(target=reader, daemon=True).start()
+assert receiving.wait(1)
+assert not received.wait(0.25)  # Enter recv() before the writer attempts send().
+threading.Thread(target=writer, daemon=True).start()
+if not received.wait(5) or not sent.wait(5):
+    print('Blocking read starved concurrent write on the Git socket', flush=True)
+    os._exit(1)  # Do not wait for threads stuck inside the guest kernel.
+assert int(reply, 16) > 4, reply
+sock.close()
+
+def git(*args):
+    subprocess.run(['git', *args], check=True, timeout=30)
+
+git('-C', '/workspace', 'switch', '-c', 'bulk-roundtrip')
+payload = os.urandom(4 * 1024 * 1024)
+Path('/workspace/bulk').write_bytes(payload)
+git('-C', '/workspace', 'add', 'bulk')
+git('-C', '/workspace', 'commit', '-m', 'large native Git transfer')
+git('-C', '/workspace', 'push', '-u', 'origin', 'HEAD')
+git('clone', '--branch', 'bulk-roundtrip', 'git://git/workspace.git', '/tmp/roundtrip')
+assert hashlib.sha256(Path('/tmp/roundtrip/bulk').read_bytes()).digest() == hashlib.sha256(payload).digest()
 """)
 
     def test_manual_clone_into_retained_agent_and_restart_preserves_work(self):
@@ -555,7 +591,7 @@ for target in TARGETS:
         preset = self.home / "custom" / "presets" / "integration" / "proxy.yaml"
         preset.write_text(yaml.safe_dump({"providers": [], "extra_request_policy": [
             {"host": r"upstream\.example", "port": port} for port in (8080, 8443)]}))
-        self.initialize()
+        self.initialize("--persist")
         name = "agentbox-upstream-" + hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
         network = name + "-net"
         self.run_command(["podman", "network", "create", "-o", "isolate=false", network])
@@ -587,18 +623,38 @@ Path('/tls/upstream.key').write_bytes(key.private_bytes(serialization.Encoding.P
         self.addCleanup(lambda: self.run_command(["podman", "rm", "-f", name], check=False))
         self.run_command(["podman", "run", "-d", "--name", name, "--network", network,
                           "-v", f"{certs}:/tls:ro,z", "--entrypoint", "python3",
-                          self.config()["services"]["git"]["image"], "-c", """
+                          self.config()["services"]["proxy"]["image"], "-c", """
 import ssl, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from h2.config import H2Configuration
+from h2.connection import H2Connection
+from h2.events import StreamEnded
 class Handler(BaseHTTPRequestHandler):
+    protocol_version = 'HTTP/1.1'
+    def handle(self):
+        if getattr(self.connection, 'selected_alpn_protocol', lambda: None)() != 'h2':
+            return super().handle()
+        connection = H2Connection(config=H2Configuration(client_side=False))
+        connection.initiate_connection()
+        self.connection.sendall(connection.data_to_send())
+        while data := self.connection.recv(65536):
+            for event in connection.receive_data(data):
+                if isinstance(event, StreamEnded):
+                    body = b'EXTERNAL_FIXTURE_OK H2 ' + str(self.client_address[1]).encode()
+                    connection.send_headers(event.stream_id, [(':status', '200'), ('content-length', str(len(body)))])
+                    connection.send_data(event.stream_id, body, end_stream=True)
+            self.connection.sendall(connection.data_to_send())
     def do_GET(self):
+        body = b'EXTERNAL_FIXTURE_OK ' + str(self.client_address[1]).encode()
         self.send_response(200)
+        self.send_header('Content-Length', str(len(body)))
         self.end_headers()
-        self.wfile.write(b'EXTERNAL_FIXTURE_OK')
+        self.wfile.write(body)
 plain = ThreadingHTTPServer(('0.0.0.0',8080),Handler)
 secure = ThreadingHTTPServer(('0.0.0.0',8443),Handler)
 context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
 context.load_cert_chain('/tls/upstream.crt','/tls/upstream.key')
+context.set_alpn_protocols(['h2', 'http/1.1'])
 secure.socket = context.wrap_socket(secure.socket,server_side=True)
 threading.Thread(target=plain.serve_forever,daemon=True).start()
 secure.serve_forever()
@@ -614,13 +670,67 @@ secure.serve_forever()
         cfg["services"]["proxy"]["volumes"].append(f"{certificate}:/custom-certs/upstream.crt:ro,z")
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         self.cli("start", "--session", self.session_id, "--", "python3", "-c", """
-import urllib.request
-client = urllib.request.build_opener(urllib.request.ProxyHandler(
-    {'http':'http://proxy:8080','https':'http://proxy:8080'}))
-for url in ('http://upstream.example:8080/','https://upstream.example:8443/'):
-    with client.open(url,timeout=10) as response:
-        assert response.read() == b'EXTERNAL_FIXTURE_OK', url
+import http.client, ssl
+for secure in (False, True):
+    if secure:
+        client = http.client.HTTPSConnection('proxy', 8080, context=ssl.create_default_context(), timeout=10)
+        client.set_tunnel('upstream.example', 8443)
+        target = '/'
+    else:
+        client = http.client.HTTPConnection('proxy', 8080, timeout=10)
+        target = 'http://upstream.example:8080/'
+    ports = []
+    for _ in range(8):
+        client.request('GET', target)
+        response = client.getresponse()
+        body = response.read()
+        assert response.status == 200 and body.startswith(b'EXTERNAL_FIXTURE_OK '), (response.status, body)
+        ports.append(body.split()[-1])
+    assert len(set(ports)) == 1, ('upstream connection not reused', ports)
+    client.close()
 """)
+        # Exercise the production proxy with an HTTP/2 client as well. The
+        # proxy image supplies h2; the minimal agent image deliberately does not.
+        proxy = cfg["services"]["proxy"]["container_name"]
+        self.run_command(["podman", "start", proxy])
+        self.cli("proxy", "reload", "--session", self.session_id)
+        self.run_command(["podman", "exec", proxy, "python3", "-c", """
+import socket, ssl
+from h2.connection import H2Connection
+from h2.events import DataReceived, ResponseReceived, StreamEnded
+raw = socket.create_connection(('127.0.0.1', 8080), timeout=10)
+raw.sendall(b'CONNECT upstream.example:8443 HTTP/1.1\\r\\nHost: upstream.example:8443\\r\\n\\r\\n')
+header = b''
+while not header.endswith(b'\\r\\n\\r\\n'):
+    header += raw.recv(1)
+assert b' 200 ' in header, header
+context = ssl.create_default_context(cafile='/root/.mitmproxy/mitmproxy-ca-cert.pem')
+context.set_alpn_protocols(['h2'])
+with context.wrap_socket(raw, server_hostname='upstream.example') as client:
+    assert client.selected_alpn_protocol() == 'h2'
+    connection = H2Connection()
+    connection.initiate_connection()
+    bodies = {stream: b'' for stream in range(1, 17, 2)}
+    for stream in bodies:
+        connection.send_headers(stream, [(':method', 'GET'), (':scheme', 'https'),
+            (':authority', 'upstream.example:8443'), (':path', '/')], end_stream=True)
+    client.sendall(connection.data_to_send())
+    completed = set()
+    while len(completed) < len(bodies):
+        data = client.recv(65536)
+        assert data, 'HTTP/2 connection closed prematurely'
+        for event in connection.receive_data(data):
+            if isinstance(event, ResponseReceived):
+                assert (b':status', b'200') in event.headers, event.headers
+            elif isinstance(event, DataReceived):
+                bodies[event.stream_id] += event.data
+                connection.acknowledge_received_data(event.flow_controlled_length, event.stream_id)
+            elif isinstance(event, StreamEnded):
+                completed.add(event.stream_id)
+        client.sendall(connection.data_to_send())
+    assert all(body.startswith(b'EXTERNAL_FIXTURE_OK H2 ') for body in bodies.values()), bodies
+    assert len({body.split()[-1] for body in bodies.values()}) == 1, bodies
+"""])
 
 
 if __name__ == "__main__":

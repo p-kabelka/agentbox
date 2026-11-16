@@ -160,6 +160,12 @@ container TCP/DNS networking and KVM for the default krun runtime; an explicit
 `AGENTBOX_TEST_RUNTIME=crun` tests ordinary containers instead. A nested sandbox
 booted with `tsi_hijack` cannot provide ordinary Podman bridge networking.
 
+Set `AGENTBOX_TEST_USE_PASST=1` to run the managed guests with passt. This also
+checks a blocking receive concurrent with a write on the same Git socket—the
+pattern that deadlocks affected TSI firmware—and a 4 MiB native Git push/clone
+round trip. Passt needs the runtime procfs setup fix in
+[crun #2334](https://github.com/containers/crun/pull/2334).
+
 For the KVM-independent host-to-sidecar transport/lifecycle check only, add
 `-k host_transport` to the integration-test command. It verifies multiple shares,
 push/fetch, named-volume retention across teardown, Git-only restart, and removal.

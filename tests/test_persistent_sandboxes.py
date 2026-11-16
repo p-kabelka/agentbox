@@ -30,7 +30,6 @@ class PersistentSandboxesTest(unittest.TestCase):
         p = patch.dict(self.g, AGENTBOX_HOME=ROOT, AGENTBOX_STATE=self.root / "state", compose=self.compose,
                         resolve_session=lambda args: (self.session, self.project),
                         _prepare_agent_network=lambda session: None,
-                        _assert_retained_network=lambda session: None,
                         _resolve_images=lambda images: images)
         p.start()
         self.addCleanup(p.stop)
