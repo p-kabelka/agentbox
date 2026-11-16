@@ -9,9 +9,12 @@ import time
 from pathlib import Path
 
 READY = Path("/run/agentbox-network-ready")
+CONFIG = Path("/agentbox-network/network.json")
 
 
 def rules(endpoints):
+    if not isinstance(endpoints, dict):
+        raise ValueError("expected an endpoint mapping")
     allowed = []
     proxy_ports = "{ 8080, 9090 }" if endpoints.get("vertex_metadata") is True else "8080"
     for service, ports in (("proxy", proxy_ports), ("git", "{ 9418, 8083 }")):
@@ -23,10 +26,10 @@ def rules(endpoints):
 
 
 def install(allowed=""):
-    # add is idempotent; the flush and replacement are one atomic transaction.
+    # add is idempotent; creation, flush, and replacement are one transaction.
     # Loopback resets deliver rejection errors, not application connections.
-    subprocess.run(["nft", "add", "table", "inet", "agentbox"], check=True)
     subprocess.run(["nft", "-f", "-"], input=f"""
+add table inet agentbox
 flush table inet agentbox
 table inet agentbox {{
     chain output {{
@@ -55,7 +58,7 @@ def main():
         deadline = time.monotonic() + 10
         while not READY.is_file():
             if time.monotonic() >= deadline:
-                raise RuntimeError("network guard did not enter deny-all state")
+                raise RuntimeError("network guard did not become ready")
             time.sleep(0.05)
         install(allowed)
         return
@@ -64,7 +67,14 @@ def main():
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     signal.signal(signal.SIGINT, lambda *_: sys.exit(0))
     READY.unlink(missing_ok=True)
-    install()
+    try:
+        allowed = rules(json.loads(CONFIG.read_text())["endpoints"])
+    except (OSError, ValueError, TypeError, KeyError):
+        install()  # Invalid policy fails closed, without stopping the sandbox.
+        raise
+    # Kernel rules survive guard exit. Replace them atomically on restart,
+    # without a deny-all interval that would reset active TCP connections.
+    install(allowed)
     READY.touch()
     while True:
         signal.pause()
@@ -73,6 +83,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except (OSError, ValueError, KeyError, RuntimeError, subprocess.CalledProcessError) as exc:
+    except (OSError, ValueError, TypeError, KeyError, RuntimeError, subprocess.CalledProcessError) as exc:
         print(f"Network guard failed: {exc}", file=sys.stderr)
         sys.exit(1)

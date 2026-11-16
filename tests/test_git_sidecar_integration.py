@@ -123,6 +123,113 @@ class GitSidecarIntegrationTest(unittest.TestCase):
                 if parts[0] not in cfg["volumes"]:
                     self.assertIn("ro", parts[2].split(","))
 
+    def start_waiting_agent(self):
+        script = """
+import http.client, os, socket, sys
+from pathlib import Path
+work = Path('/root/network-lifetime-work')
+token = os.urandom(16).hex()
+work.write_text(token)
+client = http.client.HTTPConnection('proxy', 8080, timeout=5)
+def check():
+    assert work.read_text() == token, 'Working state lost'
+    client.request('GET', 'http://not-allowed.invalid/')
+    response = client.getresponse()
+    assert response.status == 403, response.status
+    response.read()
+    assert client.sock is not None, 'Proxy closed the keepalive connection'
+    with socket.create_connection(('git', 9418), timeout=5):
+        pass
+    for port in (8081, 8082):
+        try:
+            with socket.create_connection(('proxy', port), timeout=1):
+                raise AssertionError(('Management port reachable', port))
+        except OSError:
+            pass
+check()
+original_socket = client.sock
+print('NETWORK_LIFETIME_READY', flush=True)
+for command in sys.stdin:
+    if command.strip() == 'exit':
+        break
+    check()
+    assert client.sock is original_socket, 'TCP connection replaced'
+    print('NETWORK_LIFETIME_OK', flush=True)
+"""
+        process = subprocess.Popen([sys.executable, str(ROOT / "bin/agentbox"), "start",
+                                    "--session", self.session_id, "--", "python3", "-c", script],
+                                   env=self.env, cwd=self.project, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+        def cleanup():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=10)
+            process.stdin.close()
+            process.stdout.close()
+
+        self.addCleanup(cleanup)
+        self.read_agent_output(process, b"NETWORK_LIFETIME_READY", 90)
+        return process
+
+    def read_agent_output(self, process, marker, timeout=15):
+        output = bytearray()
+        deadline = time.monotonic() + timeout
+        while marker not in output:
+            ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
+            if not ready:
+                break
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            output.extend(chunk)
+        self.assertIn(marker, output, output.decode(errors="replace"))
+
+    def check_waiting_agent(self, process):
+        self.assertIsNone(process.poll(), "Agent attachment exited")
+        process.stdin.write(b"check\n")
+        process.stdin.flush()
+        self.read_agent_output(process, b"NETWORK_LIFETIME_OK")
+
+    def finish_waiting_agent(self, process):
+        process.stdin.write(b"exit\n")
+        process.stdin.flush()
+        output, _ = process.communicate(timeout=30)
+        self.assertEqual(process.returncode, 0, output.decode(errors="replace"))
+
+    def test_network_guard_restart_preserves_persistent_agent_and_connections(self):
+        self.initialize("--persist")
+        process = self.start_waiting_agent()
+        cfg = self.config()
+        agent = cfg["services"]["agent"]["container_name"]
+        guard = cfg["services"]["guard"]["container_name"]
+        identity = ["podman", "inspect", "--format", "{{.Id}} {{.State.Pid}} {{.State.StartedAt}}", agent]
+        original = self.run_command(identity).stdout
+        self.run_command(["podman", "restart", guard])
+        self.check_waiting_agent(process)
+        self.assertEqual(self.run_command(identity).stdout, original)
+        self.finish_waiting_agent(process)
+
+    def test_network_guard_outage_preserves_concurrent_ephemeral_agents_and_policy(self):
+        self.initialize()
+        agents = [self.start_waiting_agent(), self.start_waiting_agent()]
+        guard = self.config()["services"]["guard"]["container_name"]
+        original = {c["name"]: (c["id"], c["pid"]) for c in
+                    json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
+                    if c["name"] != guard}
+        self.run_command(["podman", "stop", guard])
+        for process in agents:
+            self.check_waiting_agent(process)
+        self.cli("proxy", "reload", "--session", self.session_id)
+        for process in agents:
+            self.check_waiting_agent(process)
+        current = {c["name"]: (c["id"], c["pid"]) for c in
+                   json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
+                   if c["name"] != guard}
+        self.assertEqual(current, original)
+        for process in agents:
+            self.finish_waiting_agent(process)
+
     def test_workspace_round_trip_selected_branch_and_sidecar_survives_teardown(self):
         self.git(self.project, "checkout", "-qb", "chosen")
         self.git(self.project, "commit", "--allow-empty", "-qm", "chosen")

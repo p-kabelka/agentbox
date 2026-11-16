@@ -1,6 +1,8 @@
 import asyncio
 import importlib.util
+import ipaddress
 import json
+import socket
 import sys
 import tempfile
 import threading
@@ -453,6 +455,54 @@ class ReloadTest(unittest.IsolatedAsyncioTestCase):
         self.cfg["force_http1_hosts"] = [{"host": "api.example", "port": False}]
         self.assertEqual((await self.reload())[0], 500)
         self.assertIs(self.addon._cfg, previous)
+
+    def check_upstream(self, address):
+        import upstream_isolation
+        policy = addon_module.UpstreamIsolation(lambda: self.addon._cfg.private_upstreams)
+        with (patch.object(upstream_isolation, "host_addresses", return_value=set()),
+              patch.object(upstream_isolation, "connected_networks", return_value=[])):
+            policy.audit("socket.connect", (
+                types.SimpleNamespace(family=socket.AF_INET), (address, 443)))
+
+    async def test_private_upstreams_change_only_after_successful_reload(self):
+        self.cfg["private_upstreams"] = ["10.50.1.42"]
+        with self.assertRaises(PermissionError):
+            self.check_upstream("10.50.1.42")
+        self.assertEqual((await self.reload())[0], 200)
+        self.assertEqual(self.addon._cfg.private_upstreams, frozenset({ipaddress.ip_address("10.50.1.42")}))
+        self.check_upstream("10.50.1.42")
+        self.cfg["private_upstreams"] = []
+        # Even unreadable/invalid on-disk config is not read by the socket hook.
+        with patch.object(addon_module, "_read_config", side_effect=yaml.YAMLError("unfinished edit")):
+            self.check_upstream("10.50.1.42")
+            self.assertEqual((await self.reload())[0], 500)
+        self.check_upstream("10.50.1.42")
+        self.assertEqual((await self.reload("/reload"))[0], 200)
+        with self.assertRaises(PermissionError):
+            self.check_upstream("10.50.1.42")
+
+    async def test_rejected_reload_does_not_widen_private_upstreams(self):
+        previous = self.addon._cfg
+        self.cfg["private_upstreams"] = ["10.50.1.42"]
+        self.cfg["logging"] = {"log_bodies": "invalid"}
+        self.assertEqual((await self.reload())[0], 500)
+        self.assertIs(self.addon._cfg, previous)
+        with self.assertRaises(PermissionError):
+            self.check_upstream("10.50.1.42")
+        self.check_upstream("8.8.8.8")
+        self.cfg.pop("logging")
+        self.cfg["force_http1_hosts"] = [{"host": "public.example"}]
+        self.assertEqual((await self.reload())[0], 409)
+        with self.assertRaises(PermissionError):
+            self.check_upstream("10.50.1.42")
+
+    async def test_invalid_private_upstreams_reject_entire_candidate(self):
+        previous = self.addon._cfg
+        for invalid in ("10.50.1.42", None, ["not-an-ip"], [True]):
+            with self.subTest(invalid=invalid):
+                self.cfg["private_upstreams"] = invalid
+                self.assertEqual((await self.reload())[0], 500)
+                self.assertIs(self.addon._cfg, previous)
 
     async def test_static_rotation_is_explicit_stream_survives_and_headers_are_redacted(self):
         streaming = self.flow(headers={"content-type": "application/connect+json"})

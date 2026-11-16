@@ -37,8 +37,8 @@ This means even a fully compromised agent — one that dumps its entire environm
 
 All external agent traffic must pass through the proxy, which enforces an
 allowlist. Internal Git/catalog traffic goes directly to the Git sidecar.
-A trusted network guard owns the agent's outer container network namespace
-and installs an endpoint allowlist before the VM starts. The agent cannot
+A minimal service holds the agent's outer network namespace; a separate trusted
+guard installs an endpoint allowlist before the VM starts. The agent cannot
 change that firewall, even as guest root.
 
 The proxy acts as both a gateway and an inspection point. External HTTP requests, including denials, are logged; internal Git traffic is not part of the proxy access log.
@@ -117,8 +117,9 @@ Two Podman networks are created per agentbox:
 - **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent and Git sidecar are connected only to this network. Git/catalog traffic stays here and does not pass through the egress proxy.
 - **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy container is attached to this network.
 
-The agent joins the guard's network namespace instead of attaching independently
-to `agent-net`. Only the guard has `NET_ADMIN`; the agent explicitly drops both
+The agent and guard join a minimal holder's network namespace instead of attaching
+independently to `agent-net`. Only the guard has `NET_ADMIN`; the holder drops all
+capabilities, and the agent explicitly drops both
 `NET_ADMIN` and `NET_RAW` outside the VM. Its IPv4 TCP allowlist is the proxy's
 internal address on 8080 (and 9090 for enabled Vertex metadata), plus the Git
 sidecar's internal address on 9418 and 8083. All other egress, including IPv6 and
@@ -129,6 +130,15 @@ The host refreshes the policy and read-only address metadata before each agent
 boot. Names for `proxy` and `git` come from that metadata, so the agent does not
 need access to the bridge's DNS service. Failed firewall installation prevents launch.
 Configuration reload/restart refreshes a running guard's optional metadata rule.
+Namespace ownership is independent of the guard process. The holder runs only
+`sleep infinity` and lives for the session; the guard may restart independently.
+The host saves the current policy before starting the guard. On restart the
+guard atomically restores it without clearing valid rules first, so existing
+connections and VM processes continue. Invalid saved policy installs deny-all,
+never an agent shutdown. Kernel rules and interfaces remain in place even
+while the guard is stopped. The namespace holder is not restarted independently;
+loss of that infrastructure can interrupt networking but does not terminate
+agents or delete their filesystems.
 
 The native-crun proxy independently rejects TCP connections to host IPs, either
 session network, loopback, and link-local addresses. A Python socket audit hook
@@ -141,6 +151,9 @@ session subnets come from the proxy's own routing tables. No generated host
 address snapshot or reload after address changes is needed. Non-global upstreams
 are denied unless the trusted configuration lists their exact `private_upstreams`
 IPs; host, local, and session-network blocks always take precedence.
+These exceptions are compiled into the proxy's validated configuration snapshot
+and change only on a successful reload. The socket hook reads that snapshot,
+not the YAML file; only network state is read live per connection.
 
 The proxy container is attached to both networks and is the sole egress point for all agent traffic.
 

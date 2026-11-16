@@ -10,9 +10,9 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](d
 
 Each session has a **proxy** (holds real credentials and controls internet access), a **Git sidecar**, and one or more **agents** (hold no credentials and have no internet route). In Git-backed sessions, repositories travel through pushes and clones, not host filesystem mounts. The sidecar stores bare repositories in a named volume, uses only the session's internal network, and publishes no ports. There are no writable host-directory bind mounts by default; read-only dotfiles and proxy configuration mounts remain.
 
-The agent shares a network namespace with a trusted **network guard**, outside
-the microVM. Its default-deny firewall permits only TCP to `proxy:8080` and
-`git:9418`/`git:8083`, plus `proxy:9090` when Vertex metadata is enabled.
+The agent and trusted **network guard** share a network namespace held by a
+separate minimal service outside the microVM. Its default-deny firewall permits
+only TCP to `proxy:8080` and `git:9418`/`git:8083`, plus `proxy:9090` when Vertex metadata is enabled.
 Proxy management/reload ports, host services, other containers, direct DNS,
 UDP, and IPv6 egress are blocked. `proxy` and `git` resolve through generated
 hosts entries; external names are resolved by the HTTP proxy. Root inside the
@@ -20,6 +20,10 @@ guest cannot alter the outer firewall. The guard requires `NET_ADMIN` only
 inside its own container namespace, not sudo or host-wide firewall changes.
 The guard explicitly uses native `crun` and refuses to run inside a microVM.
 Podman's `internal: true` remains defense in depth, not the destination policy.
+The kernel firewall and network interface survive guard exit. The guard can
+restart and atomically restore its saved policy without restarting agents,
+resetting their TCP connections, or discarding sandbox work. Guard outages do
+not trigger agent shutdown or session removal.
 
 The HTTP proxy also rejects upstream connections to host addresses, session
 networks, loopback, and link-local destinations—even if an L7 allow rule matches.
@@ -30,6 +34,9 @@ changes do not require a reload.
 Other private/LAN upstreams are denied by default; if needed, declare their exact
 IPs in `proxy.yaml` under `private_upstreams: [...]` as well as an L7 request rule.
 This cannot override host, loopback, or session-network blocks.
+Private-IP exceptions are validated and applied with the rest of the proxy
+configuration on a successful reload; rejected or unfinished edits leave the
+active policy unchanged.
 
 ---
 
@@ -135,7 +142,7 @@ behavior.
 passt/krun can leave the guest's IPv4 networking missing or partially configured
 on internal networks, including an existing address with an unusable prefix or
 missing subnet route. Agentbox restores this configuration at startup: each
-`start` writes the guard's actual IPv4 address/prefix and sidecar addresses from
+`start` writes the namespace holder's actual IPv4 address/prefix and sidecar addresses from
 Podman into `/agentbox-network/network.json` on a read-only mount.
 For passt guests only, three idempotent `ip` commands bring up `eth0`, apply the
 address/prefix, and ensure the connected subnet route exists. Other addresses and

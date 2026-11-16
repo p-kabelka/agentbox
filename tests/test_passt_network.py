@@ -118,10 +118,30 @@ class HostPasstNetworkTest(unittest.TestCase):
         cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
         self.assertEqual(cfg["services"]["agent"]["network_mode"], "service:network")
         self.assertEqual(cfg["services"]["agent"]["cap_drop"], ["NET_ADMIN", "NET_RAW"])
-        for service in ("proxy", "network"):
+        self.assertEqual(cfg["services"]["guard"]["network_mode"], "service:network")
+        self.assertEqual(cfg["services"]["guard"]["cap_add"], ["NET_ADMIN"])
+        self.assertEqual(cfg["services"]["network"]["cap_drop"], ["ALL"])
+        self.assertNotIn("cap_add", cfg["services"]["network"])
+        for service in ("proxy", "network", "guard"):
             self.assertEqual(cfg["services"][service]["runtime"], "crun")
         self.assertIn("/proc/1/net:/host-net:ro", cfg["services"]["proxy"]["volumes"])
         self.assertTrue(cfg["networks"]["agent-net"]["internal"])
+        self.assertEqual(cfg["services"]["network"]["restart"], "no")
+        self.assertEqual(cfg["services"]["guard"]["restart"], "unless-stopped")
+
+    def test_saved_policy_precedes_guard_start(self):
+        compose = self.compose
+
+        def start(session, *args, **kwargs):
+            if args[0] == "up" and args[-1] == "guard":
+                policy = json.loads((session / "network-config/network.json").read_text())
+                self.assertEqual(policy["endpoints"]["proxy"], "10.89.40.5")
+            return compose(session, *args, **kwargs)
+
+        with (patch.object(subprocess, "run", side_effect=self.inspect),
+              patch.dict(self.g, compose=start)):
+            self.g["_prepare_agent_network"](self.session)
+        self.assertEqual([args[-1] for args, _ in self.calls], ["network", "guard", "apply"])
 
     def test_one_inspection_and_one_apply_refresh_current_metadata(self):
         with patch.object(subprocess, "run", side_effect=self.inspect) as inspect:
@@ -139,15 +159,18 @@ class HostPasstNetworkTest(unittest.TestCase):
 
     def test_failed_policy_installation_prevents_agent_launch(self):
         def fail_apply(session, *args, **kwargs):
+            self.calls.append((args, kwargs))
             return subprocess.CompletedProcess(args, int(args[-1] == "apply"), stderr="denied")
 
         with (patch.object(subprocess, "run", side_effect=self.inspect),
-              patch.dict(self.g, compose=fail_apply),
+              patch.dict(self.g, compose=fail_apply,
+                         _secret_preflight=lambda session: ("config", "providers", []),
+                         _synchronize_proxy=lambda *args: None),
               redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
-            self.g["_prepare_agent_network"](self.session)
-        self.assertFalse((self.session / "network-config/network.json").exists())
+            self.g["_launch"](self.session, ["bash"])
+        self.assertNotIn("run", [args[0] for args, _ in self.calls])
 
-    def test_reload_updates_a_running_guard_only(self):
+    def test_reload_updates_when_namespace_holder_is_running(self):
         for running in ("true", "false"):
             calls = []
             with (patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=running)),

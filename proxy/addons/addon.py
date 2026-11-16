@@ -12,7 +12,7 @@ from provider import (Provider, CompiledRule, CredentialUnavailable, compile_rul
 from resolvers import RESOLVER_CLASSES
 from secret_contract import fingerprint, injection_secret_name
 from transport_policy import CompiledHost, compile_http1_hosts
-from upstream_isolation import UpstreamIsolation
+from upstream_isolation import UpstreamIsolation, compile_private_upstreams
 
 _CONFIG_PATH = "/config/proxy.yaml"
 _RELOAD_PORT = 8082
@@ -82,6 +82,7 @@ class _Config:
     provider_fingerprint: str = ""
     logging_flags: tuple[bool, bool, bool] = (True, False, False)
     force_http1_hosts: list[CompiledHost] = dataclasses.field(default_factory=list)
+    private_upstreams: frozenset = frozenset()
 
     @property
     def unavailable(self) -> list[dict]:
@@ -228,10 +229,12 @@ class AgentboxAddon:
             ("log_request_headers", True), ("log_response_headers", False), ("log_bodies", False)))
         if not all(isinstance(flag, bool) for flag in flags):
             raise ValueError("Logging settings must be booleans")
+        private = compile_private_upstreams(cfg.get("private_upstreams", []))
         if providers is None:
             providers = cls._load_providers(cfg)
         return _Config(_build_allowed_rules(providers, cfg), providers, full, provider_fp, flags,
-                       force_http1_hosts=compile_http1_hosts(cfg.get("force_http1_hosts", [])))
+                       force_http1_hosts=compile_http1_hosts(cfg.get("force_http1_hosts", [])),
+                       private_upstreams=private)
 
     def _apply_candidate(self, candidate: _Config) -> None:
         global _log_req_hdr, _log_resp_hdr, _log_bodies
@@ -379,4 +382,5 @@ class AgentboxAddon:
         log.info(_access_log_entry(flow))
 
 
-addons = [AgentboxAddon(), UpstreamIsolation()]
+_agentbox = AgentboxAddon()
+addons = [_agentbox, UpstreamIsolation(lambda: _agentbox._cfg.private_upstreams)]

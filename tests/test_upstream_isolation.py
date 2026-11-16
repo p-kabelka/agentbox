@@ -9,8 +9,6 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-import yaml
-
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("upstream_guard", ROOT / "proxy/addons/upstream_isolation.py")
 upstream = importlib.util.module_from_spec(spec)
@@ -28,10 +26,6 @@ class UpstreamIsolationTest(unittest.TestCase):
             p = patch.object(upstream, name, directory)
             p.start()
             self.addCleanup(p.stop)
-        p = patch.object(upstream, "CONFIG", self.root / "proxy.yaml")
-        p.start()
-        self.addCleanup(p.stop)
-        upstream.CONFIG.write_text("providers: []\n")
         self.hosts("9.9.9.9")
         (upstream.HOST_NET / "if_inet6").write_text("20014860486000000000000000008888 01 80 00 80 eth0\n")
         (upstream.LOCAL_NET / "route").write_text(
@@ -41,7 +35,8 @@ class UpstreamIsolationTest(unittest.TestCase):
         (upstream.LOCAL_NET / "ipv6_route").write_text(
             "fd000000000000000000000000000000 40 00000000000000000000000000000000 00 "
             "00000000000000000000000000000000 00000100 00000000 00000000 00000001 eth0\n")
-        self.guard = upstream.UpstreamIsolation()
+        self.private = frozenset()
+        self.guard = upstream.UpstreamIsolation(lambda: self.private)
 
     def hosts(self, *addresses):
         (upstream.HOST_NET / "fib_trie").write_text(
@@ -80,21 +75,21 @@ class UpstreamIsolationTest(unittest.TestCase):
     def test_private_exceptions_reload_without_overriding_hard_blocks(self):
         with self.assertRaises(PermissionError):
             self.connect("10.50.1.42")
-        upstream.CONFIG.write_text(yaml.safe_dump({
-            "private_upstreams": ["10.50.1.42", "10.89.0.3", "127.0.0.1", "9.9.9.9"],
-        }))
+        self.private = upstream.compile_private_upstreams(
+            ["10.50.1.42", "10.89.0.3", "127.0.0.1", "9.9.9.9"])
         self.connect("10.50.1.42")
         for address in ("10.89.0.3", "127.0.0.1", "9.9.9.9"):
             with self.assertRaises(PermissionError):
                 self.connect(address)
 
-    def test_unavailable_network_state_or_invalid_policy_fails_closed(self):
-        for invalid in ("not: [yaml", "[]", "null", "private_upstreams: not-a-list",
-                        "private_upstreams: [not-an-ip]"):
-            upstream.CONFIG.write_text(invalid)
-            with self.assertRaises(PermissionError):
-                self.connect("8.8.8.8")
-        upstream.CONFIG.write_text("providers: []\n")
+    def test_private_upstreams_must_be_exact_ip_strings(self):
+        for invalid in (None, {}, "10.50.1.42", [False], [1234], ["not-an-ip"], ["10.50.1.0/24"]):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                upstream.compile_private_upstreams(invalid)
+        self.assertEqual(upstream.compile_private_upstreams(["::ffff:10.50.1.42"]),
+                         upstream.compile_private_upstreams(["10.50.1.42"]))
+
+    def test_unavailable_network_state_fails_closed(self):
         (upstream.HOST_NET / "fib_trie").unlink()
         with self.assertRaises(PermissionError):
             self.connect("8.8.8.8")
@@ -114,8 +109,8 @@ from pathlib import Path
 spec = importlib.util.spec_from_file_location('guard', sys.argv[1])
 guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
-guard.HOST_NET, guard.LOCAL_NET, guard.CONFIG = map(Path, sys.argv[2:])
-guard.UpstreamIsolation().running()
+guard.HOST_NET, guard.LOCAL_NET = map(Path, sys.argv[2:])
+guard.UpstreamIsolation(lambda: frozenset()).running()
 with socket.socket() as client:
     try:
         client.connect(('9.9.9.9', 80))
@@ -139,7 +134,7 @@ async def check():
 asyncio.run(check())
 """
         result = subprocess.run([sys.executable, "-c", script, str(ROOT / "proxy/addons/upstream_isolation.py"),
-                                 str(upstream.HOST_NET), str(upstream.LOCAL_NET), str(upstream.CONFIG)],
+                                 str(upstream.HOST_NET), str(upstream.LOCAL_NET)],
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
@@ -167,8 +162,7 @@ guard = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(guard)
 guard.HOST_NET = Path(sys.argv[2]) / "live-net"
 guard.LOCAL_NET = Path(sys.argv[2]) / "proxy-net"
-guard.CONFIG = Path(sys.argv[2]) / "config.yaml"
-policy = guard.UpstreamIsolation()
+policy = guard.UpstreamIsolation(lambda: frozenset())
 def check():
     policy.audit("socket.connect", (types.SimpleNamespace(family=socket.AF_INET), ("192.0.0.9", 80)))
 check()
@@ -182,7 +176,6 @@ except PermissionError:
 '''
 (root / 'proxy-net').mkdir()
 (root / 'proxy-net/route').write_text('Iface Destination Gateway Flags RefCnt Use Metric Mask\\n')
-(root / 'config.yaml').write_text('providers: []\\n')
 child = subprocess.Popen(['unshare', '--net', sys.executable, '-c', worker, sys.argv[1], str(root)],
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 assert child.stdout.readline().strip() == 'ready'

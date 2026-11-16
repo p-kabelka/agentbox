@@ -5,12 +5,16 @@ import socket
 import sys
 from pathlib import Path
 
-import yaml
-
 HOST_NET = Path("/host-net")
 LOCAL_NET = Path("/proc/net")
-CONFIG = Path("/config/proxy.yaml")
 BLOCKED = "Agentbox blocked a host/control-plane destination or unavailable network policy"
+
+
+def compile_private_upstreams(values):
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        raise ValueError("private_upstreams must be a list of exact IP addresses")
+    addresses = (ipaddress.ip_address(value) for value in values)
+    return frozenset(getattr(address, "ipv4_mapped", None) or address for address in addresses)
 
 
 def host_addresses():
@@ -41,6 +45,9 @@ def connected_networks():
 
 
 class UpstreamIsolation:
+    def __init__(self, private_upstreams):
+        self.private_upstreams = private_upstreams
+
     def running(self):
         # asyncio's TCP connector audits each numeric destination after DNS,
         # immediately before connect(). No second lookup or address rewriting.
@@ -57,13 +64,9 @@ class UpstreamIsolation:
         try:
             address = ipaddress.ip_address(args[1][0].split("%", 1)[0])
             address = getattr(address, "ipv4_mapped", None) or address
-            private = yaml.safe_load(CONFIG.read_text()).get("private_upstreams", [])
-            if not isinstance(private, list):
-                raise ValueError("private_upstreams must be a list of exact IP addresses")
-            private = {ipaddress.ip_address(value) for value in private}
             if (address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast
                     or address in host_addresses() or any(address in network for network in connected_networks())
-                    or (not address.is_global and address not in private)):
+                    or (not address.is_global and address not in self.private_upstreams())):
                 raise ValueError("host or control-plane destination")
-        except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError, yaml.YAMLError):
+        except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError):
             raise PermissionError(BLOCKED) from None

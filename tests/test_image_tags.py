@@ -124,6 +124,7 @@ class ImageTagsTest(unittest.TestCase):
         resolved = {"services": {"proxy": {"image": "localhost/agentbox-proxy:stage"},
                                  "git": {"image": "localhost/agentbox-git:stage"},
                                  "network": {"image": "localhost/agentbox-network:stage"},
+                                 "guard": {"image": "localhost/agentbox-network:stage"},
                                  "agent": {"image": "custom:stage"}}}
         with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
                 [], 0, stdout=yaml.safe_dump(resolved))) as run:

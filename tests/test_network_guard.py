@@ -1,9 +1,11 @@
 """The outer firewall is an endpoint allowlist, not a guest routing convention."""
 
 import importlib.util
+import json
 import shutil
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -35,13 +37,45 @@ class NetworkGuardTest(unittest.TestCase):
     def test_install_is_atomic_and_defaults_to_deny_for_both_families(self):
         with patch.object(guard.subprocess, "run") as run:
             guard.install()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0], ["nft", "-f", "-"])
         policy = run.call_args.kwargs["input"]
+        self.assertLess(policy.index("add table inet agentbox"), policy.index("flush table inet agentbox"))
         self.assertIn("flush table inet agentbox", policy)
         self.assertEqual(policy.count("policy drop"), 3)
         self.assertNotIn("ip daddr", policy)
         self.assertIn('iifname "lo" accept', policy)  # Deliver local rejection errors to clients.
         self.assertIn("reject with tcp reset", policy)
         self.assertTrue(all(c.kwargs["check"] for c in run.call_args_list))
+
+    def test_restart_restores_saved_policy_atomically_without_deny_all_gap(self):
+        endpoints = {"proxy": "10.123.0.2", "git": "10.123.0.3"}
+        with tempfile.TemporaryDirectory() as temporary:
+            config, ready = Path(temporary) / "policy.json", Path(temporary) / "ready"
+            config.write_text(json.dumps({"endpoints": endpoints}))
+            with (patch.object(guard, "CONFIG", config), patch.object(guard, "READY", ready),
+                  patch.object(guard.Path, "is_file", return_value=False),
+                  patch.object(sys, "argv", ["guard.py"]),
+                  patch.object(guard.signal, "signal"),
+                  patch.object(guard.signal, "pause", side_effect=KeyboardInterrupt),
+                  patch.object(guard, "install") as install, self.assertRaises(KeyboardInterrupt)):
+                guard.main()
+            install.assert_called_once_with(guard.rules(endpoints))
+            self.assertTrue(ready.exists())
+
+    def test_invalid_restart_policy_fails_closed_without_marking_ready(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config, ready = Path(temporary) / "policy.json", Path(temporary) / "ready"
+            config.write_text('{"endpoints": null}')
+            ready.touch()
+            with (patch.object(guard, "CONFIG", config), patch.object(guard, "READY", ready),
+                  patch.object(guard.Path, "is_file", return_value=False),
+                  patch.object(sys, "argv", ["guard.py"]),
+                  patch.object(guard.signal, "signal"),
+                  patch.object(guard, "install") as install, self.assertRaises(ValueError)):
+                guard.main()
+            install.assert_called_once_with()
+            self.assertFalse(ready.exists())
 
     def test_real_ipv4_ipv6_and_policy_replacement_in_private_namespace(self):
         if not all(shutil.which(tool) for tool in ("unshare", "ip", "nft")):

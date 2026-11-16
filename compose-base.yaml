@@ -54,13 +54,31 @@ services:
   network:
     image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}
     runtime: crun
+    # Namespace lifetime is independent of the firewall manager's process.
+    entrypoint: ["/usr/bin/sleep", "infinity"]
     networks:
       - agent-net
+    cap_drop:
+      - ALL
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    stop_signal: SIGKILL  # The idle holder has no state to flush at session teardown.
+    restart: "no"
+
+  guard:
+    image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}
+    runtime: crun
+    network_mode: service:network
+    depends_on:
+      - network
     cap_drop:
       - ALL
     cap_add:
       - NET_ADMIN
     read_only: true
+    volumes:
+      - ./network-config:/agentbox-network:ro,z
     tmpfs:
       - /run:rw,noexec,nosuid,nodev
     security_opt:
@@ -69,8 +87,8 @@ services:
 
   agent:
     image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
-    # The trusted guard owns this namespace and its firewall. The VM cannot
-    # change it, even when the workload has root privileges inside the guest.
+    # The holder keeps the namespace alive across guard restarts. The VM
+    # cannot change its firewall, even as guest root.
     network_mode: service:network
     cap_drop:
       - NET_ADMIN
@@ -79,6 +97,7 @@ services:
       - proxy
       - git
       - network
+      - guard
     runtime: krun
     environment:
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}

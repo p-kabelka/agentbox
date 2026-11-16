@@ -71,7 +71,7 @@ A developer runs an agent for the first time on a project and wants to observe i
 
 The agent container has no default gateway to the internet. It is attached only to an internal Podman network. The proxy container is attached to both the internal network and an external network with internet connectivity.
 
-The agent joins a trusted guard's network namespace. Before launch, the host
+The agent and trusted guard join a minimal holder's network namespace. Before launch, the host
 installs an nftables default-deny policy there allowing only IPv4 TCP to the
 session proxy on port 8080 and Git sidecar on ports 9418 and 8083. Proxy port
 9090 is additionally allowed when Vertex metadata is enabled. Proxy management
@@ -92,6 +92,15 @@ upstreams and opaque raw TCP tunneling are disabled.
 Private remote APIs require exact `private_upstreams` IP entries
 in the trusted proxy configuration in addition to an L7 rule; those entries
 cannot override host, loopback, link-local, or session-subnet blocks.
+The exception set is validated and committed with the rest of the proxy
+configuration; failed reloads retain the complete previous runtime policy.
+
+The namespace holder is independent of the guard. Guard exit leaves the kernel
+firewall, interface, and running agents intact. The guard restarts automatically
+after failure and atomically restores the saved policy without resetting active
+TCP connections. Invalid saved policy fails closed at the network boundary;
+guard failures must not stop agents, restart their VMs, or remove their
+filesystems.
 
 ### 4.2 Credential Separation
 
