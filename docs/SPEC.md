@@ -71,7 +71,26 @@ A developer runs an agent for the first time on a project and wants to observe i
 
 The agent container has no default gateway to the internet. It is attached only to an internal Podman network. The proxy container is attached to both the internal network and an external network with internet connectivity.
 
-All agent TCP connections to external hosts are routed through the proxy. The proxy is the sole egress point. This isolation is enforced by the container runtime's network namespace, not by host-level firewall rules, so no host privileges are required.
+The agent joins a trusted guard's network namespace. Before launch, the host
+installs an nftables default-deny policy there allowing only IPv4 TCP to the
+session proxy on port 8080 and Git sidecar on ports 9418 and 8083. Proxy port
+9090 is additionally allowed when Vertex metadata is enabled. Proxy management
+and reload ports, host services on any address, other containers, IPv6, UDP,
+and direct DNS are not allowed destinations.
+
+The guard alone has `NET_ADMIN`; the agent drops `NET_ADMIN` and `NET_RAW`
+outside the microVM. Guest root, changed guest routes, and a custom agent
+entrypoint cannot widen the outer policy. Only the two sidecar names are
+provided locally in `/etc/hosts`; the HTTP proxy resolves external names.
+No host-wide firewall changes or host root privileges are required. The
+internal network remains an additional external-forwarding restriction.
+Policy setup is fail-closed, including on persistent restarts; old sessions
+without the guard must be reinitialized (retained agents need a new session).
+The HTTP proxy also blocks resolved host/session addresses and non-global
+upstreams, pins the validated destination, and disables opaque raw TCP
+tunneling. Private remote APIs require exact `private_upstreams` IP entries
+in the trusted proxy configuration in addition to an L7 rule; those entries
+cannot override host, loopback, link-local, or session-subnet blocks.
 
 ### 4.2 Credential Separation
 
@@ -136,7 +155,7 @@ Host fetching, review, and merging are manual. Ordinary exit/stop retains the Gi
 
 `agentbox start` preflights configuration/provider files, starts/reuses both sidecars with one `compose up -d --no-recreate proxy git`, synchronizes credentials through stdin, and verifies the proxy reload before launching the agent. Read-only configuration and dotfile mounts are unchanged. Without `--persist`, `compose run --rm --no-deps agent` launches independent agents concurrently. The last exit tears the project down without deleting named volumes. Exit does not fetch output.
 
-With `init --persist`, first start creates the named agent service with `compose up --no-start --no-deps --no-recreate agent`, then attaches using `podman start -ai`. Later starts reuse that same container and saved command. Only one attached start may own it. Exit/stop retain all three service containers; remove deletes them and their volumes. Workspace/home files survive restart, not processes. Agent image/environment/mounts/command are fixed at creation, but new Git shares can be cloned explicitly without recreation. Every start resynchronizes configuration/credentials and clones any missing shares once. See [the persistent lifecycle contract](SPEC-persistent-sandboxes.md).
+With `init --persist`, first start creates the named agent service with `compose up --no-start --no-deps --no-recreate agent`, then attaches using `podman start -ai`. Later starts reuse that same container and saved command. Only one attached start may own it. Exit/stop retain all service containers, including the network guard; remove deletes them and their volumes. Workspace/home files survive restart, not processes. Agent image/environment/mounts/command are fixed at creation, but new Git shares can be cloned explicitly without recreation. Every start resynchronizes configuration/credentials and clones any missing shares once. See [the persistent lifecycle contract](SPEC-persistent-sandboxes.md).
 
 `agentbox allow` and `agentbox deny` append or remove rules in `extra_request_policy` in the session's `proxy.yaml`, then trigger a hot-reload of the proxy configuration without restarting the container or dropping active connections. Hostnames are automatically escaped for regex safety unless `-r` / `--regex` is passed, which preserves the host regex verbatim. Removal matches the exact stored pattern, not every hostname matching that regex. The `host:port` syntax is supported in either mode (e.g., `agentbox allow registry.internal.com:8443` or `agentbox allow -r '.*\.internal\.com:8443'`).
 
@@ -166,6 +185,8 @@ Each session directory describes its configuration; repository data is in Compos
 |------|---------|
 | `compose.yaml` | Unified Compose file (volumes, ports, env, runtime) — user-editable, regenerated on ephemeral `agentbox init` or persistent init before agent creation. Contains `x-metadata.project-dir`, `x-metadata.name`, and `x-metadata.persist` for session identification. |
 | `proxy-config/proxy.yaml` | Per-session provider config and allowlist (no `environment` field) — user-owned after init; sole authority for provider secret declarations |
+| `proxy-config/network-policy.json` | Generated host addresses and session subnets that the proxy must never connect to; refreshed at start/reload/restart |
+| `network-config/ipv4-subnets.json` | Read-only sidecar names, guest address, and subnet metadata for agent startup |
 | `.secret-sync.lock` | Exclusive synchronization/lifecycle lock; contains no secret data |
 | `.lifetime.lock` | Shared by concurrent ephemeral agents; exclusively owned by an attached persistent start |
 | `dotfiles/` | Extracted dotfiles from preset `agent.yaml` |
@@ -396,7 +417,7 @@ Custom CA certificates can be placed in `$AGENTBOX_HOME/custom/certs/`. When lis
 | Agent cannot plant executable hooks in host git | Repository filesystems are not exposed; sidecar disables hooks | Git objects/refs, not hooks or configuration, are transferred |
 | Agent cannot modify sidecar repo git config | Agent has protocol access only, not the sidecar volume | Git services cannot be reconfigured by filesystem writes from the agent |
 | External agent HTTP(S) traffic is auditable | Proxy TLS termination; structured JSON access log | External requests, including denials, are logged; internal Git/catalog is separate |
-| Agentbox network isolation requires no host privilege | Podman internal networks via container runtime namespaces | No `sudo`, no host iptables or nftables changes needed |
+| Agentbox network isolation requires no host privilege | Default-deny guard in a private container network namespace | No `sudo` or host-wide firewall changes; only the trusted guard has `NET_ADMIN` |
 
 ---
 

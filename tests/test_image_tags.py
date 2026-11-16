@@ -123,6 +123,7 @@ class ImageTagsTest(unittest.TestCase):
     def test_compose_config_receives_only_image_fields(self):
         resolved = {"services": {"proxy": {"image": "localhost/agentbox-proxy:stage"},
                                  "git": {"image": "localhost/agentbox-git:stage"},
+                                 "network": {"image": "localhost/agentbox-network:stage"},
                                  "agent": {"image": "custom:stage"}}}
         with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(
                 [], 0, stdout=yaml.safe_dump(resolved))) as run:
@@ -170,7 +171,8 @@ class ImageTagsTest(unittest.TestCase):
         agentbox = runpy.run_path(str(ROOT / "bin" / "agentbox"))
         self.assertEqual(agentbox["AGENTBOX_IMAGE_TAG"], "latest")
         with (patch.dict(agentbox["main"].__globals__,
-                         _synchronize_proxy=lambda *args: None),
+                          _prepare_agent_network=lambda session: None,
+                          _synchronize_proxy=lambda *args: None),
               patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run,
               patch.object(sys, "argv", ["agentbox", "start", "--session", session_id]),
               self.assertRaises(SystemExit) as result):
@@ -181,7 +183,7 @@ class ImageTagsTest(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].args[0][-4:], ["run", "--rm", "--no-deps", "agent"])
 
     def test_build_update_defaults_and_explicit_tag_override(self):
-        harnesses = ["base", "proxy", "git", "opencode", "claude", "codex", "cursor"]
+        harnesses = ["base", "proxy", "git", "network", "opencode", "claude", "codex", "cursor"]
         for command in ("build", "update"):
             for env_tag in ("latest", "stage"):
                 for override in (None, "canary", "latest"):
@@ -198,15 +200,15 @@ class ImageTagsTest(unittest.TestCase):
                         self.assertEqual(run.call_count, len(harnesses))
                         for harness, call in zip(harnesses, run.call_args_list):
                             args = call.args[0]
-                            ctx = ROOT / (harness if harness in ("proxy", "git") else "agent")
-                            image = f"agentbox-{harness}" if harness in ("proxy", "git") else f"agentbox-agent-{harness}"
+                            ctx = ROOT / (harness if harness in ("proxy", "git", "network") else "agent")
+                            image = f"agentbox-{harness}" if harness in ("proxy", "git", "network") else f"agentbox-agent-{harness}"
                             self.assertEqual(args[:2], ["podman", "build"])
                             self.assertEqual(args[args.index("-t") + 1], f"localhost/{image}:{tag}")
                             self.assertEqual(args[args.index("-f") + 1],
                                              str(ctx / self.g["HARNESS_CONTAINERFILES"][harness]))
                             self.assertEqual(args[-1], str(ctx))
                             self.assertEqual("--no-cache" in args, command == "update")
-                            if harness not in ("base", "proxy", "git"):
+                            if harness not in ("base", "proxy", "git", "network"):
                                 self.assertEqual(args[args.index("--build-arg") + 1], f"AGENTBOX_IMAGE_TAG={tag}")
                             self.assertEqual("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1" in args,
                                              harness == "opencode")
@@ -231,6 +233,7 @@ class ImageTagsTest(unittest.TestCase):
                     for name in ("base", "claude", "codex", "cursor", "opencode")}
         expected.add("localhost/agentbox-proxy:stage")
         expected.add("localhost/agentbox-git:stage")
+        expected.add("localhost/agentbox-network:stage")
         self.assertEqual(images[0], "localhost/agentbox-agent-base:stage")
         self.assertEqual(set(images), expected)
 

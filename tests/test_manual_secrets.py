@@ -167,7 +167,8 @@ class HostSecretsTest(unittest.TestCase):
         self.g["_resolve_images"] = lambda images: images
         self.agentbox["generate_compose"](self.session, self.project, "test", 1234, self.cfg, {}, [])
         self.args = types.SimpleNamespace()
-        self.patches = patch.dict(self.g, resolve_session=lambda args: (self.session, self.project))
+        self.patches = patch.dict(self.g, resolve_session=lambda args: (self.session, self.project),
+                                  _prepare_agent_network=lambda session: None)
         self.patches.start()
         self.addCleanup(self.patches.stop)
         self.events = []

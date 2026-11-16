@@ -12,6 +12,7 @@ from provider import (Provider, CompiledRule, CredentialUnavailable, compile_rul
 from resolvers import RESOLVER_CLASSES
 from secret_contract import fingerprint, injection_secret_name
 from transport_policy import CompiledHost, compile_http1_hosts
+from upstream_isolation import UpstreamIsolation
 
 _CONFIG_PATH = "/config/proxy.yaml"
 _RELOAD_PORT = 8082
@@ -378,4 +379,4 @@ class AgentboxAddon:
         log.info(_access_log_entry(flow))
 
 
-addons = [AgentboxAddon()]
+addons = [AgentboxAddon(), UpstreamIsolation()]

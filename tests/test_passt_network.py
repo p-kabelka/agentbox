@@ -29,6 +29,8 @@ class GuestPasstNetworkTest(unittest.TestCase):
         self.oci = self.root / "oci.json"
         self.subnets = self.root / "subnets.json"
         self.hosts = self.root / "hosts"
+        self.resolv = self.root / "resolv.conf"
+        self.resolv.write_text("nameserver 10.89.40.1\n")
         self.oci.write_text(json.dumps({"annotations": {"krun.use_passt": "1"}}))
         self.subnets.write_text(json.dumps({"ipv4_subnets": ["10.89.40.0/24"]}))
         self.hosts.write_text("127.0.0.1 localhost agent-id\n::1 agent-id\n10.89.40.3 agent-id other-alias\n")
@@ -38,6 +40,8 @@ class GuestPasstNetworkTest(unittest.TestCase):
         for p in (patch.object(network, "OCI_CONFIG", self.oci),
                   patch.object(network, "SUBNET_CONFIG", self.subnets),
                   patch.object(network, "HOSTS", self.hosts),
+                  patch.object(network, "RESOLV", self.resolv),
+                  patch.dict(network.os.environ, AGENTBOX_NETWORK_GUARD="0"),
                   patch.object(network.socket, "gethostname", return_value="agent-id")):
             p.start()
             self.addCleanup(p.stop)
@@ -135,6 +139,25 @@ class GuestPasstNetworkTest(unittest.TestCase):
         self.assertLess(start.index("/usr/local/bin/agentbox-network"), start.index("until [ -f"))
         self.assertLess(start.index("/usr/local/bin/agentbox-network"), start.index("/usr/local/bin/agentbox-clone"))
 
+    def test_guarded_names_need_no_external_dns_and_shared_namespace_supplies_guest_ip(self):
+        self.hosts.write_text("127.0.0.1 localhost\n10.1.1.1 proxy old-alias\n")
+        self.subnets.write_text(json.dumps({"ipv4_subnets": ["10.89.40.0/24"],
+                                           "endpoints": {"proxy": "10.89.40.5", "git": "10.89.40.4"},
+                                           "guest_ipv4": "10.89.40.6"}))
+        with redirect_stderr(io.StringIO()):
+            self.assertTrue(network.configure())
+        self.assertIn("10.89.40.5\tproxy", self.hosts.read_text())
+        self.assertIn("10.89.40.4\tgit", self.hosts.read_text())
+        self.assertIn("10.1.1.1\told-alias", self.hosts.read_text())
+        self.assertIn("nameserver 127.0.0.1", self.resolv.read_text())
+        self.assertIn("10.89.40.6/24", self.run.call_args_list[1].args[0])
+
+    def test_guarded_session_rejects_missing_endpoints(self):
+        with patch.dict(network.os.environ, AGENTBOX_NETWORK_GUARD="1"):
+            with self.assertRaisesRegex(ValueError, "guarded network endpoints"):
+                network.configure()
+        self.run.assert_not_called()
+
 
 class HostPasstNetworkTest(unittest.TestCase):
     def setUp(self):
@@ -144,47 +167,68 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.session.mkdir()
         self.project = self.session.parent / "project"
         self.project.mkdir()
+        (self.session / "proxy-config").mkdir()
+        (self.session / "proxy-config" / "proxy.yaml").write_text("providers: []\n")
         self.agentbox = runpy.run_path(str(ROOT / "bin" / "agentbox"))
         self.g = self.agentbox["main"].__globals__
-        p = patch.dict(self.g, AGENTBOX_HOME=ROOT, _resolve_images=lambda images: images)
+        self.compose_calls = []
+        p = patch.dict(self.g, AGENTBOX_HOME=ROOT, _resolve_images=lambda images: images, compose=self.compose)
         p.start()
         self.addCleanup(p.stop)
         self.git = {"NetworkSettings": {"Networks": {"session_agent-net": {"IPAddress": "10.89.40.4"}}}}
+        self.proxy = {"NetworkSettings": {"Networks": {"session_agent-net": {"IPAddress": "10.89.40.5"}}}}
+        self.guard = {"Id": "guard-id", "NetworkSettings": {"Networks": {
+            "session_agent-net": {"IPAddress": "10.89.40.6"}}}}
+        self.agent = {"HostConfig": {"NetworkMode": "container:guard-id"},
+                      "BoundingCaps": ["CAP_CHOWN"], "EffectiveCaps": ["CAP_CHOWN"]}
         self.network = {"internal": True, "subnets": [{"subnet": "10.89.40.0/24", "gateway": "10.89.40.1"},
                                                     {"subnet": "fd00::/64", "gateway": "fd00::1"}]}
 
     def generate(self, annotations=None):
         self.agentbox["generate_compose"](self.session, self.project, "feature", 9876, {},
                                            {"annotations": annotations or {}}, [])
-        return yaml.safe_load((self.session / "compose.yaml").read_text())
+        cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
+        cfg["services"]["proxy"]["container_name"] = "proxy-container"
+        (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
+        return cfg
+
+    def compose(self, session, *args, **kwargs):
+        self.compose_calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
 
     def inspect(self, args, **kwargs):
         self.assertTrue(kwargs["check"])
         if args[:2] == ["podman", "inspect"]:
-            self.assertEqual(args[2], self.agentbox["_persistent_name"](self.session, "git"))
-            return subprocess.CompletedProcess(args, 0, stdout=json.dumps([self.git]))
+            values = {self.agentbox["_persistent_name"](self.session, "git"): self.git,
+                      self.agentbox["_persistent_name"](self.session, "agent"): self.agent,
+                      self.agentbox["_persistent_name"](self.session, "network"): self.guard,
+                      "proxy-container": self.proxy}
+            return subprocess.CompletedProcess(args, 0, stdout=json.dumps([values[args[2]]]))
         self.assertEqual(args, ["podman", "network", "inspect", "session_agent-net"])
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps([self.network]))
 
-    def test_passt_adds_only_a_read_only_metadata_mount_to_the_agent(self):
+    def test_agent_uses_guard_namespace_and_read_only_metadata(self):
         cfg = self.generate({"krun.use_passt": "1", "krun.ram_mib": "3072"})
         self.assertTrue((self.session / "network-config").is_dir())
         self.assertIn(self.g["NETWORK_CONFIG_VOLUME"], cfg["services"]["agent"]["volumes"])
-        self.assertEqual(cfg["services"]["agent"]["networks"], ["agent-net"])
+        self.assertEqual(cfg["services"]["agent"]["network_mode"], "service:network")
+        self.assertIn("NET_ADMIN", cfg["services"]["agent"]["cap_drop"])
+        self.assertIn("NET_RAW", cfg["services"]["agent"]["cap_drop"])
+        self.assertEqual(cfg["services"]["network"]["runtime"], "crun")
         self.assertTrue(cfg["networks"]["agent-net"]["internal"])
         self.assertNotIn("ipam", cfg["networks"]["agent-net"])
         for service in ("proxy", "git"):
             self.assertNotIn(self.g["NETWORK_CONFIG_VOLUME"], cfg["services"][service]["volumes"])
 
-    def test_default_and_explicitly_disabled_passt_do_not_inspect_networks(self):
+    def test_all_backends_install_the_outer_policy(self):
         for annotations in ({}, {"krun.use_passt": "0"}):
-            with self.subTest(annotations=annotations), patch.object(subprocess, "run") as run:
-                # Reinitializing a passt session leaves its old metadata directory.
-                self.generate({"krun.use_passt": "1"})
+            with self.subTest(annotations=annotations), patch.object(subprocess, "run", side_effect=self.inspect):
                 cfg = self.generate(annotations)
-                self.assertNotIn(self.g["NETWORK_CONFIG_VOLUME"], cfg["services"]["agent"]["volumes"])
+                self.assertIn(self.g["NETWORK_CONFIG_VOLUME"], cfg["services"]["agent"]["volumes"])
                 self.agentbox["_prepare_agent_network"](self.session)
-                run.assert_not_called()
+                self.assertEqual(self.compose_calls[-1][0][-1], "apply")
+                self.assertEqual(json.loads(self.compose_calls[-1][1]["input"]),
+                                 {"proxy": "10.89.40.5", "git": "10.89.40.4", "vertex_metadata": False})
 
     def test_prepare_refreshes_only_real_ipv4_subnets_without_static_agent_ips(self):
         self.generate({"krun.use_passt": "1"})
@@ -193,11 +237,11 @@ class HostPasstNetworkTest(unittest.TestCase):
         compose = (self.session / "compose.yaml").read_bytes()
         with patch.object(subprocess, "run", side_effect=self.inspect) as run:
             self.agentbox["_prepare_agent_network"](self.session)
-            self.assertEqual(json.loads(config.read_text()), {"ipv4_subnets": ["10.89.40.0/24"]})
+            self.assertEqual(json.loads(config.read_text())["ipv4_subnets"], ["10.89.40.0/24"])
             self.network["subnets"] = [{"subnet": "10.100.16.0/20"}]
             self.agentbox["_prepare_agent_network"](self.session)
-        self.assertEqual(json.loads(config.read_text()), {"ipv4_subnets": ["10.100.16.0/20"]})
-        self.assertEqual(run.call_count, 4)
+            self.assertEqual(json.loads(config.read_text())["ipv4_subnets"], ["10.100.16.0/20"])
+        self.assertEqual(run.call_count, 8)
         self.assertEqual(list(directory.iterdir()), [config])
         self.assertEqual((self.session / "compose.yaml").read_bytes(), compose)
 
@@ -234,6 +278,44 @@ class HostPasstNetworkTest(unittest.TestCase):
         with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
             self.generate({"krun.use_passt": "invalid"})
         self.assertEqual((self.session / "compose.yaml").read_bytes(), original)
+
+    def test_missing_guard_and_failed_policy_are_fail_closed(self):
+        cfg = self.generate()
+        cfg["services"]["agent"].pop("network_mode")
+        (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
+        with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            self.agentbox["_prepare_agent_network"](self.session)
+        self.assertEqual(self.compose_calls, [])
+        self.generate()
+        def fail_apply(session, *args, **kwargs):
+            return subprocess.CompletedProcess(args, int(args[-1] == "apply"), stderr="denied")
+        with (patch.object(subprocess, "run", side_effect=self.inspect),
+              patch.dict(self.g, compose=fail_apply),
+              redirect_stderr(io.StringIO()), self.assertRaises(SystemExit)):
+            self.agentbox["_prepare_agent_network"](self.session)
+        self.assertFalse((self.session / "network-config" / "ipv4-subnets.json").exists())
+
+    def test_reload_refreshes_only_a_running_guard(self):
+        self.generate()
+        marker = self.session / "network-config" / "ipv4-subnets.json"
+        marker.write_text("{}")
+        for running in ("true", "false"):
+            calls = []
+            with (patch.object(subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=running)),
+                  patch.dict(self.g, _prepare_agent_network=lambda session: calls.append(session))):
+                self.agentbox["_refresh_agent_network"](self.session)
+            self.assertEqual(calls, [self.session] if running == "true" else [])
+
+    def test_retained_container_cannot_silently_keep_old_network_or_capabilities(self):
+        with patch.object(subprocess, "run", side_effect=self.inspect):
+            self.agentbox["_assert_retained_network"](self.session)
+            self.agent["HostConfig"]["NetworkMode"] = "bridge"
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.agentbox["_assert_retained_network"](self.session)
+            self.agent["HostConfig"]["NetworkMode"] = "container:guard-id"
+            self.agent["BoundingCaps"].append("CAP_NET_RAW")
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.agentbox["_assert_retained_network"](self.session)
 
     def test_external_missing_or_invalid_subnet_does_not_replace_previous_metadata(self):
         self.generate({"krun.use_passt": "1"})

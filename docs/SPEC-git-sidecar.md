@@ -131,7 +131,7 @@ Fetching, review, and merging on the host are manual; agent exit never fetches.
 Ephemeral teardown removes containers/networks but retains the named Git volume
 and session registration. The next start clones the retained repositories again;
 unpushed changes in the removed agent are lost. Persistent teardown stops all
-three services and retains both the Git volume and the agent's working trees/home.
+services, including the network guard, and retains both the Git volume and the agent's working trees/home.
 Host Git can start just the sidecar after either form of teardown, reusing its
 existing data, and leaves it running after the transfer. No running agent or proxy
 is required. `remove` alone deletes the named volumes and matching registered
@@ -152,7 +152,7 @@ one-shot/manual cloning, bounded startup retries, interruptible transfers,
 manual fetching, sandbox-created project retrieval, stable Compose configuration, and worktree-shared remotes,
 substituting only the Podman boundary.
 
-After building `base git proxy`, run real containers with
+After building `base network git proxy`, run real containers with
 `AGENTBOX_INTEGRATION=1 python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v`.
 These tests cover manual cloning of later shares, retained-container restarts, normal Git daemon
 operations, isolation, and volume/remote cleanup. They require working native

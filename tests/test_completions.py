@@ -290,7 +290,7 @@ print -r -- '__COMPLETION_READY__'
         self.assertEqual(self.complete("agentbox preset edit proxy "), presets)
         self.assertEqual(self.complete("agentbox preset copy "), presets)
         self.assertEqual(self.complete("agentbox preset edit "), {"proxy", "agent"})
-        self.assertEqual(self.complete("agentbox build "), {"base", "claude", "custom-harness", "proxy", "git"})
+        self.assertEqual(self.complete("agentbox build "), {"base", "claude", "custom-harness", "proxy", "git", "network"})
         self.assertNotIn("base", self.complete("agentbox update base "))
         self.assertIn("base", self.complete("agentbox build --tag base "))
         (self.home / "agent" / "Containerfile.added").touch()

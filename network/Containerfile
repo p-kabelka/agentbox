@@ -1,0 +1,5 @@
+FROM fedora:44
+
+RUN dnf install -y python3 nftables && dnf clean all
+COPY guard.py /app/guard.py
+ENTRYPOINT ["python3", "/app/guard.py"]

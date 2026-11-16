@@ -86,7 +86,7 @@ _agentbox_harnesses() {
   local home=${AGENTBOX_HOME:-$HOME/.local/share/agentbox} expl
   local -a values selected=("${(@b)${(@Q)line}}")
   values=("$home"/agent/Containerfile.*(N:t))
-  values=("${values[@]#Containerfile.}" proxy git)
+    values=("${values[@]#Containerfile.}" proxy git network)
   _wanted harnesses expl harness compadd -F selected -a values
 }
 

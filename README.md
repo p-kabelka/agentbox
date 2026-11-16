@@ -10,10 +10,34 @@ See [ARCHITECTURE.md](docs/ARCHITECTURE.md) for design rationale and [SPEC.md](d
 
 Each session has a **proxy** (holds real credentials and controls internet access), a **Git sidecar**, and one or more **agents** (hold no credentials and have no internet route). In Git-backed sessions, repositories travel through pushes and clones, not host filesystem mounts. The sidecar stores bare repositories in a named volume, uses only the session's internal network, and publishes no ports. There are no writable host-directory bind mounts by default; read-only dotfiles and proxy configuration mounts remain.
 
+The agent shares a network namespace with a trusted **network guard**, outside
+the microVM. Its default-deny firewall permits only TCP to `proxy:8080` and
+`git:9418`/`git:8083`, plus `proxy:9090` when Vertex metadata is enabled.
+Proxy management/reload ports, host services, other containers, direct DNS,
+UDP, and IPv6 egress are blocked. `proxy` and `git` resolve through generated
+hosts entries; external names are resolved by the HTTP proxy. Root inside the
+guest cannot alter the outer firewall. The guard requires `NET_ADMIN` only
+inside its own container namespace, not sudo or host-wide firewall changes.
+The guard explicitly uses native `crun` and refuses to run inside a microVM.
+Podman's `internal: true` remains defense in depth, not the destination policy.
+
+The HTTP proxy also rejects upstream connections to host addresses, session
+networks, loopback, and link-local destinations—even if an L7 allow rule matches.
+Resolved addresses are checked and pinned before connecting.
+Other private/LAN upstreams are denied by default; if needed, declare their exact
+IPs in `proxy.yaml` under `private_upstreams: [...]` as well as an L7 request rule.
+This cannot override host, loopback, or session-network blocks.
+
+Rebuild `base`, `network`, `proxy`, and the harness image you use, then initialize
+a new session to adopt this topology. Legacy sessions without a guard fail closed;
+retained agents cannot be migrated in place.
+
 ---
 
 ## Prerequisites
 
+- Local Linux container engine with network namespaces and nftables support
+  (the guard image includes nftables; host root privileges are not required).
 - Podman with `podman compose` (`podman-compose` 1.5.0 or newer; tmpfs syntax verified with 1.5.0)
 - Python 3 with PyYAML (`pip install pyyaml`, `dnf install python3-pyyaml`)
 - `krun` / `crun-vm` for VM-level isolation (recommended; agent container uses `runtime: krun`)
@@ -35,7 +59,7 @@ ln -s -r ~/.local/share/agentbox/bin/git-remote-agentbox ~/.local/bin
 # Build container images (proxy, Git sidecar, base agent, and all harnesses)
 agentbox build
 # Or build specific images only:
-agentbox build base git proxy claude
+agentbox build base network git proxy claude
 ```
 
 ### Zsh completion
@@ -108,11 +132,12 @@ on internal networks, including an existing address with an unusable prefix or
 missing subnet route. Agentbox works around this without a patched crun: each
 `start` refreshes the actual internal IPv4 subnet from Podman into a read-only
 `/agentbox-network` mount. Before any network access, `agentbox-network` combines
-that subnet with the container's allocated address in Podman's `/etc/hosts`.
+that subnet with the guard namespace's Podman-allocated address.
 For passt guests only, three idempotent `ip` commands bring up `eth0`, apply the
 address/prefix, and ensure the connected subnet route exists. Other addresses,
-routes, and DNS are left alone; no default route is added and `internal: true`
-remains unchanged.
+routes are left alone; no default route is added and `internal: true` remains
+unchanged. The helper also installs the two sidecar hostnames and disables
+external DNS in the guest for both TSI and passt.
 
 Rebuild `base` and the harness image you use, then initialize a **new session**
 with the updated preset. Existing retained containers cannot acquire the new
@@ -120,10 +145,12 @@ image or metadata mount on restart. Ephemeral sessions can instead be
 reinitialized with their preset. Do not pin the example IP addresses from another
 session or change the network to non-internal.
 
-This uses the standard Agentbox image entrypoint and Podman-generated
-`/etc/hosts`. A custom entrypoint must invoke `agentbox-network` before accessing
+This uses the standard Agentbox image entrypoint. A custom entrypoint must invoke
+`agentbox-network` before accessing
 the network. For a standalone `podman run` without the metadata mount, pass the
 actual internal network's subnet with `agentbox-network --subnet CIDR`.
+That standalone helper only configures networking; it does not install the
+outer security policy. Use managed sessions for the isolation guarantee.
 
 ---
 
@@ -154,7 +181,7 @@ agentbox init --name feature --persist
 agentbox start --name feature -- bash     # first start chooses the saved command
 # exit bash, then restart the same container and its filesystem
 agentbox start --name feature
-agentbox stop --name feature              # retain all three stopped services
+agentbox stop --name feature              # retain the stopped services, including the network guard
 agentbox remove --name feature            # delete containers and the sidecar's repositories
 ```
 

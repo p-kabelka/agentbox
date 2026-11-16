@@ -1,6 +1,6 @@
 """Opt-in, real Podman/Compose tests. Defaults to the production krun runtime.
 
-Build first: AGENTBOX_IMAGE_TAG=git-sidecar-test agentbox build base git proxy
+Build first: AGENTBOX_IMAGE_TAG=git-sidecar-test agentbox build base network git proxy
 Run: AGENTBOX_INTEGRATION=1 AGENTBOX_IMAGE_TAG=git-sidecar-test python3 -m unittest discover -s tests -p test_git_sidecar_integration.py -v
 On systems without KVM only, explicitly set AGENTBOX_TEST_RUNTIME=crun.
 Set AGENTBOX_TEST_USE_PASST=1 to exercise krun's passt backend and IPv4 workaround.
@@ -13,6 +13,7 @@ import os
 import select
 import shlex
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,7 @@ class GitSidecarIntegrationTest(unittest.TestCase):
         self.project.mkdir()
         self.home = self.root / "installation"
         self.home.mkdir()
-        for name in ("agent", "proxy", "git", "compose-base.yaml", "presets"):
+        for name in ("agent", "proxy", "git", "network", "compose-base.yaml", "presets"):
             (self.home / name).symlink_to(ROOT / name)
         preset = self.home / "custom" / "presets" / "integration"
         preset.mkdir(parents=True)
@@ -410,6 +411,216 @@ git -C /context/git/org/library push
         self.cli("start", "--session", self.session_id, "--", "bash", "-ec",
                  "test -f /workspace/source && echo explicit-mount > /workspace/new-file")
         self.assertEqual((self.project / "new-file").read_text(), "explicit-mount\n")
+
+    def test_agent_cannot_reach_management_peers_or_host_even_with_guest_routes(self):
+        self.initialize("--persist")
+        git = self.inspect_git()
+        network = next(iter(git["NetworkSettings"]["Networks"]))
+        info = json.loads(self.run_command(["podman", "network", "inspect", network]).stdout)[0]
+        gateway = info["subnets"][0]["gateway"]
+        # A real host service bound on every IPv4 interface, not an unused port.
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("0.0.0.0", 0))
+        listener.listen()
+        host_port = listener.getsockname()[1]
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.addCleanup(udp.close)
+        udp.bind(("0.0.0.0", 0))
+        udp.settimeout(0.3)
+        host_addresses = {gateway}
+        for result in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            if not ipaddress.ip_address(result[4][0]).is_loopback:
+                host_addresses.add(result[4][0])
+        peer = "agentbox-unrelated-" + hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
+        self.addCleanup(lambda: self.run_command(["podman", "rm", "-f", peer], check=False))
+        self.run_command(["podman", "run", "-d", "--name", peer, "--network", network,
+                          "--entrypoint", "python3", self.config()["services"]["git"]["image"],
+                          "-m", "http.server", "8080"])
+        peer_info = json.loads(self.run_command(["podman", "inspect", peer]).stdout)[0]
+        peer_ip = peer_info["NetworkSettings"]["Networks"][network]["IPAddress"]
+        script = """
+import ipaddress, json, socket, subprocess
+from pathlib import Path
+
+def connects(host, port):
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except OSError:
+        return False
+
+for host, port in (('proxy', 8080), ('git', 9418), ('git', 8083)):
+    assert connects(host, port), (host, port, 'required service unavailable')
+proxy = socket.gethostbyname('proxy')
+blocked = [(proxy, 8081), (proxy, 8082), (proxy, 9090),
+           (GATEWAY, HOST_PORT), (PEER, 8080), ('::ffff:' + GATEWAY, HOST_PORT)]
+blocked.extend((address, HOST_PORT) for address in HOST_ADDRESSES)
+for host, port in blocked:
+    assert not connects(host, port), (host, port, 'network policy bypass')
+with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as udp:
+    for address in HOST_ADDRESSES:
+        try:
+            udp.sendto(b'AGENTBOX_GUARD_UDP_TEST', (address, UDP_PORT))
+        except OSError:
+            pass
+
+import http.client
+client = http.client.HTTPConnection('proxy', 8080, timeout=5)
+client.request('GET', 'http://proxy:8081/')
+response = client.getresponse()
+assert response.status == 403 and b'not allowed' in response.read()
+client.close()
+
+# Root in the guest can add routes; that must not change the outer policy.
+if Path('/.krun_config.json').exists() and Path('/sys/class/net/eth0').exists():
+    subprocess.run(['ip', 'route', 'replace', 'default', 'via', GATEWAY, 'dev', 'eth0'],
+                   check=True)
+    for host, port in blocked + [('203.0.113.1', 443)]:
+        assert not connects(host, port), (host, port, 'guest route bypass')
+if not Path('/.krun_config.json').exists():
+    # The explicit ordinary-container test fallback cannot alter the shared namespace either.
+    result = subprocess.run(['ip', 'route', 'replace', 'default', 'via', GATEWAY, 'dev', 'eth0'],
+                            capture_output=True)
+    assert result.returncode != 0, 'Agent acquired outer NET_ADMIN'
+    try:
+        socket.socket(socket.AF_PACKET, socket.SOCK_RAW)
+        raise AssertionError('Agent acquired outer NET_RAW')
+    except PermissionError:
+        pass
+print('SIDECAR_ONLY_EGRESS_VERIFIED', flush=True)
+"""
+        script = (f"GATEWAY={gateway!r}; HOST_PORT={host_port}; PEER={peer_ip!r}; "
+                  f"HOST_ADDRESSES={sorted(host_addresses)!r}; UDP_PORT={udp.getsockname()[1]}\n") + script
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
+        with self.assertRaises(socket.timeout):
+            udp.recvfrom(128)
+        # A new VM boot reuses the same guarded namespace/container contract.
+        self.cli("start", "--session", self.session_id)
+        with self.assertRaises(socket.timeout):
+            udp.recvfrom(128)
+
+    def test_vertex_metadata_is_the_only_optional_proxy_port(self):
+        preset = self.home / "custom" / "presets" / "integration" / "proxy.yaml"
+        preset.write_text(yaml.safe_dump({"providers": [{
+            "name": "vertex", "enabled": True, "metadata_server": True,
+            "credential_type": "static", "api_key_env": "TEST_VERTEX_KEY", "request_policy": [],
+        }], "environment": {"TEST_VERTEX_KEY": "test-only"}}))
+        self.initialize()
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", """
+import json, socket, urllib.request
+client = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+with client.open('http://proxy:9090/computeMetadata/v1/instance/service-accounts/default/token', timeout=5) as response:
+    assert json.load(response)['access_token'] == 'dummy-replaced-by-proxy'
+for port in (8081, 8082):
+    try:
+        with socket.create_connection(('proxy', port), timeout=1):
+            raise AssertionError(('Management port reachable', port))
+    except OSError:
+        pass
+""")
+
+    def test_http_proxy_cannot_forward_to_host_or_its_own_management(self):
+        preset = self.home / "custom" / "presets" / "integration" / "proxy.yaml"
+        preset.write_text(yaml.safe_dump({"providers": [],
+                                          "extra_request_policy": [{"host": ".*", "port": ".*"}]}))
+        self.initialize()
+        git = self.inspect_git()
+        network = next(iter(git["NetworkSettings"]["Networks"]))
+        info = json.loads(self.run_command(["podman", "network", "inspect", network]).stdout)[0]
+        gateway = info["subnets"][0]["gateway"]
+        listener = socket.socket()
+        self.addCleanup(listener.close)
+        listener.bind(("0.0.0.0", 0))
+        listener.listen()
+        listener.settimeout(0.3)
+        targets = [f"http://{gateway}:{listener.getsockname()[1]}/",
+                   "http://proxy:8081/", "http://127.0.0.1:8082/health",
+                   "http://[::1]:8082/health"]
+        script = f"TARGETS={targets!r}\n" + """
+import http.client
+for target in TARGETS:
+    client = http.client.HTTPConnection('proxy', 8080, timeout=5)
+    client.request('GET', target)
+    response = client.getresponse()
+    body = response.read()
+    assert response.status == 502 and b'Agentbox blocked' in body, (target, response.status, body)
+    client.close()
+"""
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
+        with self.assertRaises(socket.timeout):
+            listener.accept()
+
+    def test_allowed_http_and_https_still_work_through_the_proxy(self):
+        preset = self.home / "custom" / "presets" / "integration" / "proxy.yaml"
+        preset.write_text(yaml.safe_dump({"providers": [], "extra_request_policy": [
+            {"host": r"upstream\.example", "port": port} for port in (8080, 8443)]}))
+        self.initialize()
+        name = "agentbox-upstream-" + hashlib.sha256(self.session_id.encode()).hexdigest()[:16]
+        network = name + "-net"
+        self.run_command(["podman", "network", "create", "-o", "isolate=false", network])
+        self.addCleanup(lambda: self.run_command(["podman", "network", "rm", network], check=False))
+        certs = self.root / "tls"
+        certs.mkdir()
+        certificate, key = certs / "upstream.crt", certs / "upstream.key"
+        self.run_command(["podman", "run", "--rm", "--network", "none", "-v", f"{certs}:/tls:z",
+                          "--entrypoint", "python3", self.config()["services"]["proxy"]["image"], "-c", """
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
+key = rsa.generate_private_key(public_exponent=65537,key_size=2048)
+name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME,'upstream.example')])
+now = datetime.now(timezone.utc)
+cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name).public_key(key.public_key())
+        .serial_number(x509.random_serial_number()).not_valid_before(now-timedelta(days=1))
+        .not_valid_after(now+timedelta(days=1))
+        .add_extension(x509.BasicConstraints(ca=True,path_length=None),critical=True)
+        .add_extension(x509.SubjectAlternativeName([x509.DNSName('upstream.example')]),critical=False)
+        .sign(key,hashes.SHA256()))
+Path('/tls/upstream.crt').write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+Path('/tls/upstream.key').write_bytes(key.private_bytes(serialization.Encoding.PEM,
+    serialization.PrivateFormat.TraditionalOpenSSL,serialization.NoEncryption()))
+"""])
+        self.addCleanup(lambda: self.run_command(["podman", "rm", "-f", name], check=False))
+        self.run_command(["podman", "run", "-d", "--name", name, "--network", network,
+                          "-v", f"{certs}:/tls:ro,z", "--entrypoint", "python3",
+                          self.config()["services"]["git"]["image"], "-c", """
+import ssl, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'EXTERNAL_FIXTURE_OK')
+plain = ThreadingHTTPServer(('0.0.0.0',8080),Handler)
+secure = ThreadingHTTPServer(('0.0.0.0',8443),Handler)
+context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+context.load_cert_chain('/tls/upstream.crt','/tls/upstream.key')
+secure.socket = context.wrap_socket(secure.socket,server_side=True)
+threading.Thread(target=plain.serve_forever,daemon=True).start()
+secure.serve_forever()
+"""])
+        fixture = json.loads(self.run_command(["podman", "inspect", name]).stdout)[0]
+        address = fixture["NetworkSettings"]["Networks"][network]["IPAddress"]
+        proxy_config = self.session / "proxy-config" / "proxy.yaml"
+        policy = yaml.safe_load(proxy_config.read_text())
+        policy["private_upstreams"] = [address]  # Explicitly trust only this remote fixture IP.
+        proxy_config.write_text(yaml.safe_dump(policy))
+        cfg = self.config()
+        cfg["services"]["proxy"]["extra_hosts"] = [f"upstream.example:{address}"]
+        cfg["services"]["proxy"]["volumes"].append(f"{certificate}:/custom-certs/upstream.crt:ro,z")
+        (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
+        self.cli("start", "--session", self.session_id, "--", "python3", "-c", """
+import urllib.request
+client = urllib.request.build_opener(urllib.request.ProxyHandler(
+    {'http':'http://proxy:8080','https':'http://proxy:8080'}))
+for url in ('http://upstream.example:8080/','https://upstream.example:8443/'):
+    with client.open(url,timeout=10) as response:
+        assert response.read() == b'EXTERNAL_FIXTURE_OK', url
+""")
 
 
 if __name__ == "__main__":

@@ -35,7 +35,11 @@ This means even a fully compromised agent — one that dumps its entire environm
 
 ### 2.3 The network is a one-way valve
 
-All external agent traffic must pass through the proxy, which enforces an allowlist. Internal Git/catalog traffic goes directly to the Git sidecar. Only the proxy can reach the internet, enforced by container network topology rather than agent-controlled firewall rules.
+All external agent traffic must pass through the proxy, which enforces an
+allowlist. Internal Git/catalog traffic goes directly to the Git sidecar.
+A trusted network guard owns the agent's outer container network namespace
+and installs an endpoint allowlist before the VM starts. The agent cannot
+change that firewall, even as guest root.
 
 The proxy acts as both a gateway and an inspection point. External HTTP requests, including denials, are logged; internal Git traffic is not part of the proxy access log.
 
@@ -55,7 +59,10 @@ This converts the git interface from an execution surface into a data transport.
 
 The system must be deployable by a developer on a workstation without `sudo`. Any design that requires modifying host iptables, installing kernel modules, or editing system-wide configuration is a deployment barrier that will limit adoption and introduce operational complexity.
 
-Podman's container networking achieves network isolation without host-level privilege. The internal network flag prevents external routing entirely, enforced inside the network namespace of the container runtime.
+The guard uses nftables with `NET_ADMIN` in its own container network namespace,
+including under rootless Podman. It does not change host-wide firewall rules.
+`internal: true` prevents external forwarding but does not block host services
+or restrict sidecar ports; the guard supplies those additional restrictions.
 
 ### 2.6 Configuration over code for extensibility
 
@@ -109,6 +116,29 @@ Two Podman networks are created per agentbox:
 
 - **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent and Git sidecar are connected only to this network. Git/catalog traffic stays here and does not pass through the egress proxy.
 - **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy container is attached to this network.
+
+The agent joins the guard's network namespace instead of attaching independently
+to `agent-net`. Only the guard has `NET_ADMIN`; the agent explicitly drops both
+`NET_ADMIN` and `NET_RAW` outside the VM. Its IPv4 TCP allowlist is the proxy's
+internal address on 8080 (and 9090 for enabled Vertex metadata), plus the Git
+sidecar's internal address on 9418 and 8083. All other egress, including IPv6 and
+UDP, is denied. Local kernel rejection packets are allowed only to deliver
+errors inside the guarded namespace. This is not access to host loopback.
+
+The host refreshes the policy and read-only address metadata before each agent
+boot. Names for `proxy` and `git` come from that metadata, so the agent does not
+need access to the bridge's DNS service. A failed/missing guard prevents launch.
+Configuration reload/restart refreshes a running guard's optional metadata rule.
+
+The proxy independently rejects upstream connections to host IPs, either
+session network, loopback, and link-local addresses. The manager snapshots host
+addresses at start/reload and writes a proxy-only policy file. Resolved DNS
+addresses are validated and pinned before connecting to prevent DNS rebinding
+or broad L7 allow rules from exposing host/control-plane services.
+Non-global upstreams are denied by default, so subsequently created private
+bridges cannot expose a new host address through the proxy. Trusted configuration
+may declare exact remote `private_upstreams` IPs; hard host/session blocks take
+precedence. Reload the policy after changing the host's network addresses.
 
 The proxy container is attached to both networks and is the sole egress point for all agent traffic.
 
@@ -371,7 +401,11 @@ The proxy's addon interface (mitmproxy's Python API) is the primary extension po
 
 ## 8. Quality Attributes
 
-**Security.** The system is designed so that the tools required for the primary attack classes are structurally absent from the agent container, not merely restricted by policy that could be circumvented. The proxy's code surface is intentionally minimal — three Python modules (`addon.py`, `provider.py`, `resolvers.py`), a small HTTP server (`metadata_server.py`), and a shell entrypoint — to make auditing practical.
+**Security.** Credentials and host repositories are absent from the agent.
+Network policy is enforced outside the untrusted VM by the small guard service,
+with an additional upstream-address check in the proxy. Proxy management is
+not an agent-accessible service. These trusted components and the hypervisor
+remain part of the security boundary and require auditing.
 
 **Transparency.** The mitmweb interface and JSON access log show external HTTP traffic, including blocked requests. Internal Git/catalog requests do not pass through mitmproxy.
 

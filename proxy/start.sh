@@ -22,6 +22,7 @@ mitmweb --listen-host 0.0.0.0 --listen-port 8080 \
         --scripts /addons/addon.py \
         --set block_global=false \
         --set connection_strategy=lazy \
+        --set rawtcp=false \
         --set web_password= \
         --set ssl_verify_upstream_trusted_ca=/etc/ssl/certs/ca-certificates.crt \
         --no-web-open-browser &

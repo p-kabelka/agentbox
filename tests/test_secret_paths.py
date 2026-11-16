@@ -64,6 +64,7 @@ class SecretPathTest(unittest.TestCase):
                     "agent": {"image": "localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}",
                               "volumes": [], "environment": {}},
                     "git": {"image": "localhost/agentbox-git:${AGENTBOX_IMAGE_TAG:-latest}", "volumes": []},
+                    "network": {"image": "localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}"},
                 },
             }
             generate_compose.__globals__["save_yaml"] = (

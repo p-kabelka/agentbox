@@ -7,7 +7,7 @@ volumes:
 
 networks:
   agent-net:
-    internal: true   # no internet route; enforced by Podman — no host iptables needed
+    internal: true   # no external forwarding; the guard restricts exact destinations
   proxy-net:         # internet-connected; only the proxy service is attached
 
 services:
@@ -49,16 +49,38 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
+  network:
+    image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}
+    runtime: crun
+    networks:
+      - agent-net
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_ADMIN
+    read_only: true
+    tmpfs:
+      - /run:rw,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
   agent:
     image: localhost/agentbox-agent-base:${AGENTBOX_IMAGE_TAG:-latest}
-    networks:
-      - agent-net          # internal only — no direct internet access
+    # The trusted guard owns this namespace and its firewall. The VM cannot
+    # change it, even when the workload has root privileges inside the guest.
+    network_mode: service:network
+    cap_drop:
+      - NET_ADMIN
+      - NET_RAW
     depends_on:
       - proxy
       - git
+      - network
     runtime: krun
     environment:
       AGENTBOX_NAME: ${AGENTBOX_NAME:-}
+      AGENTBOX_NETWORK_GUARD: "1"
 
       # Dummy credentials — proxy injects real values via mitmproxy
       # ANTHROPIC_API_KEY: dummy
@@ -79,6 +101,7 @@ services:
       NODE_USE_ENV_PROXY: 1
     volumes:
       - proxy-ca:/proxy-ca:ro,z
+      - ./network-config:/agentbox-network:ro,z
     stdin_open: true
     tty: true
     logging:
