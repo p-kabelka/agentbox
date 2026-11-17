@@ -762,8 +762,10 @@ def _mount_repository(session_dir: Path, path: Path, name: str | None = None, re
         entries[name] = str(git_dir)
         _save_git_repositories(session_dir, entries)
     # No force or mirror push: never overwrite commits already published by an agent.
+    # Use the captured URL so unmount/remount or a remote edit cannot redirect
+    # this initial upload after the metadata lock is released.
     subprocess.run(["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "push", "--follow-tags",
-                    remote, f"{commit}:refs/heads/{branch}"], check=True, env=_git_environment(session_dir))
+                    url, f"{commit}:refs/heads/{branch}"], check=True, env=_git_environment(session_dir))
     with _git_metadata_lock(session_dir):
         if _git_repositories(session_dir).get(name) != str(git_dir):
             die(f"repository '{name}' was unmounted during upload")

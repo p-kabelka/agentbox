@@ -25,7 +25,7 @@ def repository_roots():
     """Walk namespaces without descending into bare repositories."""
     for root, directories, _ in os.walk(STORE / "repos"):
         path = Path(root)
-        if path.name.endswith(".git") and (path / "HEAD").is_file() and (path / "objects").is_dir():
+        if path.name.endswith(".git") and is_bare_repository(path):
             directories.clear()
             yield path
 
@@ -38,6 +38,16 @@ def published_repositories():
 
 def git(*args, **kwargs):
     return subprocess.run(["git", "-c", "core.hooksPath=/dev/null", *args], check=True, **kwargs)
+
+
+def is_bare_repository(path):
+    """Inspect this directory, never a repository discovered in its parents."""
+    try:
+        result = git("--git-dir", str(path), "rev-parse", "--is-bare-repository",
+                     capture_output=True, text=True)
+    except subprocess.CalledProcessError:
+        return False
+    return result.stdout.strip() == "true"
 
 
 def check_branch(branch):
@@ -53,8 +63,8 @@ def initialize(name, branch, object_format):
         if existing != path and (path.is_relative_to(existing) or existing.is_relative_to(path)):
             shared = existing.relative_to(STORE / "repos").as_posix().removesuffix(".git")
             raise ValueError(f"Repository '{name}' overlaps repository '{shared}'")
-    if path.exists():
-        actual = git("-C", str(path), "rev-parse", "--show-object-format",
+    if is_bare_repository(path):
+        actual = git("--git-dir", str(path), "rev-parse", "--show-object-format",
                      capture_output=True, text=True).stdout.strip()
         if actual != object_format:
             raise ValueError("Repository object format differs")

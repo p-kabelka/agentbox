@@ -108,6 +108,24 @@ os.execvp(args[0], args)
         with redirect_stdout(io.StringIO()):
             self.agentbox["cmd_unmount"](args)
 
+    def test_initial_push_uses_captured_url_if_registered_remote_is_repointed(self):
+        elsewhere = self.root / "elsewhere.git"
+        self.git(self.root, "init", "--bare", "-q", str(elsewhere))
+        save = self.g["_save_git_repositories"]
+
+        def repoint_remote(session, entries):
+            save(session, entries)
+            self.git(self.project, "remote", "set-url", self.remote, elsewhere.as_uri())
+
+        with patch.dict(self.g, _save_git_repositories=repoint_remote):
+            self.share()
+        self.assertEqual(self.git(server.repository("workspace"), "rev-parse", "main").stdout,
+                         self.git(self.project, "rev-parse", "HEAD").stdout)
+        self.assertEqual(self.git(elsewhere, "for-each-ref").stdout, "")
+        self.assertEqual(self.git(self.project, "remote", "get-url", self.remote).stdout.strip(),
+                         elsewhere.as_uri())
+        self.assertEqual(server.published_repositories(), ["workspace"])
+
     def test_concurrent_mounts_preserve_registrations_and_upload_in_parallel(self):
         other = self.root / "other"
         self.git(self.root, "clone", "-q", str(self.project), str(other))
@@ -170,6 +188,16 @@ os.execvp(args[0], args)
             self.assertFalse(any(path != root and path.is_relative_to(root) for path in visited),
                              f"catalog scanned inside {root}")
 
+    def test_catalog_does_not_mistake_git_like_namespace_for_a_bare_repository(self):
+        namespace = server.repository("forge")
+        namespace.mkdir(parents=True)
+        (namespace / "HEAD").write_text("not a valid Git HEAD\n")
+        (namespace / "objects").mkdir()
+        (namespace / "git-daemon-export-ok").touch()
+        self.share("forge.git/org/repo")
+        self.assertEqual(list(server.repository_roots()), [server.repository("forge.git/org/repo")])
+        self.assertEqual(server.published_repositories(), ["forge.git/org/repo"])
+
     def test_pushed_ref_named_like_export_marker_does_not_break_cloning(self):
         self.share()
         self.git(self.project, "push", self.remote, "HEAD:refs/heads/fake.git/git-daemon-export-ok")
@@ -202,6 +230,34 @@ os.execvp(args[0], args)
                 self.assertEqual(self.git(server.repository(first), "rev-parse",
                                           "--is-bare-repository").stdout.strip(), "true")
         self.assertEqual(server.published_repositories(), [])
+
+    def test_initialize_checks_exact_path_without_discovering_an_ancestor_repository(self):
+        with patch.object(server, "STORE", self.project):
+            path = server.repository("namespace")
+            path.mkdir(parents=True)
+            server.initialize("namespace", "main", "sha1")
+            self.assertEqual(self.git(path, "rev-parse", "--is-bare-repository").stdout.strip(), "true")
+            self.assertEqual(list(server.repository_roots()), [path])
+
+    def test_initialize_preserves_existing_bare_repository_and_checks_object_format(self):
+        self.share()
+        path = server.repository("workspace")
+        before = (path / "HEAD").read_bytes()
+        server.initialize("workspace", "another", "sha1")
+        self.assertEqual((path / "HEAD").read_bytes(), before)
+        with self.assertRaisesRegex(ValueError, "object format"):
+            server.initialize("workspace", "main", "sha256")
+        self.assertEqual(self.git(path, "show", "main:source").stdout, "host\n")
+
+    def test_mount_initializes_existing_namespace_directory_after_unmount(self):
+        self.share("forge.git/org/repo")
+        self.unmount("forge.git/org/repo")
+        namespace = server.repository("forge")
+        self.assertTrue((namespace / "org").is_dir())
+        self.share("forge")
+        self.assertTrue((namespace / "org").is_dir())
+        self.assertEqual(self.git(namespace, "rev-parse", "--is-bare-repository").stdout.strip(), "true")
+        self.assertEqual(server.published_repositories(), ["forge"])
 
     def test_unmount_deletes_only_selected_sidecar_repo_and_matching_host_remote(self):
         self.share()

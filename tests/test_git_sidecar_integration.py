@@ -253,6 +253,23 @@ fi
         self.assertEqual(self.run_command(["podman", "inspect", "--format", "{{.Id}}", agent_name]).stdout, agent_id)
         self.assertEqual((reference / "bulk").stat().st_size, 1024 * 1024)
 
+    def test_mount_reuses_namespace_directory_left_after_unmount(self):
+        self.initialize()
+        reference = self.root / "reference"
+        self.git(self.project, "clone", "-q", str(self.project), str(reference))
+        self.cli("mount", str(reference), "--as", "forge.git/org/repo", "--session", self.session_id)
+        self.cli("unmount", "forge.git/org/repo", "--session", self.session_id)
+        sidecar = self.config()["services"]["git"]["container_name"]
+        namespace = "/srv/git/repos/forge.git/org"
+        self.run_command(["podman", "exec", sidecar, "test", "-d", namespace])
+        self.cli("mount", str(reference), "--as", "forge", "--session", self.session_id)
+        self.run_command(["podman", "exec", sidecar, "test", "-d", namespace])
+        self.cli("start", "--session", self.session_id, "--", "bash", "-ec", """
+test -f /context/git/forge/source
+test ! -e /context/git/forge.git/org/repo
+""")
+        self.assertEqual(set(self.repositories()), {"workspace", "forge"})
+
     def test_manual_clone_into_retained_agent_and_restart_preserves_work(self):
         self.initialize("--persist")
         reference = self.root / "reference"
