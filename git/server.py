@@ -1,6 +1,7 @@
 """Internal-only Git daemon and read-only repository catalog; management is exec-only."""
 
 import json
+import os
 import re
 import shutil
 import signal
@@ -20,10 +21,19 @@ def repository(name):
     return STORE / "repos" / (name + ".git")
 
 
+def repository_roots():
+    """Walk namespaces without descending into bare repositories."""
+    for root, directories, _ in os.walk(STORE / "repos"):
+        path = Path(root)
+        if path.name.endswith(".git") and (path / "HEAD").is_file() and (path / "objects").is_dir():
+            directories.clear()
+            yield path
+
+
 def published_repositories():
     repos = STORE / "repos"
-    return sorted(marker.parent.relative_to(repos).as_posix().removesuffix(".git")
-                  for marker in repos.rglob("*.git/git-daemon-export-ok") if marker.is_file())
+    return sorted(path.relative_to(repos).as_posix().removesuffix(".git")
+                  for path in repository_roots() if (path / "git-daemon-export-ok").is_file())
 
 
 def git(*args, **kwargs):
@@ -39,6 +49,10 @@ def initialize(name, branch, object_format):
     check_branch(branch)
     if object_format not in ("sha1", "sha256"):
         raise ValueError("Unsupported Git object format")
+    for existing in repository_roots():
+        if existing != path and (path.is_relative_to(existing) or existing.is_relative_to(path)):
+            shared = existing.relative_to(STORE / "repos").as_posix().removesuffix(".git")
+            raise ValueError(f"Repository '{name}' overlaps repository '{shared}'")
     if path.exists():
         actual = git("-C", str(path), "rev-parse", "--show-object-format",
                      capture_output=True, text=True).stdout.strip()

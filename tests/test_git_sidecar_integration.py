@@ -171,6 +171,49 @@ git push origin --delete temporary
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/direct-work:source").stdout, "direct\n")
         self.assertEqual((self.project / "source").read_text(), "host\n")
 
+    def test_catalog_ignores_marker_named_refs_pushed_by_agent(self):
+        self.initialize()
+        self.cli("start", "--session", self.session_id, "--", "bash", "-ec", """
+git push origin HEAD:refs/heads/fake.git/git-daemon-export-ok
+python3 -c "import json, urllib.request; assert json.load(urllib.request.urlopen('http://git:8083/manifest.json')) == ['workspace']"
+agentbox-clone
+""")
+        # A new guest must still clone successfully after the ref is retained.
+        self.cli("start", "--session", self.session_id, "--", "bash", "-ec", "test -f /workspace/source")
+
+    def test_overlapping_roots_are_rejected_without_rejecting_shared_namespaces(self):
+        self.initialize()
+        references = {}
+        for index, name in enumerate(("forge/org/repo1", "forge/org/repo2", "forge.git/org/repo1")):
+            reference = self.root / f"reference-{index}"
+            self.git(self.project, "clone", "-q", str(self.project), str(reference))
+            self.cli("mount", str(reference), "--as", name, "--session", self.session_id)
+            references[name] = reference
+        rejected = self.root / "rejected"
+        self.git(self.project, "clone", "-q", str(self.project), str(rejected))
+        registry = (self.session / "git-repositories.json").read_bytes()
+        for name in ("forge/org/repo1.git/child", "forge"):
+            with self.subTest(name=name):
+                result = self.cli("mount", str(rejected), "--as", name, "--session", self.session_id,
+                                  check=False)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("overlap", result.stderr)
+                self.assertEqual((self.session / "git-repositories.json").read_bytes(), registry)
+                self.assertNotIn(self.remote, self.git(rejected, "remote").stdout.splitlines())
+        self.cli("start", "--session", self.session_id, "--", "bash", "-ec", """
+for repo in forge/org/repo1 forge/org/repo2 forge.git/org/repo1; do
+    git -C "/context/git/$repo" switch -c from-agent
+    git -C "/context/git/$repo" commit --allow-empty -m 'agent work'
+    git -C "/context/git/$repo" push
+done
+""")
+        self.cli("unmount", "forge/org/repo1", "--session", self.session_id)
+        for name in ("forge/org/repo2", "forge.git/org/repo1"):
+            reference = references[name]
+            self.git(reference, "fetch", self.remote)
+            self.assertEqual(self.git(reference, "log", "-1", "--format=%s",
+                                      f"{self.remote}/from-agent").stdout.strip(), "agent work")
+
     def test_unmount_reclaims_sidecar_space_and_preserves_retained_sandbox_clone(self):
         self.initialize("--persist")
         reference = self.root / "reference"

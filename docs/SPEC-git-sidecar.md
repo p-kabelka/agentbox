@@ -63,7 +63,11 @@ rejected. For example, `agentbox mount ~/git/org/repo --as org/repo --session ID
 stores `/srv/git/repos/org/repo.git`, served as `git://git/org/repo.git` and cloned
 at `/context/git/org/repo`; manual cloning uses `agentbox-clone org/repo`.
 Name/path collisions and unrelated existing remotes fail
-without overwriting them. Repeating a share with the same name and host repository
+without overwriting them. Namespace prefixes can be shared, for example
+`forge/org/repo1` and `forge/org/repo2`; only overlapping bare-repository roots
+are rejected, such as `repo` and `repo.git/child`. This also applies before
+publication, so deleting one share cannot delete another.
+Repeating a share with the same name and host repository
 pushes again without force. Only the selected commit's branch history and
 reachable annotated tags are initially pushed; ordinary `git push` can publish
 additional branches/tags. Uncommitted files are not shared. Detached HEADs, tags,
@@ -74,8 +78,11 @@ are not implicitly synchronized.
 The host creates the bare repository through exec, registers the host remote and
 share, pushes, and only then creates its `git-daemon-export-ok` publication marker.
 Each GET of `/manifest.json` enumerates those markers and returns repository names;
-there is no stored manifest, watcher, or periodic scan. The daemon serves only
-marked repositories, including for explicit named clones. A failed push never advertises an empty or incomplete clone;
+the namespace walk stops at real bare-repository roots, including unpublished
+ones, and never scans their objects or refs. Namespace components ending in
+`.git` remain valid. There is no stored manifest, watcher, or periodic scan.
+The daemon serves only marked repositories, including for explicit named clones.
+A failed push never advertises an empty or incomplete clone;
 rerunning the command retries it. Neither host nor agent history is force-reset.
 
 The Git daemon accepts pushes only to existing bare repositories; sandbox clients

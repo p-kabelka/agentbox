@@ -145,6 +145,64 @@ os.execvp(args[0], args)
         self.assertEqual(server.published_repositories(), ["org/two"])
         self.assertFalse(server.repository("org/one").exists())
 
+    def test_catalog_stops_at_real_repository_roots_including_unpublished_ones(self):
+        names = ("forge.git/org/published", "forge.git/org/unpublished")
+        for name in names:
+            server.initialize(name, "main", "sha1")
+            self.git(self.project, "push", str(server.repository(name)), "HEAD:main",
+                     "HEAD:refs/heads/fake.git/git-daemon-export-ok")
+        server.publish(names[0], "main")
+        # A marker alone does not turn a namespace directory into a repository.
+        fake = server.repository("not-a-repository")
+        fake.mkdir()
+        (fake / "git-daemon-export-ok").touch()
+        visited = []
+        scandir = os.scandir
+
+        def scan(path):
+            visited.append(Path(path))
+            return scandir(path)
+
+        with patch.object(os, "scandir", side_effect=scan):
+            self.assertEqual(server.published_repositories(), [names[0]])
+        for name in names:
+            root = server.repository(name)
+            self.assertFalse(any(path != root and path.is_relative_to(root) for path in visited),
+                             f"catalog scanned inside {root}")
+
+    def test_pushed_ref_named_like_export_marker_does_not_break_cloning(self):
+        self.share()
+        self.git(self.project, "push", self.remote, "HEAD:refs/heads/fake.git/git-daemon-export-ok")
+        self.assertEqual(server.published_repositories(), ["workspace"])
+        self.assertEqual(clone.main([]), 0)
+        self.assertEqual((clone.WORKSPACE / "source").read_text(), "host\n")
+
+    def test_mount_rejects_overlapping_repository_roots_in_either_order(self):
+        parent, child = "forge/org/repo", "forge/org/repo.git/child"
+        for index, (first, second) in enumerate(((parent, child), (child, parent))):
+            with self.subTest(first=first, second=second):
+                other = self.root / f"other-{index}"
+                self.git(self.root, "clone", "-q", str(self.project), str(other))
+                self.share(first)
+                registry = (self.session / "git-repositories.json").read_bytes()
+                with self.assertRaisesRegex(ValueError, "overlap"):
+                    self.share(second, other)
+                self.assertEqual((self.session / "git-repositories.json").read_bytes(), registry)
+                self.assertNotIn(self.remote, self.git(other, "remote").stdout.splitlines())
+                self.assertEqual(server.published_repositories(), [first])
+                self.assertEqual(self.git(server.repository(first), "show", "main:source").stdout, "host\n")
+                self.unmount(first)
+
+    def test_initialize_rejects_overlap_with_unpublished_repositories(self):
+        for first, second in (("parent", "parent.git/child"), ("other.git/child", "other")):
+            with self.subTest(first=first, second=second):
+                server.initialize(first, "main", "sha1")
+                with self.assertRaisesRegex(ValueError, "overlap"):
+                    server.initialize(second, "main", "sha1")
+                self.assertEqual(self.git(server.repository(first), "rev-parse",
+                                          "--is-bare-repository").stdout.strip(), "true")
+        self.assertEqual(server.published_repositories(), [])
+
     def test_unmount_deletes_only_selected_sidecar_repo_and_matching_host_remote(self):
         self.share()
         clone.clone_repositories()
@@ -412,7 +470,8 @@ os.execvp(args[0], args)
         self.assertEqual((self.project / "source").read_text(), "host\n")
 
     def test_namespaced_shares_keep_same_basename_separate(self):
-        names = ("org/repo", "other/repo", "org/team/repo")
+        names = ("org/repo", "other/repo", "org/team/repo", "forge/org/repo1", "forge/org/repo2",
+                 "forge.git/org/repo1", "forge.git/org/repo2")
         for name in names:
             path = self.root / "git" / name
             path.parent.mkdir(parents=True, exist_ok=True)
