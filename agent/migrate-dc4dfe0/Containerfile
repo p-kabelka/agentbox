@@ -1,0 +1,28 @@
+ARG TOOLS_IMAGE
+ARG SNAPSHOT_IMAGE
+FROM ${TOOLS_IMAGE} AS tools
+
+# Prepare the new helpers using the trusted current base image. Keep their
+# runtime private: do not replace the old guest's Python, glibc or RPMs.
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+RUN stdlib=$(python3 -c 'import sysconfig; print(sysconfig.get_path("stdlib"))') \
+    && mkdir -p /migration-tools/{bin,lib64,shims} \
+    && cp -L /usr/bin/python3 /usr/bin/ip /migration-tools/bin/ \
+    && cp -a "$stdlib" /migration-tools/lib64/ \
+    && ldd /usr/bin/python3 /usr/bin/ip "$stdlib"/lib-dynload/*.so > /tmp/migration-ldd \
+    && ! grep -q 'not found' /tmp/migration-ldd \
+    && awk '/=> \// {print $3} /[[:space:]]+\/.*ld-linux[^[:space:]]+ / && !/=>/ {print $1}' \
+           /tmp/migration-ldd | sort -u | xargs -r cp -Lt /migration-tools/lib64/ \
+    && cp /migration-tools/lib64/ld-linux-*.so.* /migration-tools/ld.so
+COPY --chmod=755 migrate-dc4dfe0/helper.sh /migration-tools/shims/ip
+COPY clone_repos.py /migration-tools/agentbox-clone.py
+COPY configure_network.py /migration-tools/agentbox-network.py
+
+FROM ${SNAPSHOT_IMAGE}
+# No RUN instructions in this stage: the legacy filesystem is only executed
+# inside the isolated agent VM, not by the image builder.
+COPY --from=tools /migration-tools/ /.agentbox-dc4dfe0/
+COPY --chmod=755 migrate-dc4dfe0/helper.sh /usr/local/bin/agentbox-network
+COPY --chmod=755 migrate-dc4dfe0/helper.sh /usr/local/bin/agentbox-clone
+COPY --chmod=755 start.sh /start.sh
+ENTRYPOINT ["/start.sh"]

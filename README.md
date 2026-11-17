@@ -199,6 +199,47 @@ The default environment does not include any agent harness, so it can be used as
 
 Currently, for all provided agents you need to create your own preset (or modify the generated compose file) to configure them. Checkout [docs](docs/) for the specific agent harness setup guide.
 
+#### One-time migration from `dc4dfe0`
+
+Run this once per stopped persistent session. From the current Agentbox checkout:
+
+```bash
+export AGENTBOX_HOME="$PWD"
+export PATH="$AGENTBOX_HOME/bin:$PATH"
+agentbox build base network git proxy
+agentbox list --all                       # find the original session IDs
+agentbox stop --session OLD_ID
+agentbox-migrate-dc4dfe0 --session OLD_ID --new-name NEW_NAME
+agentbox start --session NEW_ID           # use the ID printed by the migration
+```
+
+The migration creates a new session and leaves the stopped original intact
+(including its old `agentbox-NAME` remote). Use the new `agentbox-NEW_ID`
+remote to fetch work from the replacement.
+It snapshots the stopped agent's entire container filesystem, preserving
+installed packages, system files, home, local commits, and uncommitted changes.
+It layers the new startup script and private helper tools on that snapshot
+without reinstalling or upgrading packages. The current proxy and Git sidecar
+run separately, and the replacement starts behind HEAD's network guard. The
+original bundle and published branches/tags are imported into the sidecar.
+
+Live processes and mounted filesystems are not included in the snapshot.
+The original project and explicit context binds are reused where applicable.
+Other custom agent mounts are rejected rather than silently dropped.
+Keep the generated `:migrated-dc4dfe0` image private: it contains the agent's
+data. Verify the replacement before removing the original. After removing
+the replacement, you can reclaim its image with `podman rmi IMAGE` using
+the image name printed by the migrator.
+
+For a legacy project bind mount, pass `--no-git` explicitly to retain the
+writable host workspace. Add `--use-passt` to enable [passt](#krun-with-passt-networking)
+on the replacement. On SELinux hosts, reusing private (`:Z`) bind mounts can
+relabel those host paths. If the original was never started, there is no
+filesystem to snapshot; build its current harness image or specify
+`--agent-image`. If you export
+`AGENTBOX_IMAGE_TAG`, install the [matching Git helper](#separate-stage-installation)
+before fetching or pushing from the host.
+
 ---
 
 ## Usage
