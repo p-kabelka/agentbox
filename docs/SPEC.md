@@ -161,7 +161,7 @@ Host fetching, review, and merging are manual. Ordinary exit/stop retains the Gi
 |-------|----------|
 | Setup | `build [HARNESS...] [--tag TAG]`, `update [HARNESS...] [--tag TAG]`, `preset list`, `preset edit <proxy\|agent> [name]`, `preset copy <src> <dst>` |
 | Project lifecycle | `init [DIR] [--preset <name>] [--name <name>] [--branch <branch>] [--no-git] [--persist] [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]`, `start [-n NAME \| -s ID] [-- CMD]`, `stop [-n NAME \| -s ID]`, `remove [-n NAME \| -s ID]` |
-| Git sharing | `mount [REPO] [--as NAME] [--branch REF] [-n NAME \| -s ID]` |
+| Git sharing | `mount [REPO] [--as NAME] [--branch REF] [-n NAME \| -s ID]`, `unmount NAME [-n NAME \| -s ID]` |
 | Monitoring | `logs [-n NAME \| -s ID]`, `web [-n NAME \| -s ID]` |
 | Egress control | `allow <host> [-r \| --regex] [-n NAME \| -s ID]`, `deny <host> [-r \| --regex] [-n NAME \| -s ID]` |
 | Proxy management | `proxy reload [-n NAME \| -s ID]`, `proxy restart [-n NAME \| -s ID]`, `proxy provider list [-n NAME \| -s ID] [--json]`, `proxy provider enable <provider> [<provider>...] [-n NAME \| -s ID]`, `proxy provider disable <provider> [<provider>...] [-n NAME \| -s ID]` |

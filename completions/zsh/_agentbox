@@ -205,6 +205,7 @@ _agentbox() {
         'update:Rebuild images without cache'
         'init:Initialize a session'
         'mount:Share a Git repository with a session'
+        'unmount:Delete a shared repository and its host remote'
         'start:Launch a session'
         'stop:Stop a session'
         'remove:Delete a session'
@@ -256,6 +257,10 @@ _agentbox() {
         '--as=[name the repository under /context/git; accepts org/repo]:repository name:' \
         '--branch=[select the shared git revision]:git revision:_agentbox_branches' \
         '1:repository directory:_files -/'
+      return ;;
+    agentbox/unmount)
+      _arguments -s -S "$help[@]" "$session_options[@]" \
+        '1:shared repository name:'
       return ;;
     agentbox/start)
       _arguments -s -S "$help[@]" "$session_options[@]" '*:::command: _agentbox_exec'

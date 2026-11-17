@@ -13,6 +13,7 @@ import tempfile
 import threading
 import types
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -79,7 +80,7 @@ os.execvp(args[0], args)
                   patch.object(clone, "WORKSPACE", self.root / "sandbox" / "workspace"),
                   patch.object(clone, "CONTEXT", self.root / "sandbox" / "context" / "git"),
                   patch.object(clone, "GIT_URL", (self.store / "repos").as_uri() + "/"),
-                  patch.object(clone, "shared_repositories", side_effect=lambda: json.loads((self.store / "manifest.json").read_text()))):
+                  patch.object(clone, "shared_repositories", side_effect=server.published_repositories)):
             p.start()
             self.addCleanup(p.stop)
         self.agentbox["generate_compose"](self.session, self.project, "feature", 9876, {}, {}, [])
@@ -94,11 +95,123 @@ os.execvp(args[0], args)
             server.initialize(*args[6:])
         elif args[:6] == ("exec", "-T", "git", "python3", "/app/server.py", "publish"):
             server.publish(*args[6:])
+        elif args[:6] == ("exec", "-T", "git", "python3", "/app/server.py", "remove"):
+            server.remove_repository(*args[6:])
         return subprocess.CompletedProcess(args, 0)
 
     def share(self, name="workspace", path=None, branch=""):
         with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
             self.agentbox["_mount_repository"](self.session, path or self.project, name, branch)
+
+    def unmount(self, name):
+        args = self.agentbox["build_parser"]().parse_args(["unmount", name, "--session", self.session.name])
+        with redirect_stdout(io.StringIO()):
+            self.agentbox["cmd_unmount"](args)
+
+    def test_concurrent_mounts_preserve_registrations_and_upload_in_parallel(self):
+        other = self.root / "other"
+        self.git(self.root, "clone", "-q", str(self.project), str(other))
+        uploading = threading.Barrier(2)
+        run = subprocess.run
+
+        def concurrent_push(args, **kwargs):
+            if args[0] == "git" and "push" in args:
+                # Both uploads must reach here without holding the metadata lock.
+                uploading.wait(timeout=10)
+            return run(args, **kwargs)
+
+        with (patch.object(subprocess, "run", side_effect=concurrent_push),
+              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
+              ThreadPoolExecutor(2) as pool):
+            futures = [pool.submit(self.agentbox["_mount_repository"], self.session, path, name)
+                       for path, name in ((self.project, "one"), (other, "two"))]
+            for future in futures:
+                future.result(timeout=20)
+        self.assertEqual(set(self.agentbox["_git_repositories"](self.session)), {"one", "two"})
+        self.assertEqual(server.published_repositories(), ["one", "two"])
+
+    def test_catalog_publication_uses_independent_markers(self):
+        for name in ("org/one", "org/two"):
+            server.initialize(name, "main", "sha1")
+            self.git(self.project, "push", str(server.repository(name)), "HEAD:main")
+        self.assertEqual(server.published_repositories(), [])
+        with ThreadPoolExecutor(2) as pool:
+            futures = [pool.submit(server.publish, name, "main") for name in ("org/one", "org/two")]
+            for future in futures:
+                future.result(timeout=10)
+        self.assertEqual(server.published_repositories(), ["org/one", "org/two"])
+        self.assertFalse((self.store / "manifest.json").exists())
+        server.remove_repository("org/one")
+        self.assertEqual(server.published_repositories(), ["org/two"])
+        self.assertFalse(server.repository("org/one").exists())
+
+    def test_unmount_deletes_only_selected_sidecar_repo_and_matching_host_remote(self):
+        self.share()
+        clone.clone_repositories()
+        (clone.WORKSPACE / "source").write_text("keep sandbox edits\n")
+        other = self.root / "other"
+        self.git(self.root, "clone", "-q", str(self.project), str(other))
+        self.share("org/library", other)
+        worktree = self.root / "worktree"
+        self.git(self.project, "worktree", "add", "-qb", "linked", str(worktree))
+        compose = (self.session / "compose.yaml").read_bytes()
+        self.unmount("workspace")
+        self.assertFalse(server.repository("workspace").exists())
+        self.assertEqual(server.published_repositories(), ["org/library"])
+        self.assertEqual(set(self.agentbox["_git_repositories"](self.session)), {"org/library"})
+        self.assertNotIn(self.remote, self.git(worktree, "remote").stdout.splitlines())
+        self.assertIn(self.remote, self.git(other, "remote").stdout.splitlines())
+        self.assertEqual((self.project / "source").read_text(), "host\n")
+        self.assertEqual((clone.WORKSPACE / "source").read_text(), "keep sandbox edits\n")
+        self.assertEqual((self.session / "compose.yaml").read_bytes(), compose)
+        # A name is reusable after unmounting, including from a different host repo.
+        self.unmount("org/library")
+        self.share("org/library", self.project)
+
+    def test_unmount_preserves_repointed_remotes_and_cleans_missing_sidecar_repositories(self):
+        self.share("org/library")
+        self.git(self.project, "remote", "set-url", self.remote, "https://example.invalid/repointed")
+        server.remove_repository("org/library")
+        self.unmount("org/library")
+        self.assertEqual(self.agentbox["_git_repositories"](self.session), {})
+        self.assertEqual(self.git(self.project, "remote", "get-url", self.remote).stdout.strip(),
+                         "https://example.invalid/repointed")
+
+    def test_unmount_rejects_unknown_or_invalid_names_without_side_effects(self):
+        self.share()
+        self.events.clear()
+        for name in ("missing", "../escape"):
+            with self.subTest(name=name), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                self.unmount(name)
+        self.assertEqual(self.events, [])
+        self.assertEqual(server.published_repositories(), ["workspace"])
+
+    def test_unmount_can_interrupt_upload_without_republishing_it(self):
+        uploaded, release = threading.Event(), threading.Event()
+        run = subprocess.run
+
+        def paused_push(args, **kwargs):
+            result = run(args, **kwargs)
+            if args[0] == "git" and "push" in args:
+                uploaded.set()
+                if not release.wait(10):
+                    raise RuntimeError("test did not release upload")
+            return result
+
+        with (patch.object(subprocess, "run", side_effect=paused_push),
+              redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()),
+              ThreadPoolExecutor(2) as pool):
+            mounting = pool.submit(self.agentbox["_mount_repository"], self.session, self.project, "library")
+            try:
+                self.assertTrue(uploaded.wait(5))
+                pool.submit(self.unmount, "library").result(timeout=5)
+            finally:
+                release.set()
+            with self.assertRaises(SystemExit):
+                mounting.result(timeout=5)
+        self.assertFalse(server.repository("library").exists())
+        self.assertEqual(server.published_repositories(), [])
+        self.assertEqual(self.agentbox["_git_repositories"](self.session), {})
 
     def assert_mount_allows_session_command(self, command):
         pushing, release, finished = threading.Event(), threading.Event(), threading.Event()
@@ -280,7 +393,7 @@ os.execvp(args[0], args)
         self.assertEqual(server.repository(name), self.store / "repos" / "org" / "repo.git")
         self.assertTrue(server.repository(name).is_dir())
         self.assertEqual(self.agentbox["_git_repositories"](self.session), {name: str(self.project / ".git")})
-        self.assertEqual(json.loads((self.store / "manifest.json").read_text()), [name])
+        self.assertEqual(server.published_repositories(), [name])
         url = self.agentbox["_git_url"](self.session, name)
         self.assertTrue(url.endswith("#org/repo"))
         self.assertEqual(self.agentbox["_parse_git_url"](url), (self.session, name))
@@ -314,7 +427,7 @@ os.execvp(args[0], args)
                 self.assertEqual((clone.CONTEXT / name / "source").read_text(), "host\n")
                 self.assertEqual(self.git(clone.CONTEXT / name, "remote", "get-url", "origin").stdout.strip(),
                                  clone.GIT_URL + name + ".git")
-        self.assertEqual(json.loads((self.store / "manifest.json").read_text()), sorted(names))
+        self.assertEqual(server.published_repositories(), sorted(names))
 
     def test_startup_clone_and_explicit_clone_of_later_shares_preserve_existing_work(self):
         self.share()
@@ -376,7 +489,7 @@ os.execvp(args[0], args)
         self.share()
         self.assertEqual(self.git(server.repository("workspace"), "symbolic-ref", "HEAD").stdout.strip(),
                          "refs/heads/snapshot-" + commit[:12])
-        self.assertEqual(json.loads((self.store / "manifest.json").read_text()), ["workspace"])
+        self.assertEqual(server.published_repositories(), ["workspace"])
         bare = self.root / "bare.git"
         self.git(self.root, "clone", "--bare", "-q", str(self.project), str(bare))
         self.share("bare", bare)
@@ -604,10 +717,11 @@ sys.exit(23)
         self.git(self.project, "checkout", "--orphan", "unrelated", "-q")
         self.git(self.project, "commit", "--allow-empty", "-qm", "unrelated")
         self.git(self.project, "branch", "-f", "main", "HEAD")
-        before = (self.store / "manifest.json").read_bytes()
+        marker = remote / "git-daemon-export-ok"
+        before = marker.stat().st_mtime_ns
         with self.assertRaises(subprocess.CalledProcessError):
             self.share(branch="main")
-        self.assertEqual((self.store / "manifest.json").read_bytes(), before)
+        self.assertEqual(marker.stat().st_mtime_ns, before)
 
     def test_path_validation_and_reserved_bind_mount_destination(self):
         for name in ("a", "a" * 100, "org/repo", "org/team/repo", "org.example/lib_name-2", "org/" + "a" * 96):
@@ -663,6 +777,11 @@ sys.exit(23)
             with self.subTest(path=path):
                 self.assertEqual(request(path)[0], 404)
         self.assertEqual(request("/manifest.json", "POST")[0], 501)
+        # Every request reflects current markers without a watcher or refresh.
+        self.unmount("workspace")
+        self.assertEqual(json.loads(request("/manifest.json")[1]), [])
+        self.share()
+        self.assertEqual(json.loads(request("/manifest.json")[1]), ["workspace"])
 
     def test_remove_cleans_all_registered_repos_but_preserves_repointed_remotes(self):
         self.share()

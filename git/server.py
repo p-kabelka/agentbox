@@ -1,12 +1,11 @@
 """Internal-only Git daemon and read-only repository catalog; management is exec-only."""
 
 import json
-import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,14 +20,10 @@ def repository(name):
     return STORE / "repos" / (name + ".git")
 
 
-def write_json(path, value):
-    fd, temporary = tempfile.mkstemp(prefix=".agentbox-", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream)
-        os.replace(temporary, path)
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+def published_repositories():
+    repos = STORE / "repos"
+    return sorted(marker.parent.relative_to(repos).as_posix().removesuffix(".git")
+                  for marker in repos.rglob("*.git/git-daemon-export-ok") if marker.is_file())
 
 
 def git(*args, **kwargs):
@@ -61,9 +56,14 @@ def publish(name, branch):
     git("-C", str(path), "rev-parse", "--verify", "refs/heads/" + branch + "^{commit}",
         stdout=subprocess.DEVNULL)
     git("-C", str(path), "symbolic-ref", "HEAD", "refs/heads/" + branch)
-    manifest = STORE / "manifest.json"
-    entries = json.loads(manifest.read_text()) if manifest.exists() else []
-    write_json(manifest, sorted(set(entries) | {name}))
+    (path / "git-daemon-export-ok").touch()
+
+
+def remove_repository(name):
+    path = repository(name)
+    (path / "git-daemon-export-ok").unlink(missing_ok=True)
+    if path.exists():
+        shutil.rmtree(path)
 
 
 class CatalogHandler(BaseHTTPRequestHandler):
@@ -72,8 +72,7 @@ class CatalogHandler(BaseHTTPRequestHandler):
         if self.path != "/manifest.json":
             self.send_error(404)
             return
-        path = STORE / "manifest.json"
-        payload = path.read_bytes() if path.exists() else b"[]"
+        payload = json.dumps(published_repositories()).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -91,7 +90,7 @@ def serve():
     threading.Thread(target=http.serve_forever, daemon=True).start()
     daemon = subprocess.Popen([
         "git", "-c", "core.hooksPath=/dev/null", "daemon", "--reuseaddr",
-        "--base-path=" + str(STORE / "repos"), "--export-all", "--enable=receive-pack",
+        "--base-path=" + str(STORE / "repos"), "--enable=receive-pack",
         "--forbid-override=receive-pack", "--listen=0.0.0.0", str(STORE / "repos"),
     ])
 
@@ -116,6 +115,8 @@ def main():
             initialize(*args[1:])
         elif len(args) == 3 and args[0] == "publish":
             publish(*args[1:])
+        elif len(args) == 2 and args[0] == "remove":
+            remove_repository(args[1])
         else:
             raise ValueError("Invalid Git management operation")
         return 0

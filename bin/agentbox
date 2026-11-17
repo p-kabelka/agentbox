@@ -231,11 +231,11 @@ def save_yaml(path: Path, cfg: dict) -> None:
         yaml.dump(cfg, f, default_flow_style=False, allow_unicode=True)
 
 
-def _atomic_json(path: Path, value) -> None:
-    fd, temporary = tempfile.mkstemp(prefix=".network-", dir=path.parent)
+def _atomic_json(path: Path, value, **kwargs) -> None:
+    fd, temporary = tempfile.mkstemp(prefix=".agentbox-", dir=path.parent)
     try:
         with os.fdopen(fd, "w") as stream:
-            json.dump(value, stream)
+            json.dump(value, stream, **kwargs)
             stream.write("\n")
         os.replace(temporary, path)
     finally:
@@ -613,14 +613,21 @@ def _git_repositories(session_dir: Path) -> dict[str, str]:
 
 
 def _save_git_repositories(session_dir: Path, repositories: dict[str, str]) -> None:
-    fd, temporary = tempfile.mkstemp(prefix=".git-repositories-", dir=session_dir)
+    _atomic_json(session_dir / "git-repositories.json", repositories, indent=2, sort_keys=True)
+
+
+@contextmanager
+def _git_metadata_lock(session_dir: Path) -> Iterator[None]:
+    """Protect repository registration/publication, never pack transfers."""
     try:
-        with os.fdopen(fd, "w") as stream:
-            json.dump(repositories, stream, indent=2, sort_keys=True)
-            stream.write("\n")
-        os.replace(temporary, session_dir / "git-repositories.json")
-    finally:
-        Path(temporary).unlink(missing_ok=True)
+        lock = (session_dir / ".git-repositories.lock").open("a")
+    except FileNotFoundError:
+        die("session removed while waiting for Git metadata")
+    with lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX)
+        if not (session_dir / "compose.yaml").is_file():
+            die("session removed while waiting for Git metadata")
+        yield
 
 
 def _git_remote_name(session_dir: Path) -> str:
@@ -727,36 +734,40 @@ def _mount_repository(session_dir: Path, path: Path, name: str | None = None, re
     """Share without the lifecycle lock; publish the catalog only after pushing."""
     repository = _repository_revision(path, revision)
     path, git_dir, branch, commit, object_format = repository
-    entries = _git_repositories(session_dir)
-    shared_name = next((key for key, value in entries.items() if value == str(git_dir)), None)
-    if name is None:
-        name = shared_name or path.name.removesuffix(".git")
-        if name == "workspace" and shared_name is None:
-            die("'workspace' is reserved for agentbox init; choose --as NAME")
-    if shared_name and shared_name != name:
-        die(f"repository is already shared as '{shared_name}'; use git push {_git_remote_name(session_dir)} to publish other branches")
-    if not GIT_REPOSITORY_NAME.fullmatch(name):
-        die("invalid repository name — use 1–100 characters in slash-separated components of lowercase letters, digits, dots, underscores, or hyphens; start each component with a letter or digit")
-    if name in entries and entries[name] != str(git_dir):
-        die(f"repository name '{name}' is already shared from {entries[name]}")
-    remote = _git_remote_name(session_dir)
-    url = _git_url(session_dir, name)
-    previous = subprocess.run(["git", "-C", str(path), "remote", "get-url", remote],
-                              capture_output=True, text=True)
-    if previous.returncode == 0 and previous.stdout.strip() != url:
-        die(f"remote '{remote}' already points elsewhere; rename it before sharing this repository")
+    with _git_metadata_lock(session_dir):
+        entries = _git_repositories(session_dir)
+        shared_name = next((key for key, value in entries.items() if value == str(git_dir)), None)
+        if name is None:
+            name = shared_name or path.name.removesuffix(".git")
+            if name == "workspace" and shared_name is None:
+                die("'workspace' is reserved for agentbox init; choose --as NAME")
+        if shared_name and shared_name != name:
+            die(f"repository is already shared as '{shared_name}'; use git push {_git_remote_name(session_dir)} to publish other branches")
+        if not GIT_REPOSITORY_NAME.fullmatch(name):
+            die("invalid repository name — use 1–100 characters in slash-separated components of lowercase letters, digits, dots, underscores, or hyphens; start each component with a letter or digit")
+        if name in entries and entries[name] != str(git_dir):
+            die(f"repository name '{name}' is already shared from {entries[name]}")
+        remote = _git_remote_name(session_dir)
+        url = _git_url(session_dir, name)
+        previous = subprocess.run(["git", "-C", str(path), "remote", "get-url", remote],
+                                  capture_output=True, text=True)
+        if previous.returncode == 0 and previous.stdout.strip() != url:
+            die(f"remote '{remote}' already points elsewhere; rename it before sharing this repository")
 
-    _start_git(session_dir)
-    compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "init", name, branch,
-            object_format, check=True)
-    if previous.returncode:
-        subprocess.run(["git", "-C", str(path), "remote", "add", remote, url], check=True)
-    entries[name] = str(git_dir)
-    _save_git_repositories(session_dir, entries)
+        _start_git(session_dir)
+        compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "init", name, branch,
+                object_format, check=True)
+        if previous.returncode:
+            subprocess.run(["git", "-C", str(path), "remote", "add", remote, url], check=True)
+        entries[name] = str(git_dir)
+        _save_git_repositories(session_dir, entries)
     # No force or mirror push: never overwrite commits already published by an agent.
     subprocess.run(["git", "-C", str(path), "-c", "core.hooksPath=/dev/null", "push", "--follow-tags",
                     remote, f"{commit}:refs/heads/{branch}"], check=True, env=_git_environment(session_dir))
-    compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "publish", name, branch, check=True)
+    with _git_metadata_lock(session_dir):
+        if _git_repositories(session_dir).get(name) != str(git_dir):
+            die(f"repository '{name}' was unmounted during upload")
+        compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "publish", name, branch, check=True)
     destination = "/workspace" if name == "workspace" else f"/context/git/{name}"
     print(f"==> Shared {path} for {destination} (branch: {branch}).")
     print(f"==> Cloned at next agent start. In a running sandbox: agentbox-clone {name}")
@@ -772,6 +783,35 @@ def cmd_mount(args) -> None:
     if args.repo_name == "workspace":
         die("'workspace' is reserved for the repository shared by agentbox init; choose --as NAME")
     _mount_repository(session_dir, path, args.repo_name, args.branch)
+
+
+def _remove_git_remote(session_dir: Path, repository: str, git_dir: str) -> None:
+    remote = _git_remote_name(session_dir)
+    git = ["git", "--git-dir", git_dir, "remote"]
+    current = subprocess.run([*git, "get-url", remote], capture_output=True, text=True)
+    if current.returncode:
+        return
+    try:
+        if _parse_git_url(current.stdout.strip()) != (session_dir.resolve(), repository):
+            return
+    except ValueError:
+        return
+    subprocess.run([*git, "remove", remote], capture_output=True, check=True)
+
+
+def cmd_unmount(args) -> None:
+    session_dir, _ = resolve_session(args)
+    with _git_metadata_lock(session_dir):
+        entries = _git_repositories(session_dir)
+        if args.repo_name not in entries:
+            die(f"repository '{args.repo_name}' is not shared in this session")
+        _start_git(session_dir)
+        compose(session_dir, "exec", "-T", "git", "python3", "/app/server.py", "remove",
+                args.repo_name, check=True)
+        _remove_git_remote(session_dir, args.repo_name, entries[args.repo_name])
+        del entries[args.repo_name]
+        _save_git_repositories(session_dir, entries)
+    print(f"==> Unmounted '{args.repo_name}'; its sidecar repository was deleted. Existing sandbox clones are unchanged.")
 
 
 def _prepare_agent_network(session_dir: Path) -> None:
@@ -1176,21 +1216,11 @@ def cmd_remove(args) -> None:
     meta = read_compose_metadata(session_dir)
     name = meta["name"]
 
-    with _secret_sync_lock(session_dir):
+    with _secret_sync_lock(session_dir), _git_metadata_lock(session_dir):
         entries = _git_repositories(session_dir)
         compose(session_dir, "down", "-v", check=True)
-        remote = _git_remote_name(session_dir)
         for repository, git_dir in entries.items():
-            git = ["git", "--git-dir", git_dir, "remote"]
-            current = subprocess.run([*git, "get-url", remote], capture_output=True, text=True)
-            if current.returncode:
-                continue
-            try:
-                if _parse_git_url(current.stdout.strip()) != (session_dir.resolve(), repository):
-                    continue
-            except ValueError:
-                continue
-            subprocess.run([*git, "remove", remote], capture_output=True)
+            _remove_git_remote(session_dir, repository, git_dir)
         shutil.rmtree(session_dir, ignore_errors=True)
 
     print(f"Removed session '{name}'.")
@@ -1462,6 +1492,10 @@ def build_parser() -> argparse.ArgumentParser:
     mount_subcommand.add_argument("--as", dest="repo_name", metavar="NAME", help="Clone into /context/git/NAME; accepts org/repo (default: repository basename)")
     mount_subcommand.add_argument("--branch", default="", metavar="REF", help="Branch, tag, or commit to share (default: HEAD)")
 
+    unmount_subcommand = subparser_with_name(subcommand.add_parser(
+        "unmount", help="Delete a shared sidecar repository and remove its registered host remote"))
+    unmount_subcommand.add_argument("repo_name", metavar="NAME", help="Shared repository name, e.g. workspace or org/repo")
+
     start_subcommand = subcommand.add_parser("start", help="Launch a agentbox session (optionally override the command)")
     subparser_with_name(start_subcommand).add_argument("exec_cmd", nargs="*", metavar="CMD", help="Command to run instead of AGENT_HARNESS (use -- to separate)")
 
@@ -1531,6 +1565,7 @@ def main() -> None:
         "update": cmd_update,
         "init": cmd_init,
         "mount": cmd_mount,
+        "unmount": cmd_unmount,
         "start": cmd_start,
         "stop": cmd_stop,
         "logs": cmd_logs,

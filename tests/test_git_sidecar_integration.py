@@ -61,7 +61,8 @@ git push
         self.assertIn(self.remote, self.git(worktree, "remote").stdout.splitlines())
         self.assertEqual(set(self.repositories()), {"workspace", "org/library"})
         sidecar = self.config()["services"]["git"]["container_name"]
-        manifest = self.run_command(["podman", "exec", sidecar, "cat", "/srv/git/manifest.json"])
+        manifest = self.run_command(["podman", "exec", sidecar, "python3", "-c",
+                                     "import urllib.request; print(urllib.request.urlopen('http://localhost:8083/manifest.json').read().decode())"])
         self.assertEqual(json.loads(manifest.stdout), ["org/library", "workspace"])
         registry = (self.session / "git-repositories.json").read_bytes()
         self.cli("stop", "--session", self.session_id)
@@ -139,6 +140,8 @@ git push
     def test_git_daemon_direct_transport_and_hook_isolation(self):
         self.initialize()
         sidecar = self.config()["services"]["git"]["container_name"]
+        self.run_command(["podman", "exec", sidecar, "python3", "/app/server.py",
+                          "init", "unpublished", "main", "sha1"])
         # Even an administrator-created server hook is ignored by Git services.
         self.run_command(["podman", "exec", sidecar, "python3", "-c", """
 from pathlib import Path
@@ -148,6 +151,7 @@ hook.write_text('#!/bin/sh\\nexit 1\\n')
 hook.chmod(0o755)
 """])
         self.cli("start", "--session", self.session_id, "--", "bash", "-ec", """
+if git ls-remote git://git/unpublished.git; then exit 4; fi
 git clone git://git/workspace.git /workspace/project
 cd /workspace/project
 git config user.name Agent
@@ -166,6 +170,45 @@ git push origin --delete temporary
         self.git(self.project, "fetch", self.remote)
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/direct-work:source").stdout, "direct\n")
         self.assertEqual((self.project / "source").read_text(), "host\n")
+
+    def test_unmount_reclaims_sidecar_space_and_preserves_retained_sandbox_clone(self):
+        self.initialize("--persist")
+        reference = self.root / "reference"
+        self.git(self.project, "clone", "-q", str(self.project), str(reference))
+        (reference / "bulk").write_bytes(os.urandom(1024 * 1024))
+        self.git(reference, "add", "bulk")
+        self.git(reference, "commit", "-qm", "reference payload")
+        self.cli("mount", str(reference), "--as", "org/library", "--session", self.session_id)
+        sidecar = self.config()["services"]["git"]["container_name"]
+        before = int(self.run_command(["podman", "exec", sidecar, "du", "-sb", "/srv/git"]).stdout.split()[0])
+        script = """
+if [ -e /root/resumed ]; then
+    test "$(cat /context/git/org/library/uncommitted)" = keep
+    test "$(wc -c < /context/git/org/library/bulk)" = 1048576
+    if git ls-remote git://git/org/library.git; then exit 3; fi
+    python3 -c "import json, urllib.request; assert json.load(urllib.request.urlopen('http://git:8083/manifest.json')) == ['workspace']"
+else
+    touch /root/resumed
+    echo keep > /context/git/org/library/uncommitted
+fi
+"""
+        self.cli("start", "--session", self.session_id, "--", "bash", "-ec", script)
+        compose = (self.session / "compose.yaml").read_bytes()
+        agent_name = self.config()["services"]["agent"]["container_name"]
+        agent_id = self.run_command(["podman", "inspect", "--format", "{{.Id}}", agent_name]).stdout
+        self.cli("unmount", "org/library", "--session", self.session_id)
+        self.assertEqual(set(self.repositories()), {"workspace"})
+        self.assertNotIn(self.remote, self.git(reference, "remote").stdout.splitlines())
+        self.assertIn(self.remote, self.git(self.project, "remote").stdout.splitlines())
+        self.assertEqual((self.session / "compose.yaml").read_bytes(), compose)
+        self.assertNotEqual(self.run_command(["podman", "exec", sidecar, "test", "-e",
+                                              "/srv/git/repos/org/library.git"], check=False).returncode, 0)
+        after = int(self.run_command(["podman", "exec", sidecar, "du", "-sb", "/srv/git"]).stdout.split()[0])
+        self.assertGreater(before - after, 1024 * 1024)
+        self.git(self.project, "fetch", self.remote)
+        self.cli("start", "--session", self.session_id)
+        self.assertEqual(self.run_command(["podman", "inspect", "--format", "{{.Id}}", agent_name]).stdout, agent_id)
+        self.assertEqual((reference / "bulk").stat().st_size, 1024 * 1024)
 
     def test_manual_clone_into_retained_agent_and_restart_preserves_work(self):
         self.initialize("--persist")

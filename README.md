@@ -210,6 +210,7 @@ agentbox init   [--name NAME] [--preset NAME] [--branch BRANCH] [--no-git] [--pe
                 [--ro-mount SRC[:DST]] [--rw-mount SRC[:DST]] [--start]
 agentbox start  [--name NAME] [-- CMD]   # launch agent harness (or CMD, e.g. -- bash, -- tmux)
 agentbox mount  [REPO] [--as REPO_NAME] [--branch REF] [--session SESSION_ID]
+agentbox unmount REPO_NAME [--session SESSION_ID] # delete the sidecar repo and its host remote
 agentbox stop   [--name NAME]            # stop containers
 agentbox remove [--name NAME]            # delete session, sidecar repositories, and registered remotes
 ```
@@ -332,18 +333,39 @@ The helper never updates existing clones or overwrites nonempty directories.
 To update an existing clone, use normal Git explicitly, for example
 `git -C /context/git/shared-lib pull --ff-only`.
 
+To stop sharing a repository and reclaim its sidecar storage:
+
+```bash
+agentbox unmount org/repo --session SESSION_ID
+```
+
+This deletes that bare repository from the session's Git volume and removes its
+registered host remote (unless you repointed it elsewhere). Fetch and retain any
+sidecar-only commits you want to keep in local branches or tags first; removing
+the remote also removes its remote-tracking refs. Host working files and existing sandbox clones,
+including uncommitted changes, are left untouched. `workspace` can also be
+unmounted. Unmounting may interrupt an active transfer; already-cloned content is
+not revoked.
+
+Publication uses a `git-daemon-export-ok` marker in each bare repository, created
+only after the initial push succeeds. Each `/manifest.json` request lists the
+currently marked repositories; no manifest file, watcher, or polling is needed.
+The Git daemon serves only marked repositories.
+
 The command adds the host Git remote `agentbox-<full-session-id>` and pushes the current committed branch (or `--branch REF`) and reachable annotated tags. Git worktrees share that same remote and sidecar repository; mounting from another worktree reuses the existing share name. Push additional branches manually from any worktree. Bare and SHA-256 repositories are also supported. Uncommitted/untracked files, submodule contents, and Git LFS objects are not transferred automatically.
 
 Inside the sandbox, commit and `git push` in either `/workspace` or a shared repository. On the host, `git fetch <printed-remote>` and review/merge normally. Later pushes are incremental. Existing sandbox working trees are **never** automatically pulled, reset, or switched; use `git pull` there when you want host updates. `init`/`mount` never force-push over existing work; manual Git operations retain normal push/force-push/delete semantics inside the isolated sidecar.
 
 Host push/fetch uses `git-remote-agentbox` through Podman stdin/stdout, not an exposed Git port. Keep it on `PATH` alongside `agentbox`. A host Git operation starts the Git sidecar if necessary, even after `stop`, without launching the agent or proxy, and leaves that sidecar running afterward. Session removal deletes all sidecar repositories and removes their registered host remotes; fetch anything you need to keep first.
 
-Git sharing and transfers do not take the proxy/lifecycle lock. Large pushes do
+Git sharing and transfers do not take the proxy/lifecycle lock. A separate
+Git metadata lock protects registration and publication, but is released during
+uploads, so concurrent repositories can upload in parallel. Large pushes do
 not delay `proxy reload`, `stop`, or `remove`; stopping/removing may interrupt a
 transfer instead. An interrupted share may need rerunning, or `remote-cleanup`
 after removal to remove a leftover host remote.
 
-Repository registrations live in the session's `git-repositories.json`, independently of Compose configuration. Bare repositories live in the `git-data` named volume, which survives ordinary exit/stop in both modes. Ephemeral agents clone them again on the next start; persistent agents retain their existing clones and uncommitted work. Only `remove` deletes the volume. Unpushed changes in an ephemeral agent are lost when it exits.
+Repository registrations live in the session's `git-repositories.json`, independently of Compose configuration. Bare repositories live in the `git-data` named volume, which survives ordinary exit/stop in both modes. Ephemeral agents clone them again on the next start; persistent agents retain their existing clones and uncommitted work. `unmount` deletes an individual repository; only `remove` deletes the volume. Repository data does not accumulate in the sidecar's container layers. Unpushed changes in an ephemeral agent are lost when it exits.
 
 #### Retrieving a sandbox-created project
 

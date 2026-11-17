@@ -43,6 +43,7 @@ recognize both tagged and untagged remotes regardless of the current image tag.
 ```text
 agentbox init [DIR] [--branch REF] [--no-git] ...
 agentbox mount [REPO] [--as NAME] [--branch REF] [-n SESSION_NAME | -s SESSION_ID]
+agentbox unmount NAME [-n SESSION_NAME | -s SESSION_ID]
 ```
 
 `init` shares the main repository as `workspace`, cloned at `/workspace`, and
@@ -71,8 +72,10 @@ SHA-1/SHA-256 object formats are supported. Submodule repositories and LFS paylo
 are not implicitly synchronized.
 
 The host creates the bare repository through exec, registers the host remote and
-share, pushes, and only then publishes the repository in the atomic
-repository catalog. A failed push never advertises an empty or incomplete clone;
+share, pushes, and only then creates its `git-daemon-export-ok` publication marker.
+Each GET of `/manifest.json` enumerates those markers and returns repository names;
+there is no stored manifest, watcher, or periodic scan. The daemon serves only
+marked repositories, including for explicit named clones. A failed push never advertises an empty or incomplete clone;
 rerunning the command retries it. Neither host nor agent history is force-reset.
 
 The Git daemon accepts pushes only to existing bare repositories; sandbox clients
@@ -122,7 +125,11 @@ packs therefore do not delay `proxy reload`, `stop`, or `remove`. Teardown may
 interrupt any Git operation rather than waiting for it. Sharing is not a
 transaction with teardown: interruption can leave an unadvertised repository or
 a stale host remote. Retry an interrupted share after a stop; after removal, use
-`remote-cleanup` if needed. Concurrent shares are not serialized either.
+`remote-cleanup` if needed. A separate `.git-repositories.lock` serializes
+registration, publication, unmount, and session removal metadata operations.
+The lock covers the registry read-modify-replace operation, not pack uploads;
+different repositories can upload concurrently. Publication rechecks registration
+so an interrupted upload cannot republish an unmounted repository.
 Internal pushes reuse the already-started sidecar rather than restarting it if
 teardown interrupts publication. All service startup uses `--no-recreate` so user
 Compose edits cannot destroy a running/persistent agent.
@@ -138,6 +145,23 @@ is required. `remove` alone deletes the named volumes and matching registered
 remotes in every shared host repository; repointed remotes are not removed.
 Fetch wanted commits before removal, especially for a running session.
 
+`unmount NAME` deletes only that repository from `/srv/git/repos`, including its
+publication marker and Git objects, removes its host registration, and removes
+the matching session remote from the registered Git common directory. Linked
+worktrees therefore lose the same shared remote; repointed remotes are preserved.
+It accepts `workspace` as well as reference names and starts only the Git sidecar
+if necessary. Compose configuration and existing host/sandbox working trees are
+unchanged. The name can be reused in a later mount.
+
+Unmounting reclaims the repository's named-volume storage, not just visibility.
+The sidecar has a read-only root filesystem, so mounting/unmounting does not
+accumulate repository copies in container layers. Active transfers may be
+interrupted, and open files can delay reclamation until their processes exit.
+Existing sandbox clones remain accessible locally; their content cannot be
+revoked, and they keep their own storage. Fetch wanted sidecar-only commits and
+retain them in local branches/tags before unmounting: removing the host remote
+also removes its remote-tracking refs.
+
 `--no-git` explicitly selects the existing writable host bind mount at `/workspace`
 instead of Git isolation. Without it, a non-Git project gets an empty local workspace.
 `--ro-mount`, `--rw-mount`, OAuth volumes, and custom certificate mounts remain
@@ -149,7 +173,8 @@ the sidecar does not transport configuration or credentials.
 `tests/test_git_sidecar.py` exercises real Git packs/clones, including detached
 HEADs, worktrees, bare/SHA-256 repos, collision handling, catalog validation,
 one-shot/manual cloning, bounded startup retries, interruptible transfers,
-manual fetching, sandbox-created project retrieval, stable Compose configuration, and worktree-shared remotes,
+manual fetching, sandbox-created project retrieval, stable Compose configuration,
+worktree-shared remotes, concurrent uploads, publication markers, and unmount/remote cleanup,
 substituting only the Podman boundary.
 
 After building `base network git proxy`, run real containers with

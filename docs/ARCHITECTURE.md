@@ -263,6 +263,13 @@ so stage harnesses extend the stage base rather than the latest base.
 
 `bin/git-remote-agentbox` implements Git's `connect` helper protocol. Host remotes identify the session with a file URI but stream Git pack operations through `podman exec -i`, never through a local bare repository or published TCP endpoint. A normal host fetch can start only the sidecar after teardown. See [SPEC-git-sidecar.md](SPEC-git-sidecar.md) for the publication and synchronization contract.
 
+Publication creates each repository's standard `git-daemon-export-ok` marker;
+the daemon requires it and the catalog enumerates markers only when requested.
+There is no mutable catalog file or background scanner. A separate host metadata
+lock protects registration and publication, but never pack uploads. `unmount`
+deletes the selected bare repository from the volume and its matching host remote,
+without deleting existing sandbox clones.
+
 ### 4.5 Compose Configuration
 
 `compose-base.yaml` defines two networks (`agent-net` internal, `proxy-net` external), two named volumes (`proxy-ca`, `git-data`), and service definitions for the proxy, Git sidecar, and agent.
