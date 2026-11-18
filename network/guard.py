@@ -19,6 +19,12 @@ def rules(endpoints):
         if address.is_unspecified or address.is_loopback or address.is_multicast:
             raise ValueError(f"invalid {service} address")
         allowed.append(f"ip daddr {address} tcp dport {ports} accept")
+    # krun's TSI backend uses sockets in this private namespace even for
+    # guest localhost. Require the loopback interface AND a loopback address.
+    allowed.extend((
+        'oifname "lo" ip daddr 127.0.0.0/8 meta l4proto tcp accept',
+        'oifname "lo" ip6 daddr ::1 meta l4proto tcp accept',
+    ))
     return "\n".join(allowed)
 
 

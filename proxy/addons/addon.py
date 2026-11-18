@@ -1,5 +1,5 @@
 # mitmproxy addon: allowlist enforcement, credential injection, and JSON access logging.
-import asyncio, dataclasses, json, logging, os, re, sys, time
+import asyncio, dataclasses, json, logging, os, re, shlex, sys, time
 import yaml
 from mitmproxy import http
 
@@ -167,8 +167,11 @@ def _access_log_entry(flow: http.HTTPFlow) -> dict:
 
 def _deny_request(flow: http.HTTPFlow) -> None:
     host = flow.request.host
+    port = flow.request.port
+    target = shlex.quote(f"{host}:{port}" if port != 443 or ":" in host else host)
     flow.response = http.Response.make(
-        403, f"Host '{host}' not allowed.\nTo allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {host}\n",
+        403, f"Host '{host}' not allowed on port {port}.\n"
+        f"To allow it, run the following command outside of the sandbox: agentbox allow{_name_flag} {target}\n",
         {"Content-Type": "text/plain"},
     )
     log.info(_blocked_request_entry(flow))

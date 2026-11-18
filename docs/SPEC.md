@@ -72,11 +72,12 @@ A developer runs an agent for the first time on a project and wants to observe i
 The agent container has no default gateway to the internet. It is attached only to an internal Podman network. The proxy container is attached to both the internal network and an external network with internet connectivity.
 
 The agent and trusted one-shot guard join a minimal holder's network namespace. Before launch, the host
-installs an nftables default-deny policy there allowing only IPv4 TCP to the
-session proxy on port 8080 and Git sidecar on ports 9418 and 8083. Proxy port
+installs an nftables default-deny policy there allowing TCP on the namespace's
+own loopback and IPv4 TCP to the session proxy on port 8080 and Git sidecar on
+ports 9418 and 8083. Proxy port
 9090 is additionally allowed when Vertex metadata is enabled. Proxy management
-and reload ports, host services on any address, other containers, IPv6, UDP,
-and direct DNS are not allowed destinations.
+and reload ports, host services on any address, other containers, non-loopback
+IPv6, UDP, and direct DNS are not allowed destinations.
 
 Only the short-lived guard has `NET_ADMIN`; the agent drops `NET_ADMIN` and `NET_RAW`
 outside the microVM. Guest root, changed guest routes, and a custom agent

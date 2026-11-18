@@ -13,9 +13,10 @@ Each session has a **proxy** (holds real credentials and controls internet acces
 The agent uses a network namespace held by a minimal service outside the
 microVM. Before every launch, a one-shot **network guard** joins the holder's
 current namespace, installs a default-deny firewall, and exits. The firewall permits
-only TCP to `proxy:8080` and `git:9418`/`git:8083`, plus `proxy:9090` when Vertex metadata is enabled.
+TCP within the session's own loopback and TCP to `proxy:8080` and `git:9418`/`git:8083`,
+plus `proxy:9090` when Vertex metadata is enabled.
 Proxy management/reload ports, host services, other containers, direct DNS,
-UDP, and IPv6 egress are blocked. `proxy` and `git` resolve through generated
+UDP, and non-loopback IPv6 are blocked. `proxy` and `git` resolve through generated
 hosts entries; external names are resolved by the HTTP proxy. Root inside the
 guest cannot alter the outer firewall. Only the short-lived installer has
 `NET_ADMIN`, scoped to that container network namespace—not Podman's
@@ -201,6 +202,11 @@ update Agentbox and run `agentbox build proxy` with the session's image tag.
 The next `agentbox start` replaces only the proxy if it still uses the old
 directory mount. The retained agent and Git volume are not recreated.
 
+If OpenCode v2 times out waiting for its background service with krun TSI,
+update Agentbox and run `agentbox build network` with the session's image tag.
+The next `agentbox start` or `agentbox proxy reload` on a running session
+installs the updated loopback rule without replacing the agent.
+
 The default environment does not include any agent harness, so it can be used as a temporary sandbox.
 
 Currently, for all provided agents you need to create your own preset (or modify the generated compose file) to configure them. Checkout [docs](docs/) for the specific agent harness setup guide.
@@ -290,7 +296,9 @@ agentbox deny  -r '.*\.example\.com'   # remove that exact regex rule
 ```
 
 Hosts are escaped by default. Use `-r` / `--regex` to preserve the host regex
-verbatim. Both modes support a `:port` suffix (default: 443).
+verbatim. Both modes support a `:port` suffix (default: 443). A hostname regex
+without an explicit `port` still only matches 443; use `curl https://HOST` to
+test HTTPS or allow `HOST:80` explicitly for plain HTTP.
 
 To force HTTP/1.1 upstream for a destination, add the optional top-level
 `force_http1_hosts` list, separate from request policies:

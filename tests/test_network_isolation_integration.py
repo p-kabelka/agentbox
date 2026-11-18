@@ -21,6 +21,46 @@ from integration_support import AgentboxIntegrationTest, ROOT
 
 
 class NetworkIsolationIntegrationTest(AgentboxIntegrationTest):
+    def test_session_local_tcp_works_without_reaching_host_loopback(self):
+        self.initialize()
+        with socket.socket() as host:
+            host.bind(("127.0.0.1", 0))
+            host.listen()
+            host_port = host.getsockname()[1]
+            script = f"""
+import http.client, http.server, socket, threading
+port = {host_port}
+try:
+    client = socket.create_connection(('127.0.0.1', port), timeout=2)
+except OSError:
+    pass
+else:
+    client.close()
+    raise AssertionError('reached a host-only listener')
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b'local')
+
+# Use an explicit port as OpenCode's managed service does. Some TSI versions
+# do not report the bound ephemeral port to the guest for bind(port=0).
+with http.server.HTTPServer(('127.0.0.1', port), Handler) as server:
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    client = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
+    try:
+        client.request('GET', '/')
+        response = client.getresponse()
+        assert response.status == 200 and response.read() == b'local'
+    finally:
+        client.close()
+        server.shutdown()
+        worker.join()
+"""
+            self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
+
     def test_legacy_proxy_mount_is_repaired_without_recreating_a_retained_agent(self):
         cfg = self.initialize("--persist")
         self.cli("start", "--session", self.session_id, "--", "bash", "-ec",

@@ -120,11 +120,13 @@ Two Podman networks are created per agentbox:
 The agent and one-shot guard join a minimal holder's network namespace instead of attaching
 independently to `agent-net`. Only the installer has `NET_ADMIN`; the holder drops all
 capabilities, and the agent explicitly drops both
-`NET_ADMIN` and `NET_RAW` outside the VM. Its IPv4 TCP allowlist is the proxy's
-internal address on 8080 (and 9090 for enabled Vertex metadata), plus the Git
-sidecar's internal address on 9418 and 8083. All other egress, including IPv6 and
-UDP, is denied. Local kernel rejection packets are allowed only to deliver
-errors inside the guarded namespace. This is not access to host loopback.
+`NET_ADMIN` and `NET_RAW` outside the VM. Its IPv4 TCP egress allowlist is the
+proxy's internal address on 8080 (and 9090 for enabled Vertex metadata), plus the
+Git sidecar's internal address on 9418 and 8083. Local TCP to loopback addresses
+via `lo` is allowed so applications can reach their own listeners with krun TSI.
+This is the holder's private namespace, not host loopback. Non-loopback IPv6
+and other egress, including UDP, are denied. Local kernel rejection packets
+can deliver errors inside the guarded namespace.
 
 The host refreshes the policy and read-only address metadata before each agent
 boot. Names for `proxy` and `git` come from that metadata, so the agent does not

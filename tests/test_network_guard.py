@@ -22,10 +22,12 @@ class NetworkGuardTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "native crun"):
                 guard.main()
 
-    def test_only_required_endpoint_ports_are_allowed(self):
+    def test_only_required_endpoint_ports_and_tcp_loopback_are_allowed(self):
         rules = guard.rules({"proxy": "10.123.0.2", "git": "10.123.0.3"})
         self.assertEqual(rules, "ip daddr 10.123.0.2 tcp dport 8080 accept\n"
-                                "ip daddr 10.123.0.3 tcp dport { 9418, 8083 } accept")
+                                "ip daddr 10.123.0.3 tcp dport { 9418, 8083 } accept\n"
+                                'oifname "lo" ip daddr 127.0.0.0/8 meta l4proto tcp accept\n'
+                                'oifname "lo" ip6 daddr ::1 meta l4proto tcp accept')
         self.assertIn("{ 8080, 9090 }", guard.rules(
             {"proxy": "10.123.0.2", "git": "10.123.0.3", "vertex_metadata": True}))
         for endpoints in ({}, {"proxy": "127.0.0.1", "git": "10.123.0.3"},
@@ -93,7 +95,7 @@ for address in ('10.123.0.1/24', '10.123.0.2/24', '10.123.0.3/24', 'fd00::2/64')
     ip('address', 'add', address, 'dev', 'lo')
 listeners = []
 for family, address, ports in ((socket.AF_INET, '0.0.0.0', (8080,8081,8082,8083,9090,9418)),
-                                (socket.AF_INET6, 'fd00::2', (8080,))):
+                                (socket.AF_INET6, '::', (8080,))):
     for port in ports:
         s = socket.socket(family)
         if family == socket.AF_INET6:
@@ -113,17 +115,19 @@ def install():
     # reply-direction packets; new connections still exercise the real policy.
     guard.install(guard.rules(endpoints) + '\\noifname "lo" ct direction reply accept')
 install()
-for address, port in (('10.123.0.2',8080), ('10.123.0.3',9418), ('10.123.0.3',8083)):
+for address, port in (('10.123.0.2',8080), ('10.123.0.3',9418), ('10.123.0.3',8083),
+                      ('127.0.0.1',8080), ('::1',8080)):
     assert connected(address,port), (address,port)
 for address, port in (('10.123.0.2',8081), ('10.123.0.2',8082), ('10.123.0.2',9090),
-                       ('10.123.0.3',8080), ('10.123.0.1',8080), ('fd00::2',8080),
-                       ('::ffff:10.123.0.1',8080), ('127.0.0.1',8080)):
+                        ('10.123.0.3',8080), ('10.123.0.1',8080), ('fd00::2',8080),
+                        ('::ffff:10.123.0.1',8080)):
     assert not connected(address,port), (address,port)
 endpoints['vertex_metadata'] = True
 install()
 assert connected('10.123.0.2',9090)
 guard.install()
 assert not connected('10.123.0.2',8080), 'Deny-all must replace an existing allowlist'
+assert not connected('127.0.0.1',8080), 'Deny-all must replace loopback rules too'
 """
         result = subprocess.run([*command, sys.executable, "-c", script, str(ROOT / "network" / "guard.py")],
                                 capture_output=True, text=True, timeout=20)

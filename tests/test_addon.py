@@ -93,6 +93,20 @@ class RequestHostPolicyTest(unittest.TestCase):
         self.assertIsNone(flow.response)
         self.assertNotIn("agentbox_blocked", flow.metadata)
 
+    def test_host_wildcard_defaults_to_443_and_http_denial_suggests_port_80(self):
+        self.addon._apply_candidate(self.addon._build_candidate({
+            "extra_request_policy": [{"host": r"^.*$"}],
+        }))
+        flow = make_flow()
+        self.addon.requestheaders(flow)
+        self.assertIsNone(flow.response)
+
+        flow.request.port = 80
+        self.addon.requestheaders(flow)
+        self.assertEqual(flow.response.status_code, 403)
+        self.assertIn("not allowed on port 80", flow.response.content)
+        self.assertIn(" denied.example.com:80\n", flow.response.content)
+
 
 class DeniedRequestLoggingTest(unittest.TestCase):
     def setUp(self):
