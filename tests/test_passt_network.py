@@ -11,7 +11,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stderr
 from pathlib import Path
-from unittest.mock import Mock, call, patch
+from unittest.mock import call, patch
 
 import yaml
 
@@ -130,34 +130,22 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.assertNotIn("cap_add", cfg["services"]["network"])
         for service in ("proxy", "network", "guard"):
             self.assertEqual(cfg["services"][service]["runtime"], "crun")
-        volumes = cfg["services"]["proxy"]["volumes"]
-        self.assertNotIn("/proc/1/net:/host-net:ro", volumes)
-        self.assertIn("/proc/1/net/fib_trie:/host-net/fib_trie:ro", volumes)
-        if Path("/proc/1/net/if_inet6").is_file():
-            self.assertIn("/proc/1/net/if_inet6:/host-net/if_inet6:ro", volumes)
         self.assertTrue(cfg["networks"]["agent-net"]["internal"])
         self.assertEqual(cfg["services"]["network"]["restart"], "no")
         self.assertEqual(cfg["services"]["guard"]["restart"], "no")
 
-    def test_legacy_host_net_mount_is_repaired_without_touching_other_containers(self):
-        path = self.session / "compose.yaml"
-        cfg = yaml.safe_load(path.read_text())
-        proxy = cfg["services"]["proxy"]
-        proxy["volumes"] = ["proxy-ca:/root/.mitmproxy:z", "/proc/1/net:/host-net:ro", "/auth:/oauth:ro,z"]
-        path.write_text(yaml.safe_dump(cfg))
-        containers = Mock(return_value=[{"name": proxy["container_name"], "id": "old-proxy"},
-                                       {"name": cfg["services"]["network"]["container_name"], "id": "network"}])
-        with (patch.dict(self.g, _list_session_containers=containers),
-              patch.object(subprocess, "run") as run,
-              patch.object(Path, "is_file", return_value=False)):
-            self.assertTrue(self.g["_upgrade_proxy_host_net_mount"](self.session, "project"))
-            upgraded = path.read_bytes()
-            self.assertFalse(self.g["_upgrade_proxy_host_net_mount"](self.session, "project"))
-            self.assertEqual(path.read_bytes(), upgraded)
-        containers.assert_called_once_with("project")
-        run.assert_called_once_with(["podman", "rm", "--force", "--ignore", "old-proxy"], check=True)
-        proxy["volumes"][1] = "/proc/1/net/fib_trie:/host-net/fib_trie:ro"
-        self.assertEqual(yaml.safe_load(upgraded), cfg)
+    def test_proxy_binds_only_available_host_network_tables_read_only(self):
+        for has_ipv6 in (True, False):
+            with self.subTest(has_ipv6=has_ipv6):
+                with patch.object(Path, "is_file", return_value=has_ipv6) as is_file:
+                    self.g["generate_compose"](self.session, self.session.parent, "feature", 9876, {}, {}, [])
+                is_file.assert_called_once_with()
+                cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
+                volumes = cfg["services"]["proxy"]["volumes"]
+                expected = ["/proc/1/net/fib_trie:/host-net/fib_trie:ro"]
+                if has_ipv6:
+                    expected.append("/proc/1/net/if_inet6:/host-net/if_inet6:ro")
+                self.assertEqual([mount for mount in volumes if ":/host-net" in mount], expected)
 
     def test_saved_policy_precedes_one_shot_installer(self):
         compose = self.compose

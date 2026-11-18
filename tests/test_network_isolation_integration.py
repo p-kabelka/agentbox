@@ -61,46 +61,6 @@ with http.server.HTTPServer(('127.0.0.1', port), Handler) as server:
 """
             self.cli("start", "--session", self.session_id, "--", "python3", "-c", script)
 
-    def test_legacy_proxy_mount_is_repaired_without_recreating_a_retained_agent(self):
-        cfg = self.initialize("--persist")
-        self.cli("start", "--session", self.session_id, "--", "bash", "-ec",
-                 "if [ -e /root/kept ]; then cat /root/kept; else echo retained > /root/kept; fi")
-        names = {name: cfg["services"][name]["container_name"] for name in ("agent", "proxy", "git", "network")}
-
-        def inspect(service):
-            return json.loads(self.run_command(["podman", "inspect", names[service]]).stdout)[0]
-
-        agent_id, git_id, network_id = (inspect(service)["Id"] for service in ("agent", "git", "network"))
-        proxy = inspect("proxy")
-        project = proxy["Config"]["Labels"]["com.docker.compose.project"]
-        ca = next(m["Name"] for m in proxy["Mounts"] if m["Destination"] == "/root/.mitmproxy")
-        self.run_command(["podman", "rm", proxy["Id"]])
-        # Simulate the stopped proxy left by the old Compose mount failing at
-        # start. Creating it does not require the kernel to apply the bind.
-        volumes = cfg["services"]["proxy"]["volumes"]
-        volumes[:] = [mount for mount in volumes if ":/host-net/" not in mount]
-        volumes.append("/proc/1/net:/host-net:ro")
-        path = self.session / "compose.yaml"
-        path.write_text(yaml.safe_dump(cfg))
-        self.run_command(["podman", "compose", "--project-name", project, "-f", str(path),
-                          "up", "--no-start", "--no-deps", "--no-recreate", "proxy"])
-        legacy_proxy = inspect("proxy")
-        self.assertTrue(any(m["Destination"] == "/host-net" for m in legacy_proxy["Mounts"]))
-
-        result = self.cli("start", "--session", self.session_id)
-        self.assertIn("retained", result.stdout)
-        self.assertEqual(tuple(inspect(service)["Id"] for service in ("agent", "git", "network")),
-                         (agent_id, git_id, network_id))
-        proxy = inspect("proxy")
-        self.assertNotEqual(proxy["Id"], legacy_proxy["Id"])
-        self.assertEqual(next(m["Name"] for m in proxy["Mounts"] if m["Destination"] == "/root/.mitmproxy"), ca)
-        mounts = {m["Destination"]: m for m in proxy["Mounts"]}
-        self.assertNotIn("/host-net", mounts)
-        self.assertFalse(mounts["/host-net/fib_trie"]["RW"])
-        self.assertNotIn("/proc/1/net:/host-net:ro", path.read_text())
-        self.cli("start", "--session", self.session_id)
-        self.assertEqual(inspect("proxy")["Id"], proxy["Id"])
-
     def start_waiting_agent(self):
         script = """
 import http.client, os, socket, sys

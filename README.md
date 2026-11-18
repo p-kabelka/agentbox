@@ -197,11 +197,6 @@ agentbox remove --name feature            # delete containers and the sidecar's 
 Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits and fetch them manually on the host before removing the session: removal deletes the sidecar's repositories too. Ordinary exit/stop retains the Git volume; fetching afterward starts only the Git sidecar when needed.
 After the first start, edits to `services.agent` in `compose.yaml` do not reconfigure the retained agent on the next start. Create a new session for a different agent image, environment, mounts, or command.
 
-If an older session fails at startup with `set propagation for 'host-net'`,
-update Agentbox and run `agentbox build proxy` with the session's image tag.
-The next `agentbox start` replaces only the proxy if it still uses the old
-directory mount. The retained agent and Git volume are not recreated.
-
 If OpenCode v2 times out waiting for its background service with krun TSI,
 update Agentbox and run `agentbox build network` with the session's image tag.
 The next `agentbox start` or `agentbox proxy reload` on a running session
@@ -210,47 +205,6 @@ installs the updated loopback rule without replacing the agent.
 The default environment does not include any agent harness, so it can be used as a temporary sandbox.
 
 Currently, for all provided agents you need to create your own preset (or modify the generated compose file) to configure them. Checkout [docs](docs/) for the specific agent harness setup guide.
-
-#### One-time migration from `dc4dfe0`
-
-Run this once per stopped persistent session. From the current Agentbox checkout:
-
-```bash
-export AGENTBOX_HOME="$PWD"
-export PATH="$AGENTBOX_HOME/bin:$PATH"
-agentbox build base network git proxy
-agentbox list --all                       # find the original session IDs
-agentbox stop --session OLD_ID
-agentbox-migrate-dc4dfe0 --session OLD_ID --new-name NEW_NAME
-agentbox start --session NEW_ID           # use the ID printed by the migration
-```
-
-The migration creates a new session and leaves the stopped original intact
-(including its old `agentbox-NAME` remote). Use the new `agentbox-NEW_ID`
-remote to fetch work from the replacement.
-It snapshots the stopped agent's entire container filesystem, preserving
-installed packages, system files, home, local commits, and uncommitted changes.
-It layers the new startup script and private helper tools on that snapshot
-without reinstalling or upgrading packages. The current proxy and Git sidecar
-run separately, and the replacement starts behind HEAD's network guard. The
-original bundle and published branches/tags are imported into the sidecar.
-
-Live processes and mounted filesystems are not included in the snapshot.
-The original project and explicit context binds are reused where applicable.
-Other custom agent mounts are rejected rather than silently dropped.
-Keep the generated `:migrated-dc4dfe0` image private: it contains the agent's
-data. Verify the replacement before removing the original. After removing
-the replacement, you can reclaim its image with `podman rmi IMAGE` using
-the image name printed by the migrator.
-
-For a legacy project bind mount, pass `--no-git` explicitly to retain the
-writable host workspace. Add `--use-passt` to enable [passt](#krun-with-passt-networking)
-on the replacement. On SELinux hosts, reusing private (`:Z`) bind mounts can
-relabel those host paths. If the original was never started, there is no
-filesystem to snapshot; build its current harness image or specify
-`--agent-image`. If you export
-`AGENTBOX_IMAGE_TAG`, install the [matching Git helper](#separate-stage-installation)
-before fetching or pushing from the host.
 
 ---
 
