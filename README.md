@@ -33,8 +33,9 @@ It also rejects upstream connections to host addresses, session
 networks, loopback, and link-local destinations—even if an L7 allow rule matches.
 Each TCP socket's actual destination is checked after DNS resolution, without
 rewriting mitmproxy's upstream address or disrupting connection reuse. The proxy
-reads host addresses live through a read-only `/proc/1/net` mount, so host address
-changes do not require a reload.
+reads host addresses live from individually mounted read-only procfs tables, so
+host address changes do not require a reload. If the host's IPv6 table is absent,
+the proxy denies IPv6 upstreams.
 Other private/LAN upstreams are denied by default; if needed, declare their exact
 IPs in `proxy.yaml` under `private_upstreams: [...]` as well as an L7 request rule.
 This cannot override host, loopback, or session-network blocks.
@@ -194,6 +195,11 @@ agentbox remove --name feature            # delete containers and the sidecar's 
 
 Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits and fetch them manually on the host before removing the session: removal deletes the sidecar's repositories too. Ordinary exit/stop retains the Git volume; fetching afterward starts only the Git sidecar when needed.
 After the first start, edits to `services.agent` in `compose.yaml` do not reconfigure the retained agent on the next start. Create a new session for a different agent image, environment, mounts, or command.
+
+If an older session fails at startup with `set propagation for 'host-net'`,
+update Agentbox and run `agentbox build proxy` with the session's image tag.
+The next `agentbox start` replaces only the proxy if it still uses the old
+directory mount. The retained agent and Git volume are not recreated.
 
 The default environment does not include any agent harness, so it can be used as a temporary sandbox.
 

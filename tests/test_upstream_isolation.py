@@ -102,6 +102,12 @@ class UpstreamIsolationTest(unittest.TestCase):
         with self.assertRaises(PermissionError):
             self.connect("8.8.8.8")
 
+    def test_missing_ipv6_host_table_blocks_ipv6_but_not_ipv4(self):
+        (upstream.HOST_NET / "if_inet6").unlink()
+        self.connect("8.8.8.8")
+        with self.assertRaises(PermissionError):
+            self.connect("2606:4700:4700::1111")
+
     def test_destination_validation_rejects_hostnames_and_invalid_addresses(self):
         for address in ("allowed.example", "not-an-ip", "", None):
             with self.subTest(address=address), self.assertRaises(PermissionError):
@@ -156,7 +162,7 @@ asyncio.run(check())
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
-    def test_read_only_host_proc_mount_tracks_addresses_across_network_namespaces(self):
+    def test_read_only_host_proc_file_tracks_addresses_across_network_namespaces(self):
         if not all(shutil.which(tool) for tool in ("unshare", "ip", "mount")):
             self.skipTest("Requires unshare, iproute, and mount")
         command = ["unshare", "--user", "--map-root-user", "--net", "--mount"]
@@ -170,8 +176,10 @@ root = Path(sys.argv[2])
 host = root / 'live-net'
 host.mkdir()
 subprocess.run(['ip', 'link', 'set', 'lo', 'up'], check=True)
-subprocess.run(['mount', '--bind', f'/proc/{os.getpid()}/net', str(host)], check=True)
-subprocess.run(['mount', '-o', 'remount,bind,ro', str(host)], check=True)
+table = host / 'fib_trie'
+table.touch()
+subprocess.run(['mount', '--bind', f'/proc/{os.getpid()}/net/fib_trie', str(table)], check=True)
+subprocess.run(['mount', '-o', 'remount,bind,ro', str(table)], check=True)
 worker = '''
 import importlib.util, socket, sys, types
 from pathlib import Path

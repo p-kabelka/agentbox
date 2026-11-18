@@ -158,9 +158,12 @@ are disabled because mitmproxy's Rust UDP connector does not use Python sockets.
 DNS flows are explicitly refused, including DNS-over-TCP through CONNECT to
 ports 53 and 5353: these use a specialized mitmproxy layer even with `rawtcp=false`
 and never invoke the HTTP request allowlist.
-Host addresses are read live from the read-only `/proc/1/net` mount; connected
-session subnets come from the proxy's own routing tables. No generated host
-address snapshot or reload after address changes is needed. Non-global upstreams
+Host addresses are read live from read-only binds of `/proc/1/net/fib_trie` and,
+when available, `/proc/1/net/if_inet6`. Binding the table files avoids mounting
+PID 1's task-labeled directory on SELinux hosts. IPv6 upstreams are refused if
+the host IPv6 table is unavailable. Connected session subnets come from the
+proxy's own routing tables. No generated host address snapshot or reload after
+address changes is needed. Non-global upstreams
 are denied unless the trusted configuration lists their exact `private_upstreams`
 IPs; host, local, and session-network blocks always take precedence.
 These exceptions are compiled into a fixed set at proxy startup. Adding or removing

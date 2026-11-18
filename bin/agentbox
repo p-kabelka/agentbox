@@ -40,6 +40,8 @@ HARNESS_CONTAINERFILES = {
 }
 HARNESS_CONTAINERFILES.update({name: "Containerfile" for name in ("proxy", "git", "network")})
 GIT_REPOSITORY_NAME = re.compile(r"(?=.{1,100}\Z)[a-z0-9][a-z0-9._-]*(?:/[a-z0-9][a-z0-9._-]*)*", re.ASCII)
+LEGACY_HOST_NET_MOUNT = "/proc/1/net:/host-net:ro"
+IPV6_HOST_NET_MOUNT = "/proc/1/net/if_inet6:/host-net/if_inet6:ro"
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -265,6 +267,42 @@ def _stop_persistent(session_dir: Path) -> None:
         die("could not stop all session containers; run agentbox stop and inspect the session")
 
 
+def _omit_unavailable_ipv6_mount(volumes: list) -> None:
+    if IPV6_HOST_NET_MOUNT in volumes and not Path("/proc/1/net/if_inet6").is_file():
+        volumes.remove(IPV6_HOST_NET_MOUNT)
+
+
+def _upgrade_proxy_host_net_mount(session_dir: Path, project: str) -> bool:
+    """Called under both startup locks; replace only the old upstream-policy mount."""
+    path = session_dir / "compose.yaml"
+    config = load_yaml(path)
+    volumes = config.get("services", {}).get("proxy", {}).get("volumes", [])
+    if LEGACY_HOST_NET_MOUNT not in volumes:
+        return False
+
+    fixed = load_yaml(AGENTBOX_HOME / "compose-base.yaml")["services"]["proxy"]["volumes"]
+    tables = [mount for mount in fixed if mount.startswith("/proc/1/net/")]
+    _omit_unavailable_ipv6_mount(tables)
+    index = volumes.index(LEGACY_HOST_NET_MOUNT)
+    volumes[index:index + 1] = tables
+    proxy = _service_container_name(session_dir, "proxy")
+    for container in _list_session_containers(project):
+        if container["name"] == proxy:
+            # No --depend or --volumes: keep the agent, CA, and Git state.
+            subprocess.run(["podman", "rm", "--force", "--ignore", container["id"]], check=True)
+            break
+    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            yaml.safe_dump(config, stream)
+            stream.flush()
+            os.replace(temporary, path)
+        finally:
+            temporary.unlink(missing_ok=True)
+    print("==> Updated the proxy's host network mounts; agent and Git data retained.")
+    return True
+
+
 class SecretReference(NamedTuple):
     source: str
     host_path: Path
@@ -453,6 +491,7 @@ def generate_compose(
     proxy["ports"] = [f"127.0.0.1:{port}:8081"]
 
     proxy_volumes: list = proxy.get("volumes", [])
+    _omit_unavailable_ipv6_mount(proxy_volumes)
     proxy_volumes.append("./proxy-config:/config:ro,Z")
 
     for vol in proxy_cfg.get("proxy_volumes", []):
@@ -891,6 +930,8 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
 
             full, providers, sources = _secret_preflight(session_dir)
             try:
+                if _upgrade_proxy_host_net_mount(session_dir, project):
+                    proxy_started_here = persistent
                 # Never recreate retained services after a Compose YAML edit.
                 compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", "network", check=True)
                 _synchronize_proxy(session_dir, full, providers, sources)

@@ -17,16 +17,20 @@ def compile_private_upstreams(values):
     return frozenset(getattr(address, "ipv4_mapped", None) or address for address in addresses)
 
 
-def host_addresses():
+def host_addresses(*, require_ipv6=False):
     lines = (HOST_NET / "fib_trie").read_text().splitlines()
     addresses = {ipaddress.IPv4Address(previous.split()[-1])
                  for previous, current in zip(lines, lines[1:]) if current.strip() == "/32 host LOCAL"}
     if not addresses:
         raise ValueError("host network state is unavailable")
-    ipv6 = HOST_NET / "if_inet6"
-    if ipv6.exists():
+    try:
+        ipv6 = (HOST_NET / "if_inet6").read_text()
+    except FileNotFoundError:
+        if require_ipv6:
+            raise
+    else:
         addresses.update(ipaddress.IPv6Address(int(line.split()[0], 16))
-                         for line in ipv6.read_text().splitlines())
+                         for line in ipv6.splitlines())
     return addresses
 
 
@@ -51,7 +55,8 @@ def check_destination(host, private_upstreams):
         address = getattr(address, "ipv4_mapped", None) or address
         if (address.is_loopback or address.is_link_local or address.is_unspecified or address.is_multicast
                 or (not address.is_global and address not in private_upstreams)
-                or address in host_addresses() or any(address in network for network in connected_networks())):
+                or address in host_addresses(require_ipv6=address.version == 6)
+                or any(address in network for network in connected_networks())):
             raise ValueError("host or control-plane destination")
     except (OSError, ValueError, TypeError, KeyError, AttributeError, IndexError):
         raise PermissionError(BLOCKED) from None

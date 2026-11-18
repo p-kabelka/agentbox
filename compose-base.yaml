@@ -23,7 +23,10 @@ services:
       - /run/secrets:rw,noexec,nosuid,nodev,mode=0700
     volumes:
       - proxy-ca:/root/.mitmproxy:z
-      - /proc/1/net:/host-net:ro
+      # Bind only the live procfs tables, not PID 1's task-labeled directory
+      # (which crun can be denied permission to mount on SELinux hosts).
+      - /proc/1/net/fib_trie:/host-net/fib_trie:ro
+      - /proc/1/net/if_inet6:/host-net/if_inet6:ro
     # environment:
     #   AGENTBOX_NAME: ${AGENTBOX_NAME:-}
     #   ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
