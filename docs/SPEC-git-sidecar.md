@@ -145,8 +145,8 @@ Fetching, review, and merging on the host are manual; agent exit never fetches.
 Ephemeral teardown removes containers/networks but retains the named Git volume
 and session registration. The next start clones the retained repositories again;
 unpushed changes in the removed agent are lost. Persistent teardown stops all
-services, including the namespace holder, and retains both the Git volume and the agent's working trees/home.
-Host Git can start just the sidecar after either form of teardown, reusing its
+services, including the namespace holders, and retains both the Git volume and the agent's working trees/home.
+Host Git can start just the sidecar and its holder after either form of teardown, reusing its
 existing data, and leaves it running after the transfer. No running agent or proxy
 is required. `remove` alone deletes the named volumes and matching registered
 remotes in every shared host repository; repointed remotes are not removed.
@@ -156,7 +156,7 @@ Fetch wanted commits before removal, especially for a running session.
 publication marker and Git objects, removes its host registration, and removes
 the matching session remote from the registered Git common directory. Linked
 worktrees therefore lose the same shared remote; repointed remotes are preserved.
-It accepts `workspace` as well as reference names and starts only the Git sidecar
+It accepts `workspace` as well as reference names and starts only the Git sidecar and its holder
 if necessary. Compose configuration and existing host/sandbox working trees are
 unchanged. The name can be reused in a later mount.
 

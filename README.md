@@ -157,6 +157,16 @@ routes are left alone; no default route is added and `internal: true` remains
 unchanged. The helper also installs the two sidecar hostnames and disables
 external DNS in the guest for both TSI and passt.
 
+The proxy and Git sidecar use separate, idle network namespace
+holders. Podman still allocates the addresses, but restarting either sidecar
+leaves its holder and address in place. No static subnet or guest watcher is
+needed. Leave the `*-proxy-network` and `*-git-network` holders running while
+the agent is active. If a holder is stopped or restarted, stop and start the
+session to rebuild its networking. Sessions without these sidecar holders
+must be migrated or replaced before use with this version.
+In generated Compose files, network settings such as proxy DNS,
+`extra_hosts`, and the loopback web UI port belong to `services.proxy-network`.
+
 This uses the standard Agentbox image entrypoint and managed session metadata.
 A custom entrypoint must invoke `agentbox-network` before using sidecar names
 or passt networking; the outer firewall is already installed before launch.
@@ -194,7 +204,7 @@ agentbox stop --name feature              # retain the stopped services, includi
 agentbox remove --name feature            # delete containers and the sidecar's repositories
 ```
 
-Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits and fetch them manually on the host before removing the session: removal deletes the sidecar's repositories too. Ordinary exit/stop retains the Git volume; fetching afterward starts only the Git sidecar when needed.
+Only one `start` can own a persistent session at a time. Processes, including tmux, do not survive stopping the container. Push commits and fetch them manually on the host before removing the session: removal deletes the sidecar's repositories too. Ordinary exit/stop retains the Git volume; fetching afterward starts Git and its network holder, not the proxy or agent.
 After the first start, edits to `services.agent` in `compose.yaml` do not reconfigure the retained agent on the next start. Create a new session for a different agent image, environment, mounts, or command.
 
 If OpenCode v2 times out waiting for its background service with krun TSI,

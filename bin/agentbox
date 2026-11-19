@@ -214,7 +214,7 @@ def read_compose_metadata(session_dir: Path) -> dict:
 
 
 def _proxy_port(compose_cfg: dict) -> int | None:
-    ports = compose_cfg.get("services", {}).get("proxy", {}).get("ports", [])
+    ports = compose_cfg.get("services", {}).get("proxy-network", {}).get("ports", [])
     if ports:
         # "127.0.0.1:<port>:8081"
         return int(str(ports[0]).split(":")[1])
@@ -427,12 +427,14 @@ def generate_compose(
     """Build a unified compose.yaml from compose-base.yaml and preset config."""
     base = load_yaml(AGENTBOX_HOME / "compose-base.yaml")
 
+    services = base["services"]
+
     # Resolve only image references, after the preset has selected the agent image.
-    agent = base["services"]["agent"]
+    agent = services["agent"]
     agent["image"] = agent_cfg.get("agent_image", agent["image"])
-    images = _resolve_images({name: service["image"] for name, service in base["services"].items()})
+    images = _resolve_images({name: service["image"] for name, service in services.items()})
     for service, image in images.items():
-        base["services"][service]["image"] = image
+        services[service]["image"] = image
 
     # --- Session metadata (Compose extension field) ---
     base["x-metadata"] = {
@@ -442,15 +444,15 @@ def generate_compose(
         "no-git": no_git,
     }
 
-    for service in ("proxy", "git", "network"):
-        base["services"][service]["container_name"] = _service_container_name(session_dir, service)
-    base["services"]["agent"]["container_name"] = (
+    for service in ("proxy", "git", "network", "proxy-network", "git-network"):
+        services[service]["container_name"] = _service_container_name(session_dir, service)
+    agent["container_name"] = (
         _service_container_name(session_dir, "agent") if persist
         else f"{_project_name(session_dir, base['x-metadata'])}_agent")
 
     # --- Proxy service ---
-    proxy = base["services"]["proxy"]
-    proxy["ports"] = [f"127.0.0.1:{port}:8081"]
+    proxy = services["proxy"]
+    services["proxy-network"]["ports"] = [f"127.0.0.1:{port}:8081"]
 
     proxy_volumes: list = proxy.get("volumes", [])
     ipv6_mount = "/proc/1/net/if_inet6:/host-net/if_inet6:ro"
@@ -483,8 +485,6 @@ def generate_compose(
     proxy["environment"] = proxy_env
 
     # --- Agent service ---
-    agent = base["services"]["agent"]
-
     agent_volumes: list = agent.get("volumes", [])
     if (session_dir / "dotfiles").is_dir():
         agent_volumes.append("./dotfiles:/agentbox-dotfiles:ro,Z")
@@ -660,7 +660,8 @@ def _start_git(session_dir: Path) -> None:
     if not (session_dir / "compose.yaml").is_file():
         die("session removed before starting Git")
     # Never recreate a running or retained agent after user edits to Compose.
-    compose(session_dir, "up", "-d", "--no-deps", "--no-recreate", "git", check=True, stdout=sys.stderr)
+    # The only Git dependency is its own network holder.
+    compose(session_dir, "up", "-d", "--no-recreate", "git", check=True, stdout=sys.stderr)
 
 
 def _git_environment(session_dir: Path) -> dict[str, str]:
@@ -821,11 +822,12 @@ def cmd_unmount(args) -> None:
 
 def _prepare_agent_network(session_dir: Path) -> None:
     """Write current addresses and install the allowlist in the running holder."""
-    services = ("proxy", "git", "network")
-    result = subprocess.run(["podman", "inspect", *(_service_container_name(session_dir, service) for service in services)],
+    owners = {"proxy": "proxy-network", "git": "git-network", "network": "network"}
+    containers = [_service_container_name(session_dir, owner) for owner in owners.values()]
+    result = subprocess.run(["podman", "inspect", *containers],
                             capture_output=True, text=True, check=True)
     networks = {service: details["NetworkSettings"]["Networks"]
-                for service, details in zip(services, json.loads(result.stdout), strict=True)}
+                for service, details in zip(owners, json.loads(result.stdout), strict=True)}
     network_name, settings = next(iter(networks["network"].items()))
     address = ipaddress.IPv4Interface(f"{settings['IPAddress']}/{settings['IPPrefixLen']}")
     endpoints = {service: str(ipaddress.IPv4Address(networks[service][network_name]["IPAddress"]))
@@ -1012,7 +1014,7 @@ def _init_session(session_dir: Path, project_dir: Path, name: str, args) -> None
             context_mounts.append((src, dst, True))
             seen_dsts.add(dst)
 
-    # Read existing port from compose.yaml if re-initializing, otherwise pick a free port
+    # Read the existing web port if re-initializing, otherwise pick a free port.
     compose_path = session_dir / "compose.yaml"
     web_port = _proxy_port(load_yaml(compose_path) if compose_path.is_file() else {}) or free_port()
 

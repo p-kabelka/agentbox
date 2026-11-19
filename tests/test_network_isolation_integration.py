@@ -7,6 +7,7 @@ Set AGENTBOX_TEST_USE_PASST=1 to exercise krun's passt backend and IPv4 workarou
 """
 
 import hashlib
+import http.client
 import ipaddress
 import json
 import os
@@ -76,8 +77,9 @@ def check():
     assert response.status == 403, response.status
     response.read()
     assert client.sock is not None, 'Proxy closed the keepalive connection'
-    with socket.create_connection(('git', 9418), timeout=5):
-        pass
+    for port in (9418, 8083):
+        with socket.create_connection(('git', port), timeout=5):
+            pass
     for port in (8081, 8082):
         try:
             with socket.create_connection(('proxy', port), timeout=1):
@@ -90,8 +92,14 @@ print('NETWORK_LIFETIME_READY', flush=True)
 for command in sys.stdin:
     if command.strip() == 'exit':
         break
+    reconnect = command.strip() == 'reconnect'
+    if reconnect:
+        client.close()
     check()
-    assert client.sock is original_socket, 'TCP connection replaced'
+    if reconnect:
+        original_socket = client.sock
+    else:
+        assert client.sock is original_socket, 'TCP connection replaced'
     print('NETWORK_LIFETIME_OK', flush=True)
 """
         process = subprocess.Popen([sys.executable, str(ROOT / "bin/agentbox"), "start",
@@ -110,9 +118,9 @@ for command in sys.stdin:
         self.read_agent_output(process, b"NETWORK_LIFETIME_READY", 90)
         return process
 
-    def check_waiting_agent(self, process):
+    def check_waiting_agent(self, process, *, reconnect=False):
         self.assertIsNone(process.poll(), "Agent attachment exited")
-        process.stdin.write(b"check\n")
+        process.stdin.write(b"reconnect\n" if reconnect else b"check\n")
         process.stdin.flush()
         self.read_agent_output(process, b"NETWORK_LIFETIME_OK")
 
@@ -134,8 +142,56 @@ for command in sys.stdin:
             self.check_waiting_agent(process)
             containers = json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
             self.assertEqual({c["name"] for c in containers},
-                             {cfg["services"][s]["container_name"] for s in ("proxy", "git", "network", "agent")})
+                             {s["container_name"] for name, s in cfg["services"].items() if name != "guard"})
         self.assertEqual(self.run_command(identity).stdout, original)
+        self.finish_waiting_agent(process)
+
+    def test_sidecar_restarts_keep_addresses_for_the_running_agent(self):
+        self.initialize()
+        process = self.start_waiting_agent()
+        holders = ("network", "proxy-network", "git-network")
+        before = {name: self.inspect_service(name) for name in holders}
+        metadata = self.session / "network-config/network.json"
+        original_policy = json.loads(metadata.read_text())
+        info = json.loads(self.cli("list", "--json").stdout)[0]
+        port = int(info["url"].rsplit(":", 1)[1])
+
+        def check_web_ui():
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+            try:
+                connection.request("GET", "/")
+                connection.getresponse().read()
+            finally:
+                connection.close()
+
+        check_web_ui()
+        self.cli("proxy", "restart", "--session", self.session_id)
+        check_web_ui()
+        self.check_waiting_agent(process, reconnect=True)
+        git = self.config()["services"]["git"]["container_name"]
+        self.run_command(["podman", "restart", git])
+        self.run_command(["podman", "exec", git, "python3", "-c", """
+import socket, time
+for attempt in range(50):
+    try:
+        for port in (9418, 8083):
+            with socket.create_connection(('127.0.0.1', port), timeout=1):
+                pass
+        break
+    except OSError:
+        time.sleep(0.1)
+else:
+    raise AssertionError('Git listeners did not come back')
+"""])
+        self.check_waiting_agent(process)
+
+        self.assertEqual(json.loads(metadata.read_text()), original_policy)
+        for name in holders:
+            after = self.inspect_service(name)
+            original = before[name]
+            self.assertEqual(after["Id"], original["Id"])
+            self.assertEqual(after["State"]["StartedAt"], original["State"]["StartedAt"])
+            self.assertEqual(after["NetworkSettings"]["Networks"], original["NetworkSettings"]["Networks"])
         self.finish_waiting_agent(process)
 
     def test_network_installer_failure_preserves_ephemeral_agent_and_policy(self):
@@ -143,7 +199,7 @@ for command in sys.stdin:
         process = self.start_waiting_agent()
         original = {c["name"]: (c["id"], c["pid"]) for c in
                     json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)}
-        self.assertEqual(len(original), 4)  # One agent, two sidecars, and the unprivileged holder.
+        self.assertEqual(len(original), 6)  # One agent, two sidecars, and three namespace holders.
         cfg = self.config()
         cfg["services"]["guard"]["entrypoint"] = ["/usr/bin/false"]
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
@@ -331,7 +387,7 @@ assert hashlib.sha256(Path('/tmp/roundtrip/bulk').read_bytes()).digest() == hash
 
     def test_agent_cannot_reach_management_peers_or_host_even_with_guest_routes(self):
         self.initialize("--persist")
-        git = self.inspect_git()
+        git = self.inspect_service("git-network")
         network = next(iter(git["NetworkSettings"]["Networks"]))
         info = json.loads(self.run_command(["podman", "network", "inspect", network]).stdout)[0]
         gateway = info["subnets"][0]["gateway"]
@@ -442,7 +498,7 @@ for port in (8081, 8082):
         preset.write_text(yaml.safe_dump({"providers": [],
                                           "extra_request_policy": [{"host": ".*", "port": ".*"}]}))
         self.initialize()
-        git = self.inspect_git()
+        git = self.inspect_service("git-network")
         network = next(iter(git["NetworkSettings"]["Networks"]))
         info = json.loads(self.run_command(["podman", "network", "inspect", network]).stdout)[0]
         gateway = info["subnets"][0]["gateway"]
@@ -530,8 +586,9 @@ for port in (53, 5353):
         # pass from bridge isolation or a missing DNS server.
         self.run_command(["podman", "exec", name, "python3", "-c",
                           "from pathlib import Path; assert not Path('/tmp/dns-connections').exists()"])
-        proxy = self.config()["services"]["proxy"]["container_name"]
-        self.run_command(["podman", "start", proxy])
+        services = self.config()["services"]
+        proxy = services["proxy"]["container_name"]
+        self.run_command(["podman", "start", services["proxy-network"]["container_name"], proxy])
         self.run_command(["podman", "exec", proxy, "python3", "-c",
                           f"import socket\nfor port in (53, 5353):\n"
                           f"    with socket.create_connection(({address!r}, port), timeout=5): pass\n"])
@@ -615,7 +672,7 @@ secure.serve_forever()
         policy["private_upstreams"] = [address]  # Explicitly trust only this remote fixture IP.
         proxy_config.write_text(yaml.safe_dump(policy))
         cfg = self.config()
-        cfg["services"]["proxy"]["extra_hosts"] = [f"upstream.example:{address}"]
+        cfg["services"]["proxy-network"]["extra_hosts"] = [f"upstream.example:{address}"]
         cfg["services"]["proxy"]["volumes"].append(f"{certificate}:/custom-certs/upstream.crt:ro,z")
         (self.session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         self.cli("start", "--session", self.session_id, "--", "python3", "-c", """
@@ -641,7 +698,7 @@ for secure in (False, True):
         # Exercise the production proxy with an HTTP/2 client as well. The
         # proxy image supplies h2; the minimal agent image deliberately does not.
         proxy = cfg["services"]["proxy"]["container_name"]
-        self.run_command(["podman", "start", proxy])
+        self.run_command(["podman", "start", cfg["services"]["proxy-network"]["container_name"], proxy])
         self.cli("proxy", "reload", "--session", self.session_id)
         self.run_command(["podman", "exec", proxy, "python3", "-c", """
 import socket, ssl

@@ -8,16 +8,16 @@ volumes:
 networks:
   agent-net:
     internal: true   # no external forwarding; the guard restricts exact destinations
-  proxy-net:         # internet-connected; only the proxy service is attached
+  proxy-net:         # internet-connected; only the proxy namespace is attached
 
 services:
 
   proxy:
     image: localhost/agentbox-proxy:${AGENTBOX_IMAGE_TAG:-latest}
     runtime: crun
-    networks:
-      - agent-net
-      - proxy-net
+    network_mode: service:proxy-network
+    depends_on:
+      - proxy-network
     # Populated only by agentbox start / proxy reload / proxy restart.
     tmpfs:
       - /run/secrets:rw,noexec,nosuid,nodev,mode=0700
@@ -36,13 +36,13 @@ services:
     #   GOOGLE_CLOUD_PROJECT: ${VERTEX_PROJECT_ID:-}
     #   VERTEX_PROJECT_ID: ${VERTEX_PROJECT_ID:-}
     #   VERTEX_REGION: ${VERTEX_REGION:-}
-    # ports: defined per-project in compose.override.yaml
     restart: unless-stopped
 
   git:
     image: localhost/agentbox-git:${AGENTBOX_IMAGE_TAG:-latest}
-    networks:
-      - agent-net
+    network_mode: service:git-network
+    depends_on:
+      - git-network
     volumes:
       - git-data:/srv/git:z
     read_only: true
@@ -54,7 +54,7 @@ services:
       - no-new-privileges:true
     restart: unless-stopped
 
-  network:
+  network: &network-holder
     image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}
     runtime: crun
     # The namespace and firewall outlive the one-shot installer.
@@ -68,6 +68,21 @@ services:
       - no-new-privileges:true
     stop_signal: SIGKILL  # The idle holder has no state to flush at session teardown.
     restart: "no"
+
+  proxy-network:
+    <<: *network-holder
+    networks:
+      agent-net:
+        aliases: [proxy]
+      proxy-net:
+        aliases: [proxy]
+    # The session generator publishes the web UI here, on host loopback.
+
+  git-network:
+    <<: *network-holder
+    networks:
+      agent-net:
+        aliases: [git]
 
   guard:
     image: localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}

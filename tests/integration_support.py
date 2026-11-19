@@ -95,7 +95,10 @@ class AgentboxIntegrationTest(unittest.TestCase):
         return cfg
 
     def inspect_git(self):
-        name = self.config()["services"]["git"]["container_name"]
+        return self.inspect_service("git")
+
+    def inspect_service(self, service):
+        name = self.config()["services"][service]["container_name"]
         return json.loads(self.run_command(["podman", "inspect", name]).stdout)[0]
 
     def assert_isolation(self):
@@ -105,7 +108,7 @@ class AgentboxIntegrationTest(unittest.TestCase):
         self.assertTrue(container["HostConfig"]["ReadonlyRootfs"])
         self.assertTrue(all(mount["Type"] == "volume" for mount in container["Mounts"]))
         self.assertFalse(container["HostConfig"].get("PortBindings"))
-        networks = container["NetworkSettings"]["Networks"]
+        networks = self.inspect_service("git-network")["NetworkSettings"]["Networks"]
         self.assertEqual(len(networks), 1)
         network = json.loads(self.run_command(["podman", "network", "inspect", next(iter(networks))]).stdout)[0]
         self.assertTrue(network["internal"])

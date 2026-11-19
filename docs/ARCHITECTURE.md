@@ -115,7 +115,7 @@ The system has three distinct trust zones separated by explicit boundaries:
 Two Podman networks are created per agentbox:
 
 - **`agent-net`**: A Podman `internal: true` network. Containers attached to this network have no default gateway to the internet. The agent and Git sidecar are connected only to this network. Git/catalog traffic stays here and does not pass through the egress proxy.
-- **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy container is attached to this network.
+- **`proxy-net`**: A standard Podman network with external connectivity. Only the proxy's network namespace is attached to this network.
 
 The agent and one-shot guard join a minimal holder's network namespace instead of attaching
 independently to `agent-net`. Only the installer has `NET_ADMIN`; the holder drops all
@@ -128,8 +128,15 @@ This is the holder's private namespace, not host loopback. Non-loopback IPv6
 and other egress, including UDP, are denied. Local kernel rejection packets
 can deliver errors inside the guarded namespace.
 
+The proxy and Git use separate native, capability-free holders.
+Each sidecar joins its own holder; the holders keep their Podman-assigned
+addresses when the sidecars restart. The proxy holder owns the loopback web UI
+port mapping and the external attachment. The Git holder is internal-only and
+publishes no ports. Stopping or recreating a holder can change its address, so
+leave holders running during an active session.
+
 The host refreshes the policy and read-only address metadata before each agent
-boot. Names for `proxy` and `git` come from that metadata, so the agent does not
+boot. Names and addresses for `proxy` and `git` come from that metadata, so the agent does not
 need access to the bridge's DNS service. Failed firewall installation prevents launch.
 Configuration reload/restart also runs a fresh installer to update the optional
 metadata rule if the holder is running; refresh never starts or restarts it.
@@ -266,7 +273,7 @@ so stage harnesses extend the stage base rather than the latest base.
 
 `git/Containerfile` builds a small Fedora image with Git and standard-library Python. It runs as an unprivileged user with a read-only root filesystem, dropped capabilities, and a writable named volume at `/srv/git`. `git/server.py` supervises Git's daemon on port 9418 and serves only the read-only repository catalog on port 8083. Neither port is published. Host-only exec operations create bare repositories and publish the catalog after successful pushes. Hooks are explicitly disabled for daemon and host pack services; incoming objects are checked. CLI sharing never force-pushes; explicit manual Git operations keep normal ref-update semantics.
 
-`bin/git-remote-agentbox` implements Git's `connect` helper protocol. Host remotes identify the session with a file URI but stream Git pack operations through `podman exec -i`, never through a local bare repository or published TCP endpoint. A normal host fetch can start only the sidecar after teardown. See [SPEC-git-sidecar.md](SPEC-git-sidecar.md) for the publication and synchronization contract.
+`bin/git-remote-agentbox` implements Git's `connect` helper protocol. Host remotes identify the session with a file URI but stream Git pack operations through `podman exec -i`, never through a local bare repository or published TCP endpoint. A normal host fetch starts only Git and its holder after teardown. See [SPEC-git-sidecar.md](SPEC-git-sidecar.md) for the publication and synchronization contract.
 
 Publication creates each repository's standard `git-daemon-export-ok` marker;
 the daemon requires it and the catalog enumerates markers only when requested.
@@ -361,7 +368,7 @@ Mounting the project directory directly into the agent container gives the agent
 
 Git protocol transfers only objects and refs into independent repositories. Both the main project and additional references use the same sidecar. New context can be published while the agent is running without adding mounts; the developer or agent then runs `agentbox-clone NAME` inside its existing shell, rather than relying on host exec into a krun VM. The agent can commit, branch, and rebase freely without affecting host worktrees.
 
-The same bare repository provides the reverse channel. Its filesystem is not exposed to the agent at all; Git services disable hooks explicitly. The host fetches published commits manually and the developer reviews before merging. Named volumes survive ordinary teardown; host Git restarts only the sidecar when needed. Session removal destroys the volume. `--no-git` remains an explicit opt-in to a writable host workspace instead of this Git boundary.
+The same bare repository provides the reverse channel. Its filesystem is not exposed to the agent at all; Git services disable hooks explicitly. The host fetches published commits manually and the developer reviews before merging. Named volumes survive ordinary teardown; host Git starts only the Git sidecar and its holder when needed. Session removal destroys the volume. `--no-git` remains an explicit opt-in to a writable host workspace instead of this Git boundary.
 
 ### 6.5 Centralized session storage
 

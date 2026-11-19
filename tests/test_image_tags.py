@@ -74,6 +74,8 @@ class ImageTagsTest(unittest.TestCase):
                     services = self.generate(agent_cfg, tag)["services"]
                     self.assertEqual(services["proxy"]["image"], f"localhost/agentbox-proxy:{tag}")
                     self.assertEqual(services["git"]["image"], f"localhost/agentbox-git:{tag}")
+                    for holder in ("proxy-network", "git-network"):
+                        self.assertEqual(services[holder]["image"], f"localhost/agentbox-network:{tag}")
                     self.assertEqual(services["agent"]["image"], f"localhost/agentbox-agent-{harness}:{tag}")
                     self.assertNotIn("${", services["agent"]["image"])
                     self.assertNotIn("${", services["proxy"]["image"])
@@ -124,6 +126,8 @@ class ImageTagsTest(unittest.TestCase):
         resolved = {"services": {"proxy": {"image": "localhost/agentbox-proxy:stage"},
                                  "git": {"image": "localhost/agentbox-git:stage"},
                                  "network": {"image": "localhost/agentbox-network:stage"},
+                                 "proxy-network": {"image": "localhost/agentbox-network:stage"},
+                                 "git-network": {"image": "localhost/agentbox-network:stage"},
                                  "guard": {"image": "localhost/agentbox-network:stage"},
                                  "agent": {"image": "custom:stage"}}}
         with patch.object(subprocess, "run", return_value=subprocess.CompletedProcess(

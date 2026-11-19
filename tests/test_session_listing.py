@@ -45,7 +45,7 @@ class SessionListingTest(unittest.TestCase):
         cfg = copy.deepcopy(self.base)
         meta = {"name": name, "project-dir": str(project), "persist": persistent}
         cfg["x-metadata"] = meta
-        cfg["services"]["proxy"]["ports"] = [f"127.0.0.1:{port}:8081"] if port else []
+        cfg["services"]["proxy-network"]["ports"] = [f"127.0.0.1:{port}:8081"] if port else []
         (session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         project_name = self.agentbox["_project_name"](session, meta)
         containers = self.containers[project_name] = []
@@ -126,7 +126,7 @@ class SessionListingTest(unittest.TestCase):
         session = self.session("feature", agent="running")
         self.assertEqual(self.listing(True)[0][0]["url"], "http://localhost:9876")
         cfg = yaml.safe_load((session / "compose.yaml").read_text())
-        cfg["services"]["proxy"]["ports"] = ["127.0.0.1:12345:8081"]
+        cfg["services"]["proxy-network"]["ports"] = ["127.0.0.1:12345:8081"]
         (session / "compose.yaml").write_text(yaml.safe_dump(cfg))
         rows, reads, _ = self.listing(True)
         self.assertEqual(rows[0]["url"], "http://localhost:12345")

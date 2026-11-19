@@ -65,6 +65,8 @@ class SecretPathTest(unittest.TestCase):
                               "volumes": [], "environment": {}},
                     "git": {"image": "localhost/agentbox-git:${AGENTBOX_IMAGE_TAG:-latest}", "volumes": []},
                     "network": {"image": "localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}"},
+                    "proxy-network": {"image": "localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}"},
+                    "git-network": {"image": "localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}"},
                     "guard": {"image": "localhost/agentbox-network:${AGENTBOX_IMAGE_TAG:-latest}"},
                 },
             }

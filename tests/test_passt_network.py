@@ -8,8 +8,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import types
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import call, patch
 
@@ -112,7 +113,7 @@ class HostPasstNetworkTest(unittest.TestCase):
 
     def inspect(self, args, **kwargs):
         self.assertEqual(args, ["podman", "inspect", *(self.g["_service_container_name"](self.session, service)
-                                                      for service in ("proxy", "git", "network"))])
+                                                       for service in ("proxy-network", "git-network", "network"))])
         return subprocess.CompletedProcess(args, 0, stdout=json.dumps(self.details))
 
     def test_topology_has_native_guard_and_drops_agent_network_capabilities(self):
@@ -133,6 +134,40 @@ class HostPasstNetworkTest(unittest.TestCase):
         self.assertTrue(cfg["networks"]["agent-net"]["internal"])
         self.assertEqual(cfg["services"]["network"]["restart"], "no")
         self.assertEqual(cfg["services"]["guard"]["restart"], "no")
+
+    def test_sidecars_join_distinct_native_holders_and_only_publish_the_proxy_ui(self):
+        cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
+        services = cfg["services"]
+        for service, nets in (("proxy", {"agent-net", "proxy-net"}), ("git", {"agent-net"})):
+            holder = f"{service}-network"
+            self.assertEqual(services[service]["network_mode"], f"service:{holder}")
+            self.assertEqual(services[service]["depends_on"], [holder])
+            self.assertNotIn("networks", services[service])
+            self.assertNotIn("ports", services[service])
+            self.assertEqual(set(services[holder]["networks"]), nets)
+            for net in nets:
+                self.assertIn(service, services[holder]["networks"][net]["aliases"])
+            self.assertEqual(services[holder]["runtime"], "crun")
+            self.assertEqual(services[holder]["cap_drop"], ["ALL"])
+            self.assertTrue(services[holder]["read_only"])
+            self.assertEqual(services[holder]["restart"], "no")
+            self.assertNotIn("volumes", services[holder])
+            self.assertNotIn("environment", services[holder])
+        self.assertEqual(services["proxy-network"]["ports"], ["127.0.0.1:9876:8081"])
+        self.assertNotIn("ports", services["git-network"])
+        self.assertEqual(self.g["_proxy_port"](cfg), 9876)
+
+    def test_reinit_keeps_the_existing_web_port(self):
+        project = self.session.parent
+        args = types.SimpleNamespace(preset="default", ro_mounts=[], rw_mounts=[], persist=False, no_git=False)
+        with redirect_stdout(io.StringIO()):
+            self.g["_init_session"](self.session, project, "feature", args)
+        cfg = yaml.safe_load((self.session / "compose.yaml").read_text())
+        self.assertEqual(self.g["_proxy_port"](cfg), 9876)
+
+    def test_git_starts_only_the_sidecar_and_its_holder(self):
+        self.g["_start_git"](self.session)
+        self.assertEqual(self.calls[-1][0], ("up", "-d", "--no-recreate", "git"))
 
     def test_proxy_binds_only_available_host_network_tables_read_only(self):
         for has_ipv6 in (True, False):

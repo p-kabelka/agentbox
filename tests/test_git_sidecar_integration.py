@@ -33,7 +33,7 @@ git push
 """)
         self.assertNotEqual(self.git(self.project, "show", f"{self.remote}/from-agent:source", check=False).returncode, 0)
         self.assertEqual((self.project / "source").read_text(), "host\n")
-        # Ordinary host Git restarts only the Git sidecar after compose down.
+        # Host Git starts only the Git sidecar and its network holder after compose down.
         self.git(self.project, "fetch", self.remote)
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/from-agent:source").stdout, "agent\n")
         self.assert_isolation()
@@ -68,14 +68,16 @@ git push
         self.cli("stop", "--session", self.session_id)
         self.assertEqual((self.session / "git-repositories.json").read_bytes(), registry)
         self.assertEqual(self.run_command(["podman", "volume", "exists", volume], check=False).returncode, 0)
-        # Fetch automatically recreates just the sidecar, preserving its volume.
+        # Fetch recreates Git and its network holder, preserving the volume.
         self.git(self.project, "fetch", self.remote)
         self.git(reference, "fetch", self.remote)
         self.assert_isolation()
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/host-update:source").stdout, "published\n")
         self.assertEqual(self.git(self.project, "show", f"{self.remote}/manual-worktree-branch:source").stdout, "published\n")
         containers = json.loads(self.cli("containers", "--session", self.session_id, "--json").stdout)
-        self.assertEqual([c["name"] for c in containers], [self.config()["services"]["git"]["container_name"]])
+        services = self.config()["services"]
+        self.assertEqual({c["name"] for c in containers},
+                         {services[service]["container_name"] for service in ("git", "git-network")})
         self.assertEqual(json.loads(self.cli("list", "--json").stdout)[0]["status"], "stopped")
         self.cli("remove", "--session", self.session_id)
         self.assertNotIn(self.remote, self.git(self.project, "remote").stdout.splitlines())

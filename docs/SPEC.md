@@ -69,7 +69,12 @@ A developer runs an agent for the first time on a project and wants to observe i
 
 ### 4.1 Network Isolation
 
-The agent container has no default gateway to the internet. It is attached only to an internal Podman network. The proxy container is attached to both the internal network and an external network with internet connectivity.
+The agent container has no default gateway to the internet. Its namespace is attached only to an internal Podman network. The proxy namespace is attached to both the internal network and an external network with internet connectivity.
+
+The proxy and Git sidecar use separate network namespace holders.
+These retain the Podman-assigned IPs through sidecar restarts while the holders
+run. Only the proxy holder joins the external network and publishes the web UI
+on host loopback.
 
 The agent and trusted one-shot guard join a minimal holder's network namespace. Before launch, the host
 installs an nftables default-deny policy there allowing TCP on the namespace's
@@ -148,7 +153,7 @@ External agent HTTP(S) traffic passes through the TLS-intercepting proxy. It ter
 
 The Git service is attached only to the internal network and publishes no ports. Host remotes use `git-remote-agentbox` to stream pack operations through Podman exec, starting the sidecar when needed. Git services explicitly disable hooks and validate incoming objects. Sharing commands never force-push, while manual Git retains normal ref-update semantics. No host `.git/`, output repository, or sidecar volume is exposed as an agent mount.
 
-Host fetching, review, and merging are manual. Ordinary exit/stop retains the Git volume in both session modes; host Git starts only the sidecar when needed to fetch afterward. Ephemeral agents clone retained repositories again, while persistent agents keep their existing working trees. `remove` deletes the Git volume and matching registered host remotes, so wanted work must be fetched first.
+Host fetching, review, and merging are manual. Ordinary exit/stop retains the Git volume in both session modes; host Git starts only the Git sidecar and its holder when needed to fetch afterward. Ephemeral agents clone retained repositories again, while persistent agents keep their existing working trees. `remove` deletes the Git volume and matching registered host remotes, so wanted work must be fetched first.
 
 **No-git mode.** `--no-git` explicitly bind-mounts the project read/write at `/workspace`, bypassing Git isolation. Without that flag, a non-Git project gets an empty local workspace rather than an implicit host mount.
 
