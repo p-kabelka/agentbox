@@ -8,11 +8,21 @@ RUN dnf install -y curl jq $([ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0
 ARG AGENTBOX_BUILD_OPENCODE_VERSION=latest
 RUN --mount=type=secret,id=gh_token \
     set -eu; \
+    gh_token=; \
+    if [ -f /run/secrets/gh_token ]; then gh_token=$(cat /run/secrets/gh_token); fi; \
+    if [ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ] && [ -z "$gh_token" ]; then \
+        echo "Error: gh_token build secret is required for OpenCode attestation verification" >&2; \
+        exit 1; \
+    fi; \
     version="$AGENTBOX_BUILD_OPENCODE_VERSION"; \
     if [ "$version" = "latest" ]; then \
         page=1; \
         while :; do \
-            releases=$(curl -fsSL "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100&page=$page"); \
+            releases=$( \
+                if [ -n "$gh_token" ]; then printf 'Authorization: Bearer %s\n' "$gh_token"; fi | \
+                curl -fsSL --header @- --header 'X-GitHub-Api-Version: 2026-03-10' \
+                    "https://api.github.com/repos/anomalyco/opencode/releases?per_page=100&page=$page" \
+            ); \
             version=$(printf '%s\n' "$releases" | jq -r 'first(.[] | select(.draft == false and .prerelease == false and (.tag_name | test("^v2\\.[0-9]+\\.[0-9]+$")))) | .tag_name // empty'); \
             if [ -n "$version" ]; then break; fi; \
             if [ "$(printf '%s\n' "$releases" | jq length)" -eq 0 ]; then \
@@ -26,7 +36,7 @@ RUN --mount=type=secret,id=gh_token \
     curl -fsSLo /tmp/opencode.tar.gz \
         "https://github.com/anomalyco/opencode/releases/download/$version/opencode-linux-x64.tar.gz" && \
     if [ "$AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION" = "0" ]; then \
-        GH_TOKEN=$(cat /run/secrets/gh_token) \
+        GH_TOKEN="$gh_token" \
         gh release verify-asset "$version" /tmp/opencode.tar.gz \
             --repo anomalyco/opencode; \
     else \

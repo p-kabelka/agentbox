@@ -534,7 +534,6 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
     extra = ["--no-cache"] if no_cache else []
 
     targets = harnesses if harnesses else list(HARNESS_CONTAINERFILES.keys())
-    build_env = dict(os.environ)
 
     for name in targets:
         agent_ctx = AGENTBOX_HOME / (name if name in ("proxy", "git", "network") else "agent")
@@ -556,17 +555,17 @@ def _build_images(no_cache: bool = False, harnesses: list[str] | None = None, ta
 
         build_args = [] if name in ("base", "proxy", "git", "network") else ["--build-arg", f"AGENTBOX_IMAGE_TAG={tag}"]
         secret_args: list[str] = []
+        build_env = dict(os.environ)
         if name == "opencode":
             skip_opencode_verify = os.environ.get("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION", "")
-            gh_token = None if skip_opencode_verify else _resolve_gh_token()
+            gh_token = _resolve_gh_token()
             if skip_opencode_verify:
                 build_args += ["--build-arg", "AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1"]
-            elif gh_token:
-                secret_args = ["--secret", f"id=gh_token,env=_AGENTBOX_GH_TOKEN"]
-            else:
+            elif not gh_token:
                 die("Error: no GH_TOKEN found, opencode build will fail without attestation verification\n"
                     "       Set AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1 to skip verification")
             if gh_token:
+                secret_args = ["--secret", "id=gh_token,env=_AGENTBOX_GH_TOKEN"]
                 build_env["_AGENTBOX_GH_TOKEN"] = gh_token
 
         print(f"==> Building {name} image...")

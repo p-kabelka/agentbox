@@ -253,7 +253,9 @@ validation, canonical fingerprints, and framing with the host; no additional hos
 
 **Harness images** — Each supported agent harness has its own Containerfile extending the base:
 - `Containerfile.claude` — Imports Claude Code's GPG signing key, adds the official RPM repository, and installs `claude-code` via `dnf`.
-- `Containerfile.opencode` — Multi-stage build: downloads the newest stable `v2.*` OpenCode release from GitHub by default (rather than GitHub's `latest`, which tracks v1). Set `--build-arg AGENTBOX_BUILD_OPENCODE_VERSION=v2.2.4` to pin a release; versions with or without the `v` prefix are accepted, including older v1 releases. Attestation verification uses the selected release tag via `gh release verify-asset` (requires the `gh_token` build secret; can be skipped with `AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1`). Use `agentbox update opencode` or `podman build --no-cache` to refresh the default version instead of reusing a cached download.
+- `Containerfile.opencode` — Multi-stage build: downloads the newest stable `v2.*` OpenCode release from GitHub by default (rather than GitHub's `latest`, which tracks v1). Set `--build-arg AGENTBOX_BUILD_OPENCODE_VERSION=v2.2.4` to pin a release; versions with or without the `v` prefix are accepted, including older v1 releases.
+  Agentbox resolves the `gh_token` build secret from `GH_TOKEN`, `GITHUB_TOKEN`, or `gh auth token`. The build uses it for the GitHub release API lookup and `gh release verify-asset`, but not for the public archive download. `AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1` skips verification, not API authentication when a token is available.
+  Use `agentbox update opencode` or `podman build --no-cache` to refresh the default version instead of reusing a cached download.
 - `Containerfile.cursor` — Installs Cursor via the official install script.
 
 Harness Containerfiles accept an `AGENTBOX_IMAGE_TAG` build argument (default

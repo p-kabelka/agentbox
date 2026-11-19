@@ -200,7 +200,7 @@ class ImageTagsTest(unittest.TestCase):
                         if override is not None:
                             argv += ["--tag", override]
                         tag = override or env_tag
-                        with (patch.dict(self.g, AGENTBOX_IMAGE_TAG=env_tag),
+                        with (patch.dict(self.g, AGENTBOX_IMAGE_TAG=env_tag, _resolve_gh_token=lambda: None),
                               patch.dict(os.environ, AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION="1"),
                               patch.object(sys, "argv", argv), redirect_stdout(io.StringIO()),
                               patch.object(subprocess, "run") as run):
@@ -231,7 +231,7 @@ class ImageTagsTest(unittest.TestCase):
         self.assertEqual(args[args.index("--build-arg") + 1], "AGENTBOX_IMAGE_TAG=stage")
 
     def test_default_build_includes_base_before_harnesses(self):
-        with (patch.dict(self.g, AGENTBOX_IMAGE_TAG="stage"),
+        with (patch.dict(self.g, AGENTBOX_IMAGE_TAG="stage", _resolve_gh_token=lambda: None),
               patch.dict(os.environ, AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION="1"),
               patch.object(sys, "argv", ["agentbox", "build"]), redirect_stdout(io.StringIO()),
               patch.object(subprocess, "run") as run):
@@ -245,16 +245,25 @@ class ImageTagsTest(unittest.TestCase):
         self.assertEqual(images[0], "localhost/agentbox-agent-base:stage")
         self.assertEqual(set(images), expected)
 
-    def test_tagged_build_preserves_verification_secret(self):
-        with (patch.dict(self.g, _resolve_gh_token=lambda: "test-token"),
-              patch.dict(os.environ, AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=""),
-              redirect_stdout(io.StringIO()), patch.object(subprocess, "run") as run):
-            self.agentbox["_build_images"](harnesses=["opencode"], tag="stage")
-        args = run.call_args.args[0]
-        self.assertEqual(args[args.index("--build-arg") + 1], "AGENTBOX_IMAGE_TAG=stage")
-        self.assertEqual(args[args.index("--secret") + 1], "id=gh_token,env=_AGENTBOX_GH_TOKEN")
-        self.assertEqual(run.call_args.kwargs["env"]["_AGENTBOX_GH_TOKEN"], "test-token")
-        self.assertNotIn("test-token", args)
+    def test_tagged_opencode_build_passes_token_independently_of_verification(self):
+        for skip, token in (("", "test-token"), ("1", "test-token"), ("1", None)):
+            with (self.subTest(skip=skip, has_token=bool(token)),
+                  patch.dict(self.g, _resolve_gh_token=lambda: token),
+                  patch.dict(os.environ, AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=skip),
+                  redirect_stdout(io.StringIO()), patch.object(subprocess, "run") as run):
+                os.environ.pop("_AGENTBOX_GH_TOKEN", None)
+                self.agentbox["_build_images"](harnesses=["opencode", "cursor"], tag="stage")
+                opencode, cursor = run.call_args_list
+                args = opencode.args[0]
+                self.assertEqual(args[args.index("--build-arg") + 1], "AGENTBOX_IMAGE_TAG=stage")
+                self.assertEqual("AGENTBOX_BUILD_OPENCODE_SKIP_VERIFICATION=1" in args, bool(skip))
+                if token:
+                    self.assertEqual(args[args.index("--secret") + 1], "id=gh_token,env=_AGENTBOX_GH_TOKEN")
+                    self.assertNotIn(token, args)
+                else:
+                    self.assertNotIn("--secret", args)
+                self.assertEqual(opencode.kwargs["env"].get("_AGENTBOX_GH_TOKEN"), token)
+                self.assertNotIn("_AGENTBOX_GH_TOKEN", cursor.kwargs["env"])
 
     def test_harness_containerfiles_use_selected_base_tag(self):
         for path in sorted((ROOT / "agent").glob("Containerfile.*")):
