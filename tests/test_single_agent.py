@@ -38,9 +38,9 @@ class SingleAgentTest(unittest.TestCase):
     def make_session(self, name):
         session = self.root / name
         session.mkdir()
-        (session / "compose.yaml").write_text(yaml.safe_dump({
-            "x-metadata": {"name": name, "project-dir": str(self.root), "persist": False},
-        }))
+        config = yaml.safe_load((ROOT / "compose-base.yaml").read_text())
+        config["x-metadata"] = {"name": name, "project-dir": str(self.root), "persist": False}
+        (session / "compose.yaml").write_text(yaml.safe_dump(config))
         return session
 
     def compose(self, session, *args, **kwargs):
