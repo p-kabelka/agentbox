@@ -167,6 +167,19 @@ must be migrated or replaced before use with this version.
 In generated Compose files, network settings such as proxy DNS,
 `extra_hosts`, and the loopback web UI port belong to `services.proxy-network`.
 
+#### Temporary upgrade for existing sessions
+
+While this migration is installed, stop any running session, then run
+`agentbox start --name NAME` once for each session from the preceding layout.
+Use `agentbox list --all` to find other sessions and `--session ID` to start them
+from another directory. Start before re-running `init` or fetching through the
+host Git remote. The migration replaces only the proxy and Git containers,
+preserves named volumes and the persistent agent (including its saved command),
+and stores the original `compose.yaml` as `compose.yaml.pre-sidecar-holders`.
+Avoid concurrent Git transfers while migrating. Once every needed session has
+been started successfully, the migration code can be reverted; the rewritten
+session files will still work with the new layout.
+
 This uses the standard Agentbox image entrypoint and managed session metadata.
 A custom entrypoint must invoke `agentbox-network` before using sidecar names
 or passt networking; the outer firewall is already installed before launch.

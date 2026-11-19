@@ -657,8 +657,13 @@ def _parse_git_url(url: str) -> tuple[Path, str]:
 
 
 def _start_git(session_dir: Path) -> None:
-    if not (session_dir / "compose.yaml").is_file():
+    path = session_dir / "compose.yaml"
+    if not path.is_file():
         die("session removed before starting Git")
+    # A host Git command must not recreate a legacy Git container between
+    # startup migration removing it and publishing the new Compose file.
+    if not _has_sidecar_holders(load_yaml(path)["services"]):
+        die(f"run agentbox start --session {session_dir.name} to migrate this session before using host Git")
     # Never recreate a running or retained agent after user edits to Compose.
     # The only Git dependency is its own network holder.
     compose(session_dir, "up", "-d", "--no-recreate", "git", check=True, stdout=sys.stderr)
@@ -856,6 +861,84 @@ def _create_persistent_agent(session_dir: Path, project: str, name: str, cmd: li
         die("Compose did not create the persistent agent service container")
 
 
+def _has_sidecar_holders(services: dict) -> bool:
+    return all(f"{name}-network" in services and services.get(name, {}).get("network_mode") == f"service:{name}-network"
+               for name in ("proxy", "git"))
+
+
+def _migrate_sidecar_holders(session_dir: Path) -> None:
+    """Upgrade the preceding Compose layout under the startup and sync locks."""
+    path = session_dir / "compose.yaml"
+    original = path.read_bytes()
+    config = yaml.safe_load(original)
+    services = config["services"]
+    if _has_sidecar_holders(services):
+        return
+    if ("proxy-network" in services or "git-network" in services or
+            services.get("agent", {}).get("network_mode") != "service:network" or
+            any(service not in services for service in ("network", "guard", "proxy", "git"))):
+        die("cannot migrate this session layout; expected the original agent network holder and both direct sidecars")
+
+    templates = load_yaml(AGENTBOX_HOME / "compose-base.yaml")["services"]
+    old_containers = []
+    for name, networks in (("proxy", {"agent-net", "proxy-net"}), ("git", {"agent-net"})):
+        service = services[name]
+        old_name = _service_container_name(session_dir, name)
+        attachments = service.pop("networks", None)
+        if isinstance(attachments, list):
+            attachments = dict.fromkeys(attachments)
+        if (not isinstance(attachments, dict) or set(attachments) != networks or
+                service.get("container_name") != old_name or "network_mode" in service or
+                (name == "git" and service.get("ports"))):
+            die(f"cannot migrate the customized {name} network layout; no containers were changed")
+        old_containers.append(old_name)
+
+        holder_name = f"{name}-network"
+        holder = {**templates[holder_name], "image": services["network"]["image"],
+                  "container_name": _service_container_name(session_dir, holder_name), "networks": {}}
+        for net, options in attachments.items():
+            options = options if options is not None else {}
+            aliases = options.get("aliases", []) if isinstance(options, dict) else None
+            if not isinstance(aliases, list) or not all(isinstance(alias, str) for alias in aliases):
+                die(f"cannot migrate invalid network options on {name}")
+            holder["networks"][net] = {**options, "aliases": list(dict.fromkeys([*aliases, name]))}
+        for option in ("ports", "extra_hosts", "dns", "dns_opt", "dns_search", "mac_address"):
+            if option in service:
+                holder[option] = service.pop(option)
+        deps = service.get("depends_on", [])
+        if isinstance(deps, dict):
+            service["depends_on"] = {**deps, holder_name: {"condition": "service_started"}}
+        elif isinstance(deps, list):
+            service["depends_on"] = [*deps, holder_name]
+        else:
+            die(f"cannot migrate invalid dependencies on {name}")
+        service["network_mode"] = f"service:{holder_name}"
+        services[holder_name] = holder
+
+    with _git_metadata_lock(session_dir):
+        backup = path.with_suffix(".yaml.pre-sidecar-holders")
+        try:
+            fd = os.open(backup, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass  # A failed attempt can be retried without replacing the backup.
+        else:
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(original)
+        with tempfile.NamedTemporaryFile(mode="w", dir=session_dir, prefix=".compose-migration-",
+                                         delete=False) as stream:
+            candidate = Path(stream.name)
+        try:
+            save_yaml(candidate, config)
+            # Never use down, --volumes, or recursive removal. Podman must refuse
+            # removal if any retained container explicitly depends on a sidecar.
+            subprocess.run(["podman", "stop", "--ignore", *old_containers], check=True)
+            subprocess.run(["podman", "rm", "--ignore", *old_containers], check=True)
+            os.replace(candidate, path)
+        finally:
+            candidate.unlink(missing_ok=True)
+    print(f"==> Migrated proxy and Git network holders; original Compose saved to {backup}.", flush=True)
+
+
 def _run_persistent_agent(session_dir: Path, project: str, name: str) -> int:
     exit_code = None
     try:
@@ -895,6 +978,7 @@ def _launch(session_dir: Path, cmd: list[str] | None = None) -> None:
                     containers.get(_service_container_name(session_dir, "proxy")))
 
             full, providers, sources = _secret_preflight(session_dir)
+            _migrate_sidecar_holders(session_dir)
             try:
                 # Never recreate retained services after a Compose YAML edit.
                 compose(session_dir, "up", "-d", "--no-recreate", "proxy", "git", "network", check=True)
@@ -931,6 +1015,8 @@ def cmd_init(args) -> None:
     with _secret_sync_lock(session_dir, initializing=True):
         if (session_dir / "compose.yaml").is_file():
             meta = read_compose_metadata(session_dir)
+            if not _has_sidecar_holders(load_yaml(session_dir / "compose.yaml")["services"]):
+                die(f"run agentbox start --name {name} to migrate the existing session before re-initializing")
             if _persistent(meta) != args.persist:
                 die("cannot change a session's persistence mode; create a new named session")
             if meta.get("no-git", False) != args.no_git:
